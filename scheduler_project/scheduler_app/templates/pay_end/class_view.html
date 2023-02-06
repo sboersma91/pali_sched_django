@@ -1,0 +1,12 @@
+{% extends 'pay_end/base_pay.html' %}
+{% block content %}
+<!-- this page has no link -->
+<h1>Attempt 100:</h1>
+
+<p>below is the winning block</p>
+{% for loc in location.all %}
+    <h4><strong>{{ loc.loc_name }}</strong></h4>
+    <h5>{{ loc.loc_short }} </h5>
+    <h6>{{ loc.description }} </h6>
+{% endfor %}
+{% endblock %}

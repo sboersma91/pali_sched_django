@@ -1,0 +1,21 @@
+{% extends 'pay_end/base_pay.html' %}
+{% block content %}
+    <center>
+        <h1>{{school}} Details</h1>
+        <!-- <ul>{{ school.id }}</ul> -->
+        <ul>Abriviation: {{ school.school_name }}</ul>
+        {% for sch in school.subject.all %}
+        
+        <ul>Description: {{ sch }}</ul>
+        {% endfor %}
+        
+        <ul><strong>Arrive: </strong>{{school.arrive}}</ul>
+        <ul><strong>Depart: </strong>{{school.depart}}</ul>
+        <ul><strong>total_students: </strong>{{school.total_students}}</ul>
+        <p>{{ school.ag_numbers }}</p>
+        <hr>
+        <p> <strong>Sorted School list: </strong> {{ school.sort_subjects }}</p>
+       
+      
+    </center>
+{% endblock%}

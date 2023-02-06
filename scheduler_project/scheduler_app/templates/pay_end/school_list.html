@@ -1,0 +1,16 @@
+{% extends 'pay_end/base_pay.html' %}
+{% block content %}
+<a href="{% url 'school-create' %}">Add New School</a> 
+    <center>
+        <h1>School List html</h1>
+    {% for s in school.all %}
+    <h4><strong>{{ s.school_name }}</strong></h4>
+    <a href="{% url 'school-detail' s.id %}">Details</a>
+    <a href="{% url 'school-update' s.id %}">Update</a>
+    <a href="{% url 'school-delete' s.id %}">Delete</a>
+    <hr>
+    {% empty %}
+    <h4>You have not made any schools yet</h4>
+    {% endfor %}
+    </center>
+{% endblock%}

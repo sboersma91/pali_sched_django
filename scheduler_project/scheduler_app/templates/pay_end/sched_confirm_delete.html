@@ -1,0 +1,15 @@
+{% extends 'pay_end/base_pay.html' %}
+{% block title %}Add sched{% endblock title %}
+{% block content %}
+
+
+ <a href="{% url 'sched-list' %}"> Go Back</a>
+
+<form method="POST">
+    {% csrf_token %}
+    <p>Are your sure you want to delete this sched? <b>{{sched}}</b> </p>
+    <input class="button" type="submit" value="Delete" />
+</form>
+
+
+{% endblock content %}

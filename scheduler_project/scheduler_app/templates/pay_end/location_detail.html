@@ -1,0 +1,14 @@
+{% extends 'pay_end/base_pay.html' %}
+{% block content %}
+    <center>
+        <h1>{{location}} Details</h1>
+        <!-- <ul>{{ location.id }}</ul> -->
+        <ul>Abriiation: {{ location.loc_short }}</ul>
+        <ul>Description: {{ location.description }}</ul>
+        {% if location.availible %}
+        <ul>Availible</ul>
+        {% else %}
+        <ul>Not Availible</ul>
+        {% endif %}
+    </center>
+{% endblock%}

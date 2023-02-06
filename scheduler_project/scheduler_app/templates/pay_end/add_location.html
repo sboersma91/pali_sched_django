@@ -1,0 +1,22 @@
+{% extends 'pay_end/base_pay.html' %}
+{% block title %}Add location{% endblock title %}
+{% block content %}
+    <center>
+        <h1>Add a location</h1>
+        {% if submitted %}
+            You have added a Location!
+            <br>
+            <form action="", method=POST>
+                {% csrf_token %}
+                {{ form.as_p }}
+            <input type="submit" value="Submit" class="btn btn-secondary">
+            </form>
+        {% else %}
+            <form action="", method=POST>
+                {% csrf_token %}
+                {{ form.as_p }}
+            <input type="submit" value="Submit" class="btn btn-secondary">
+            </form>
+        {% endif %}
+    </center>
+{% endblock %}

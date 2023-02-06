@@ -1,0 +1,18 @@
+{% extends 'pay_end/base_pay.html' %}
+{% block content %}
+<a href="{% url 'course-create' %}">Add New Course</a> 
+    <center>
+        <h1>Courses List html</h1>
+    {% for c in course.all %}
+    <h4><strong>{{ c.course_name }}</strong></h4>
+    <a href="{% url 'course-detail' c.id %}">Details</a>
+    <a href="{% url 'course-update' c.id %}">Update</a>
+    <a href="{% url 'course-delete' c.id %}">Delete</a>
+    <!-- <h5>{{ loc.loc_short }} </h5>
+    <h6>{{ loc.description }} </h6> -->
+    <hr>
+    {% empty %}
+    <h4>You have not made any locations yet</h4>
+    {% endfor %}
+    </center>
+{% endblock%}

@@ -1,0 +1,14 @@
+{% extends 'pay_end/base_pay.html' %}
+
+{% block content %}
+    <center>
+        <h1>{{course}} Details</h1>
+        <!-- <ul>{{ course.id }}</ul> -->
+        {% for p_loc in course.primary_locs.all %}
+        <ul><strong>Course Locations: </strong>{{ p_loc }}</ul>
+        {% endfor %}
+        <ul><strong>Course Length: </strong>{{ course.course_len }} </ul>
+        <hr><hr>
+        <!-- need to loop through the locations currently coming up as app.loctions.none??? -->
+    </center>
+    {% endblock %}

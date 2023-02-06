@@ -1,0 +1,11 @@
+{% extends 'pay_end/base_pay.html' %}
+{% block content %}
+    <center>
+        {% if seach_box %}
+        <h1>Search Results {{ search_box }} </h1>
+        {% else %}
+            <h1>Congrats you hit the seach bar and idk how to get it to work and will be working on it later</h1>
+            <p>############ This search function has not been gotten to work thus far.  ###########</p>
+        {% endif %}
+    </center>
+{% endblock %}

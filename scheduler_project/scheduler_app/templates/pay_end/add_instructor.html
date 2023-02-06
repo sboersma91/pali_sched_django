@@ -1,0 +1,19 @@
+{% extends 'pay_end/base_pay.html' %}
+{% block content %}
+    <center>
+        <h1>Add instructor</h1>
+        {% if submitted %}
+            You have added another instuctor!
+            <br>
+            <div class="btn-group">
+                <a href="{% url 'add-instructor' %}" class="btn btn-primary active">add another?</a>>
+            </div>
+        {% else %}
+        <form action="", method=POST>
+            {% csrf_token %}
+            {{ form.as_p }}
+            <input type="submit" class="btn btn-secondary">
+        </form>
+        {% endif %}
+    </center>
+{% endblock%}

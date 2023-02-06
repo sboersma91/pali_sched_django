@@ -1,0 +1,14 @@
+{% extends 'pay_end/base_pay.html' %}
+{% block title %}Add location{% endblock title %}
+{% block content %}
+
+
+ <a href="{% url 'school-list' %}"> Go Back</a>
+
+<form method="POST">
+    {% csrf_token %}
+    <p>Are your sure you want to delete<b>{{school}}</b> </p>
+    <input class="button" type="submit" value="Delete" />
+</form>
+
+{% endblock content %}

@@ -1,0 +1,18 @@
+{% extends 'pay_end/base_pay.html' %}
+{% block content %}
+<a href="{% url 'add-loc' %}">Add New Location</a> 
+    <center>
+        <h1>Locations List html</h1>
+    {% for loc in location.all %}
+    <h4><strong>{{ loc.loc_name }}</strong></h4>
+    <a href="{% url 'location-detail' loc.id %}">Details</a>
+    <a href="{% url 'location-update' loc.id %}">Update</a>
+    <a href="{% url 'location-delete' loc.id %}">Delete</a>
+    <!-- <h5>{{ loc.loc_short }} </h5>
+    <h6>{{ loc.description }} </h6> -->
+    <hr>
+    {% empty %}
+    <h4>You have not made any locations yet</h4>
+    {% endfor %}
+    </center>
+{% endblock%}

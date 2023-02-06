@@ -1,0 +1,23 @@
+{% extends 'pay_end/base_pay.html' %}
+{% block content %}
+    <center>
+        <h1>{{sched}} Details</h1>
+        <ul>{{ sched.id }}</ul>
+        <ul>Name: {{ sched.sched_name }}</ul>
+        <ul>Schools: {{ sched.lst_of_school }}</ul>
+        <hr>
+        <ul>The Schedule: </ul>
+        <ul>{{ sched.create_sched }}</ul>
+        <hr><hr>
+        <h3>Here is the non table version of this</h3>
+        {% for key, value in sched.create_sched.items %}
+            <strong>{{ key }}</strong>
+            {% for v in value %}
+            {{ v }}
+        {% endfor %}
+        {% endfor %}
+
+       
+
+    </center>
+{% endblock%}

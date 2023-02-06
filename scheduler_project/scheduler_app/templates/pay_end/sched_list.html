@@ -1,0 +1,16 @@
+{% extends 'pay_end/base_pay.html' %}
+{% block content %}
+<a href="{% url 'sched-create' %}">Add New Course</a> 
+    <center>
+        <h1>Schedule List html</h1>
+    {% for s in sched.all %}
+    <h4><strong>{{ s.sched_name }}</strong></h4>
+    <a href="{% url 'sched-detail' s.id %}">Details</a>
+    <a href="{% url 'sched-update' s.id %}">Update</a>
+    <a href="{% url 'sched-delete' s.id %}">Delete</a>
+    <hr>
+    {% empty %}
+    <h4>No schedules exist</h4>
+    {% endfor %}
+    </center>
+{% endblock %}
