@@ -20,5 +20,5 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('', include('scheduler_app.urls')),
     path('members/',include('django.contrib.auth.urls')),
-    path('members/', include('members.url')),
+    path('members/', include('members.urls')),
 ]
