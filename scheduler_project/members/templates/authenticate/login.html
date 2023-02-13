@@ -1,13 +1,14 @@
 <!-- Log in page -->
 
 {% extends 'sched_app_template/base.html' %}
-{% block title %}login{% endblock title %}
+{% block title %}Login{% endblock title %}
 {% block content %}
-
+</center>
     <center>
         <h1>Login</h1>
         <br><br>
-        <form action="" method=POST>
+        <form action="{% url 'login' %}" method=POST>
+            <!-- action=? -->
             {% csrf_token %}
                 <div class="mb-3">
                   <label for="exampleInputEmail1" class="form-label">Email address</label>
@@ -23,7 +24,7 @@
 
 
 
-            <input type="submit" name="" id="">
+            <!-- <input type="submit" name="" id=""> -->
         </form>
 
     </center>
