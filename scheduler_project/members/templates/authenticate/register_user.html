@@ -1,0 +1,27 @@
+<!-- Log in page -->
+
+{% extends 'sched_app_template/base.html' %}
+{% block title %}New User{% endblock title %}
+{% block content %}
+
+{% if form.errors %}
+<p>Something went wrong??</p>
+{% endif %}
+
+        <h1>User Registratioon</h1>
+        <br><br>
+        <form action="{% url 'register_user' %}" method=POST>
+            <!-- action=? -->
+            {% csrf_token %}
+                {{ form.as_p }}
+            
+                <button type="submit" class="btn btn-primary">Submit</button>
+
+
+
+            <!-- <input type="submit" name="" id=""> -->
+        </form>
+
+
+
+{% endblock %}
