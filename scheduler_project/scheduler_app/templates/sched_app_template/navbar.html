@@ -9,14 +9,21 @@
           <li class="nav-item">
             <a class="nav-link" href="#">Plans</a>
           </li>
-          
           <li class="nav-item">
             <a class="nav-link" href="#">Contact</a>
           </li>
-
+          {% if user.is_authenticated %}
           <li class="nav-item">
-            <a class="nav-link" href="#">Add Venue</a>
+            <a class="nav-link" href="{% url 'logout' %}">Logout</a>
           </li>
+          {% else %}
+          <li class="nav-item">
+            <a class="nav-link" href="{% url 'login' %}">Login</a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link" href="{% url 'register_user' %}">Create New Account</a>
+          </li>
+          {% endif %}
 
           <li class="nav-item">
             <a class="nav-link" href="{% url 'home-paid' %} ">Payed</a>

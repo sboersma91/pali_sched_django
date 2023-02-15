@@ -13,6 +13,13 @@
   <body>
     {% include 'sched_app_template/navbar.html' %}
     <div class="container">
+      {% if mesages %}
+        {% for message in messages %}
+        <div class="alert alert-danger" role="alert">
+          {{message}}
+        </div>
+        {% endfor %}
+      {% endif %}
       {% block content %}
 
 
