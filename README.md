@@ -8,7 +8,7 @@ This repository appears to be an older **Django (Python)** scheduling applicatio
 - A members/auth app (`members`) for login/logout/registration flows.
 - SQLite as the default local database.
 
-Based on the current codebase state, the project seems to be in a **foundation/stabilization phase** (orientation, documentation, setup clarity, and safe incremental cleanup) rather than active feature expansion.
+Based on the current codebase state, the project is in a **foundation/stabilization phase** (orientation, documentation, setup clarity, and safe incremental cleanup) rather than active feature expansion.
 
 ---
 
@@ -17,6 +17,8 @@ Based on the current codebase state, the project seems to be in a **foundation/s
 ```text
 .
 ├── AGENTS.md
+├── README.md
+├── requirements.txt
 ├── scheduler_project/
 │   ├── manage.py
 │   ├── db.sqlite3
@@ -30,6 +32,7 @@ Based on the current codebase state, the project seems to be in a **foundation/s
 │   │   ├── views.py
 │   │   ├── forms.py
 │   │   ├── urls.py
+│   │   ├── tests.py              # smoke tests (currently 5 tests)
 │   │   ├── migrations/
 │   │   ├── templates/
 │   │   └── extra-files/          # legacy/experimental helper files
@@ -42,9 +45,7 @@ Based on the current codebase state, the project seems to be in a **foundation/s
 
 ---
 
-## 3) Local development setup
-
-> This section is practical and beginner-friendly, but dependency setup is currently incomplete in-repo.
+## 3) Local development setup (verified baseline)
 
 ### Prerequisites
 
@@ -52,11 +53,13 @@ Based on the current codebase state, the project seems to be in a **foundation/s
 - `pip`
 - A virtual environment tool (`venv` is fine)
 
-### Dependency status (important)
+### Dependency status
 
-There is currently **no confirmed dependency manifest** (`requirements.txt`, `pyproject.toml`, or `Pipfile`) at repository root. That means environment setup is currently incomplete and must be reconstructed.
+A pinned dependency manifest now exists at repository root:
 
-### Recommended setup steps (partially unverified)
+- `requirements.txt` with `Django==4.1.5`
+
+### Setup steps (verified in local `.venv` workflow)
 
 From the repository root:
 
@@ -65,17 +68,15 @@ From the repository root:
 python3 -m venv .venv
 source .venv/bin/activate
 
-# 2) install Django (version inferred from settings comments)
-pip install "django==3.2.9"
+# 2) install dependencies
+python3 -m pip install -r requirements.txt
 
 # 3) move into Django project folder
 cd scheduler_project
 
-# 4) run migrations
-python manage.py migrate
+# 4) apply migrations
+python3 manage.py migrate
 ```
-
-Because there is no pinned dependency file, these commands are **recommended but currently unverified as a complete setup**.
 
 ---
 
@@ -84,7 +85,7 @@ Because there is no pinned dependency file, these commands are **recommended but
 From `scheduler_project/`:
 
 ```bash
-python manage.py runserver
+python3 manage.py runserver
 ```
 
 Then open:
@@ -95,51 +96,47 @@ Then open:
 
 ---
 
-## 5) Run basic checks/tests (if available)
+## 5) Run checks/tests
 
 From `scheduler_project/`:
 
 ```bash
 # framework/system checks
-python manage.py check
+python3 manage.py check
 
 # run test suite
-python manage.py test
+python3 manage.py test
 ```
 
-Current tests are mostly placeholders, so `test` currently functions more as a smoke check than full regression coverage.
-
-If dependencies are missing, treat these commands as **recommended but unverified** until the environment is fully pinned.
+Current automated coverage is intentionally minimal: a **5-test smoke suite** focused on URL config importability, URL reversing, and Django check command execution.
 
 ---
 
 ## 6) Known current limitations / likely setup issues
 
-These are observed from inspection and should be treated as known risks:
+These are known risks during this stabilization phase:
 
-- **Dependency setup incomplete:** no committed dependency lock/manifest at repo root.
+- **Behavioral coverage is still shallow:** current tests are smoke-level only and do not yet validate deeper scheduling behavior.
 - **Potential form/model mismatch issues:** some form fields appear out of sync with model field names.
 - **Potential routing name mismatch:** at least one redirect target name may not match configured route names.
 - **Import-time DB logic in models:** some model module code performs DB access at import time, which can be fragile during migrations/tests.
-- **Limited automated tests:** test modules exist but are mostly placeholders.
 - **Development-only settings:** `DEBUG=True`, static secret key in settings (acceptable for local dev only, not production).
 
-These are not fixed in this documentation update; they are listed to improve onboarding clarity.
+These are not fixed in this documentation update; they are listed to keep onboarding practical and transparent.
 
 ---
 
 ## 7) Suggested next foundation tasks
 
-1. **Create a real dependency baseline**
-   - Add `requirements.txt` (or `pyproject.toml`) with pinned versions.
-   - Document exact Python and Django versions used.
+1. **Expand smoke tests into small behavioral checks**
+   - Add low-risk tests for key views/forms and expected HTTP responses.
 
-2. **Add a minimal smoke-test safety net**
-   - Add basic tests for URL resolution, homepage rendering, and core app import/startup.
-
-3. **Perform a narrow integrity pass (no feature changes)**
+2. **Perform a narrow integrity pass (no feature changes)**
    - Validate forms, route names, and startup flow.
    - Fix only obvious breakpoints in small reviewable commits.
+
+3. **Document app architecture in more detail**
+   - Add a short “data flow” section mapping models, views, templates, and URLs.
 
 ---
 
@@ -148,9 +145,8 @@ These are not fixed in this documentation update; they are listed to improve onb
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install "django==3.2.9"   # recommended, unverified baseline
+python3 -m pip install -r requirements.txt
 cd scheduler_project
-python manage.py migrate
-python manage.py runserver
+python3 manage.py migrate
+python3 manage.py runserver
 ```
-
