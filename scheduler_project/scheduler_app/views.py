@@ -1,4 +1,3 @@
-from re import template
 from django.shortcuts import render
 from .models import Locations, Course, Schools, TheSched
 from .forms import InstructorForm, LocationsForm, CourseForm, SchoolsForm
