@@ -154,7 +154,7 @@ def add_location(request):
     location = Locations.objects
     if request.method == "POST":
         form = LocationsForm(request.POST)
-        if form.is_valid:
+        if form.is_valid():
             form.save()
             return HttpResponseRedirect('/add_location?submitted=True')
         # if not form.is_valid: probably reload page? or redirect with submitted in the thing?
@@ -169,7 +169,7 @@ def add_course(request):
     submitted = False
     if request.method == "POST":
         form = CourseForm(request.POST)
-        if form.is_valid:
+        if form.is_valid():
             form.save()
             return HttpResponseRedirect('/add_course?submitted=True')
     else:
@@ -183,7 +183,7 @@ def add_instructor(request):
     submitted=False
     if request.method == "POST":
         form = InstructorForm
-        if form.is_valid:
+        if form.is_valid():
             form.save()
             return HttpResponseRedirect('/add_instructor.html?sumbitted=True')
         else:
@@ -198,7 +198,7 @@ def add_school(request):
     submitted = False
     if request.method == "POST":
         form = SchoolsForm(request.POST)
-        if form.is_valid:
+        if form.is_valid():
             form.save()
             return HttpResponseRedirect('/add_school?submitted=True')
             # added the ppl_temps to the front of ^^^
