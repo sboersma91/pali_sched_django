@@ -182,7 +182,7 @@ def add_course(request):
 def add_instructor(request):
     submitted=False
     if request.method == "POST":
-        form = InstructorForm
+        form = InstructorForm(request.POST)
         if form.is_valid():
             form.save()
             return HttpResponseRedirect('/add_instructor.html?sumbitted=True')
