@@ -127,6 +127,59 @@ class SchedDetail(DetailView):
     template_name = 'pay_end/sched_detail.html'
     context_object_name = 'sched'
 
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        schedule = self.object.create_sched
+        context['schedule_ags'] = schedule.get('ags', [])
+        context['schedule_days'] = [
+            {
+                'name': 'Monday',
+                'rows': [
+                    {'label': 'PM1', 'values': schedule.get('mon_pm1', [])},
+                    {'label': 'PM2', 'values': schedule.get('mon_pm2', [])},
+                    {'label': 'Night', 'values': schedule.get('mon_night', [])},
+                ],
+            },
+            {
+                'name': 'Tuesday',
+                'rows': [
+                    {'label': 'AM1', 'values': schedule.get('tue_am1', [])},
+                    {'label': 'AM2', 'values': schedule.get('tue_am2', [])},
+                    {'label': 'PM1', 'values': schedule.get('tue_pm1', [])},
+                    {'label': 'PM2', 'values': schedule.get('tue_pm2', [])},
+                    {'label': 'Night', 'values': schedule.get('tue_night', [])},
+                ],
+            },
+            {
+                'name': 'Wednesday',
+                'rows': [
+                    {'label': 'AM1', 'values': schedule.get('wed_am1', [])},
+                    {'label': 'AM2', 'values': schedule.get('wed_am2', [])},
+                    {'label': 'PM1', 'values': schedule.get('wed_pm1', [])},
+                    {'label': 'PM2', 'values': schedule.get('wed_pm2', [])},
+                    {'label': 'Night', 'values': schedule.get('wed_night', [])},
+                ],
+            },
+            {
+                'name': 'Thursday',
+                'rows': [
+                    {'label': 'AM1', 'values': schedule.get('thur_am1', [])},
+                    {'label': 'AM2', 'values': schedule.get('thur_am2', [])},
+                    {'label': 'PM1', 'values': schedule.get('thur_pm1', [])},
+                    {'label': 'PM2', 'values': schedule.get('thur_pm2', [])},
+                    {'label': 'Night', 'values': schedule.get('thur_night', [])},
+                ],
+            },
+            {
+                'name': 'Friday',
+                'rows': [
+                    {'label': 'AM1', 'values': schedule.get('fri_am1', [])},
+                    {'label': 'AM2', 'values': schedule.get('fri_am2', [])},
+                ],
+            },
+        ]
+        return context
+
 class SchedCreate(CreateView):
     model = TheSched
     template_name = 'pay_end/sched_form.html'
