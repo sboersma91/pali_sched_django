@@ -10,7 +10,7 @@ from django.db.models import JSONField
 # from .custom_fields import CommaSepField
 
 
-wk_days = (('Mon','Monday'),('Tues', 'Tuesday'), ('Wed','Wednesday'), ('Thurs', 'Thurday'),('Fri','Friday'))
+wk_days = (('Mon','Monday'),('Tue', 'Tuesday'), ('Wed','Wednesday'), ('Thur', 'Thursday'),('Fri','Friday'))
 # ('stored in DB', "shown on screen" )
 
 class Locations(models.Model):
