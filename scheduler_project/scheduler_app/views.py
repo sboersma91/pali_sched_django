@@ -176,13 +176,18 @@ class SchedDetail(DetailView):
                 ],
             },
         ]
+        display_values = {
+            'g_box': '/////',
+            'empty': '****',
+        }
         schedule_rows = []
         for ag_index, ag in enumerate(schedule.get('ags', [])):
             cells = []
             for day in schedule_days:
                 for slot in day['slots']:
                     slot_values = schedule.get(slot['key'], [])
-                    cells.append(slot_values[ag_index] if ag_index < len(slot_values) else '')
+                    value = slot_values[ag_index] if ag_index < len(slot_values) else ''
+                    cells.append(display_values.get(value, value))
             schedule_rows.append({'ag': ag, 'cells': cells})
 
         context['schedule_days'] = schedule_days
