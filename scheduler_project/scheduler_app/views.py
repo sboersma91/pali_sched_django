@@ -129,54 +129,64 @@ class SchedDetail(DetailView):
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         schedule = self.object.create_sched
-        context['schedule_ags'] = schedule.get('ags', [])
-        context['schedule_days'] = [
+        schedule_days = [
             {
                 'name': 'Monday',
-                'rows': [
-                    {'label': 'PM1', 'values': schedule.get('mon_pm1', [])},
-                    {'label': 'PM2', 'values': schedule.get('mon_pm2', [])},
-                    {'label': 'Night', 'values': schedule.get('mon_night', [])},
+                'slots': [
+                    {'label': 'PM1', 'key': 'mon_pm1'},
+                    {'label': 'PM2', 'key': 'mon_pm2'},
+                    {'label': 'Night', 'key': 'mon_night'},
                 ],
             },
             {
                 'name': 'Tuesday',
-                'rows': [
-                    {'label': 'AM1', 'values': schedule.get('tue_am1', [])},
-                    {'label': 'AM2', 'values': schedule.get('tue_am2', [])},
-                    {'label': 'PM1', 'values': schedule.get('tue_pm1', [])},
-                    {'label': 'PM2', 'values': schedule.get('tue_pm2', [])},
-                    {'label': 'Night', 'values': schedule.get('tue_night', [])},
+                'slots': [
+                    {'label': 'AM1', 'key': 'tue_am1'},
+                    {'label': 'AM2', 'key': 'tue_am2'},
+                    {'label': 'PM1', 'key': 'tue_pm1'},
+                    {'label': 'PM2', 'key': 'tue_pm2'},
+                    {'label': 'Night', 'key': 'tue_night'},
                 ],
             },
             {
                 'name': 'Wednesday',
-                'rows': [
-                    {'label': 'AM1', 'values': schedule.get('wed_am1', [])},
-                    {'label': 'AM2', 'values': schedule.get('wed_am2', [])},
-                    {'label': 'PM1', 'values': schedule.get('wed_pm1', [])},
-                    {'label': 'PM2', 'values': schedule.get('wed_pm2', [])},
-                    {'label': 'Night', 'values': schedule.get('wed_night', [])},
+                'slots': [
+                    {'label': 'AM1', 'key': 'wed_am1'},
+                    {'label': 'AM2', 'key': 'wed_am2'},
+                    {'label': 'PM1', 'key': 'wed_pm1'},
+                    {'label': 'PM2', 'key': 'wed_pm2'},
+                    {'label': 'Night', 'key': 'wed_night'},
                 ],
             },
             {
                 'name': 'Thursday',
-                'rows': [
-                    {'label': 'AM1', 'values': schedule.get('thur_am1', [])},
-                    {'label': 'AM2', 'values': schedule.get('thur_am2', [])},
-                    {'label': 'PM1', 'values': schedule.get('thur_pm1', [])},
-                    {'label': 'PM2', 'values': schedule.get('thur_pm2', [])},
-                    {'label': 'Night', 'values': schedule.get('thur_night', [])},
+                'slots': [
+                    {'label': 'AM1', 'key': 'thur_am1'},
+                    {'label': 'AM2', 'key': 'thur_am2'},
+                    {'label': 'PM1', 'key': 'thur_pm1'},
+                    {'label': 'PM2', 'key': 'thur_pm2'},
+                    {'label': 'Night', 'key': 'thur_night'},
                 ],
             },
             {
                 'name': 'Friday',
-                'rows': [
-                    {'label': 'AM1', 'values': schedule.get('fri_am1', [])},
-                    {'label': 'AM2', 'values': schedule.get('fri_am2', [])},
+                'slots': [
+                    {'label': 'AM1', 'key': 'fri_am1'},
+                    {'label': 'AM2', 'key': 'fri_am2'},
                 ],
             },
         ]
+        schedule_rows = []
+        for ag_index, ag in enumerate(schedule.get('ags', [])):
+            cells = []
+            for day in schedule_days:
+                for slot in day['slots']:
+                    slot_values = schedule.get(slot['key'], [])
+                    cells.append(slot_values[ag_index] if ag_index < len(slot_values) else '')
+            schedule_rows.append({'ag': ag, 'cells': cells})
+
+        context['schedule_days'] = schedule_days
+        context['schedule_rows'] = schedule_rows
         return context
 
 class SchedCreate(CreateView):

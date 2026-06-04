@@ -8,29 +8,32 @@
         <hr>
 
         <h2>The Schedule</h2>
-        {% for day in schedule_days %}
-            <h3>{{ day.name }}</h3>
-            <table border="1" cellpadding="6" cellspacing="0">
-                <thead>
+        <table border="1" cellpadding="6" cellspacing="0">
+            <thead>
+                <tr>
+                    <th rowspan="2">Activity Group</th>
+                    {% for day in schedule_days %}
+                        <th colspan="{{ day.slots|length }}">{{ day.name }}</th>
+                    {% endfor %}
+                </tr>
+                <tr>
+                    {% for day in schedule_days %}
+                        {% for slot in day.slots %}
+                            <th>{{ slot.label }}</th>
+                        {% endfor %}
+                    {% endfor %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in schedule_rows %}
                     <tr>
-                        <th>Time</th>
-                        {% for ag in schedule_ags %}
-                            <th>{{ ag }}</th>
+                        <th>{{ row.ag }}</th>
+                        {% for value in row.cells %}
+                            <td>{{ value }}</td>
                         {% endfor %}
                     </tr>
-                </thead>
-                <tbody>
-                    {% for row in day.rows %}
-                        <tr>
-                            <th>{{ row.label }}</th>
-                            {% for value in row.values %}
-                                <td>{{ value }}</td>
-                            {% endfor %}
-                        </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-            <br>
-        {% endfor %}
+                {% endfor %}
+            </tbody>
+        </table>
     </center>
 {% endblock%}
