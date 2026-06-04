@@ -6,18 +6,34 @@
         <ul>Name: {{ sched.sched_name }}</ul>
         <ul>Schools: {{ sched.lst_of_school }}</ul>
         <hr>
-        <ul>The Schedule: </ul>
-        <ul>{{ sched.create_sched }}</ul>
-        <hr><hr>
-        <h3>Here is the non table version of this</h3>
-        {% for key, value in sched.create_sched.items %}
-            <strong>{{ key }}</strong>
-            {% for v in value %}
-            {{ v }}
-        {% endfor %}
-        {% endfor %}
 
-       
-
+        <h2>The Schedule</h2>
+        <table border="1" cellpadding="6" cellspacing="0">
+            <thead>
+                <tr>
+                    <th rowspan="2">Activity Group</th>
+                    {% for day in schedule_days %}
+                        <th colspan="{{ day.slots|length }}">{{ day.name }}</th>
+                    {% endfor %}
+                </tr>
+                <tr>
+                    {% for day in schedule_days %}
+                        {% for slot in day.slots %}
+                            <th>{{ slot.label }}</th>
+                        {% endfor %}
+                    {% endfor %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in schedule_rows %}
+                    <tr>
+                        <th>{{ row.ag }}</th>
+                        {% for value in row.cells %}
+                            <td>{{ value }}</td>
+                        {% endfor %}
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
     </center>
 {% endblock%}
