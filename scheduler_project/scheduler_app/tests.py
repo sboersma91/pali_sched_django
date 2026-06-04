@@ -72,3 +72,48 @@ class SchoolFormWorkflowTests(TestCase):
         self.assertEqual(response.status_code, 302)
         school = Schools.schools_list.get(school_name="Function Test School")
         self.assertEqual(school.sorted_subject_lst, "WM,Night Hike")
+
+    def test_add_school_page_includes_slot_accounting_summary(self):
+        response = self.client.get("/add_school")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Schedule Block Summary")
+        self.assertContains(response, "Selected daytime blocks:</strong> 0")
+        self.assertContains(response, "Selected night blocks:</strong> 0")
+
+    def test_school_update_page_includes_slot_accounting_summary(self):
+        school = Schools(school_name="Summary Test School", arrive="Mon", depart="Wed", total_students=16, ag_num=1, attending_year="2026-06-04")
+        school.save()
+        school.subject.set([self.wm, self.night_hike])
+        school.update_sorted_subject_lst()
+        school.save(update_fields=["sorted_subject_lst"])
+
+        response = self.client.get(f"/school_update/{school.id}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Schedule Block Summary")
+        self.assertContains(response, "Required daytime blocks:</strong> 8")
+        self.assertContains(response, "Required night blocks:</strong> 2")
+        self.assertContains(response, "Selected daytime blocks:</strong> 2")
+        self.assertContains(response, "Selected night blocks:</strong> 1")
+        self.assertContains(response, "Daytime status:</strong> under by 6")
+        self.assertContains(response, "Night status:</strong> under by 1")
+
+    def test_invalid_school_create_post_recalculates_slot_summary_from_selection(self):
+        existing = Schools(school_name="Duplicate School", arrive="Mon", depart="Wed", total_students=16, ag_num=1, attending_year="2026-06-04")
+        existing.save()
+
+        response = self.client.post(
+            "/school_create",
+            self.school_form_data("Duplicate School", [self.archery, self.night_hike], arrive="Tue", depart="Thur"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Schedule Block Summary")
+        self.assertContains(response, "Required daytime blocks:</strong> 8")
+        self.assertContains(response, "Required night blocks:</strong> 2")
+        self.assertContains(response, "Selected daytime blocks:</strong> 1")
+        self.assertContains(response, "Selected night blocks:</strong> 1")
+        self.assertContains(response, "Daytime status:</strong> under by 7")
+        self.assertContains(response, "Night status:</strong> under by 1")
+
