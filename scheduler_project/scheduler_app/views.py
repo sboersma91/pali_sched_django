@@ -98,14 +98,14 @@ class SchoolDetail(DetailView):
 
 class SchoolCreate(CreateView):
     model = Schools
+    form_class = SchoolsForm
     template_name = 'pay_end/school_form.html'
-    fields = "__all__"
     success_url = reverse_lazy('school-list')
 
 class SchoolUpdate(UpdateView):
     model = Schools
+    form_class = SchoolsForm
     template_name = 'pay_end/school_form.html'
-    fields = "__all__"
     success_url = reverse_lazy('school-list')
 
 class SchoolDelete(DeleteView):
@@ -126,6 +126,74 @@ class SchedDetail(DetailView):
     model = TheSched
     template_name = 'pay_end/sched_detail.html'
     context_object_name = 'sched'
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        schedule = self.object.create_sched
+        schedule_days = [
+            {
+                'name': 'Monday',
+                'slots': [
+                    {'label': 'PM1', 'key': 'mon_pm1'},
+                    {'label': 'PM2', 'key': 'mon_pm2'},
+                    {'label': 'Night', 'key': 'mon_night'},
+                ],
+            },
+            {
+                'name': 'Tuesday',
+                'slots': [
+                    {'label': 'AM1', 'key': 'tue_am1'},
+                    {'label': 'AM2', 'key': 'tue_am2'},
+                    {'label': 'PM1', 'key': 'tue_pm1'},
+                    {'label': 'PM2', 'key': 'tue_pm2'},
+                    {'label': 'Night', 'key': 'tue_night'},
+                ],
+            },
+            {
+                'name': 'Wednesday',
+                'slots': [
+                    {'label': 'AM1', 'key': 'wed_am1'},
+                    {'label': 'AM2', 'key': 'wed_am2'},
+                    {'label': 'PM1', 'key': 'wed_pm1'},
+                    {'label': 'PM2', 'key': 'wed_pm2'},
+                    {'label': 'Night', 'key': 'wed_night'},
+                ],
+            },
+            {
+                'name': 'Thursday',
+                'slots': [
+                    {'label': 'AM1', 'key': 'thur_am1'},
+                    {'label': 'AM2', 'key': 'thur_am2'},
+                    {'label': 'PM1', 'key': 'thur_pm1'},
+                    {'label': 'PM2', 'key': 'thur_pm2'},
+                    {'label': 'Night', 'key': 'thur_night'},
+                ],
+            },
+            {
+                'name': 'Friday',
+                'slots': [
+                    {'label': 'AM1', 'key': 'fri_am1'},
+                    {'label': 'AM2', 'key': 'fri_am2'},
+                ],
+            },
+        ]
+        display_values = {
+            'g_box': '/////',
+            'empty': '****',
+        }
+        schedule_rows = []
+        for ag_index, ag in enumerate(schedule.get('ags', [])):
+            cells = []
+            for day in schedule_days:
+                for slot in day['slots']:
+                    slot_values = schedule.get(slot['key'], [])
+                    value = slot_values[ag_index] if ag_index < len(slot_values) else ''
+                    cells.append(display_values.get(value, value))
+            schedule_rows.append({'ag': ag, 'cells': cells})
+
+        context['schedule_days'] = schedule_days
+        context['schedule_rows'] = schedule_rows
+        return context
 
 class SchedCreate(CreateView):
     model = TheSched
@@ -199,12 +267,12 @@ def add_school(request):
     submitted = False
     if request.method == "POST":
         form = SchoolsForm(request.POST)
-        if form.is_valid:
+        if form.is_valid():
             form.save()
             return HttpResponseRedirect('/add_school?submitted=True')
             # added the ppl_temps to the front of ^^^
     else:
-        form = SchoolsForm
+        form = SchoolsForm()
         if 'submitted' in request.GET:
             submitted = True
 

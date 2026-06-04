@@ -60,6 +60,15 @@ class SchoolsForm(ModelForm):
             'total_students':widgets.NumberInput(),
         }
 
+    def save(self, commit=True):
+        school = super().save(commit=False)
+        if commit:
+            school.save()
+            self.save_m2m()
+            school.update_sorted_subject_lst()
+            school.save(update_fields=['sorted_subject_lst'])
+        return school
+
 '''class SchedForm(ModelForm):
     class Meta:
         model = TheSched
