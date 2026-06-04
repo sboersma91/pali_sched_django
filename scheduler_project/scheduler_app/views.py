@@ -97,14 +97,14 @@ class SchoolDetail(DetailView):
 
 class SchoolCreate(CreateView):
     model = Schools
+    form_class = SchoolsForm
     template_name = 'pay_end/school_form.html'
-    fields = "__all__"
     success_url = reverse_lazy('school-list')
 
 class SchoolUpdate(UpdateView):
     model = Schools
+    form_class = SchoolsForm
     template_name = 'pay_end/school_form.html'
-    fields = "__all__"
     success_url = reverse_lazy('school-list')
 
 class SchoolDelete(DeleteView):
@@ -271,7 +271,7 @@ def add_school(request):
             return HttpResponseRedirect('/add_school?submitted=True')
             # added the ppl_temps to the front of ^^^
     else:
-        form = SchoolsForm
+        form = SchoolsForm()
         if 'submitted' in request.GET:
             submitted = True
 
