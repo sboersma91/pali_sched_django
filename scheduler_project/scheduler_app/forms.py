@@ -26,17 +26,17 @@ class CourseForm(ModelForm):
     class Meta:
         model = Course
         fields = '__all__'
-        ordering = ('prog_name','prog_len')
+        ordering = ('course_name','course_len')
         labels = {
-            'prog_name':'Program Name',
+            'course_name':'Program Name',
             'abriviation': 'Abriviation',
-            'primary_locz':'Primary',
-            'prog_len': 'Program Length',
+            'primary_locs':'Primary',
+            'course_len': 'Program Length',
         }
         widgets = {
-            'prog_name':forms.TextInput(attrs={'class':'form-control'}),
+            'course_name':forms.TextInput(attrs={'class':'form-control'}),
             'abriviation':forms.TextInput(attrs={'class':'form-control'}),
-            'primary_locz': widgets.SelectMultiple(),
+            'primary_locs': widgets.SelectMultiple(),
             # 'prog_len':widgets.NumberInput()
         }
 
@@ -45,7 +45,7 @@ class SchoolsForm(ModelForm):
         model = Schools
         fields = "__all__"
         ordering= ('school_name',)
-        lables = {
+        labels = {
             'school_name': 'School Name',
             'subject':'Subjects',
             'arrive':'Arrival Day',
@@ -59,6 +59,15 @@ class SchoolsForm(ModelForm):
             'depart': forms.Select(),
             'total_students':widgets.NumberInput(),
         }
+
+    def save(self, commit=True):
+        school = super().save(commit=False)
+        if commit:
+            school.save()
+            self.save_m2m()
+            school.update_sorted_subject_lst()
+            school.save(update_fields=['sorted_subject_lst'])
+        return school
 
 '''class SchedForm(ModelForm):
     class Meta:

@@ -8,6 +8,20 @@
             <form action="", method=POST>
                 {% csrf_token %}
                 {{ form.as_p }}
+                <div style="border: 1px solid #999; padding: 10px; margin: 10px; display: inline-block; text-align: left;">
+                    <h3>Schedule Block Summary</h3>
+                    {% if slot_summary.has_trip_window %}
+                        <p><strong>Required daytime blocks:</strong> {{ slot_summary.required_daytime }}</p>
+                        <p><strong>Required night blocks:</strong> {{ slot_summary.required_night }}</p>
+                    {% else %}
+                        <p><strong>Required blocks:</strong> choose arrive and depart days to calculate.</p>
+                    {% endif %}
+                    <p><strong>Selected daytime blocks:</strong> {{ slot_summary.selected_daytime }}</p>
+                    <p><strong>Selected night blocks:</strong> {{ slot_summary.selected_night }}</p>
+                    <p><strong>Daytime status:</strong> {{ slot_summary.daytime_status }}</p>
+                    <p><strong>Night status:</strong> {{ slot_summary.night_status }}</p>
+                    <p><em>Warning only: saves are not blocked by this summary.</em></p>
+                </div>
             <input type="submit" value="Submit" class="btn btn-secondary">
             </form>
     </center>

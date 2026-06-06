@@ -10,7 +10,7 @@ from django.db.models import JSONField
 # from .custom_fields import CommaSepField
 
 
-wk_days = (('Mon','Monday'),('Tues', 'Tuesday'), ('Wed','Wednesday'), ('Thurs', 'Thurday'),('Fri','Friday'))
+wk_days = (('Mon','Monday'),('Tue', 'Tuesday'), ('Wed','Wednesday'), ('Thur', 'Thursday'),('Fri','Friday'))
 # ('stored in DB', "shown on screen" )
 
 class Locations(models.Model):
@@ -107,8 +107,7 @@ class Schools(models.Model):
         # Because it messes up how you access the number it is now going to be a manuel entry -- ideally it will later become an auto calculation that can be overriden
         '''
 
-    @property
-    def sort_subjects(self):
+    def update_sorted_subject_lst(self):
         # Sorted order = Two Block w/ loc, two block no loc, one block w/ loc, one block no loc, night
         ropes = []
         various_one = []
@@ -145,46 +144,16 @@ class Schools(models.Model):
         self.sorted_subjects.extend(one_block)
         self.sorted_subjects.extend(various_one)
         self.sorted_subjects.extend(night)
-        return ', '.join(self.sorted_subjects)
+        self.sorted_subject_lst = ','.join(self.sorted_subjects)
+        return self.sorted_subject_lst
+
+    @property
+    def sort_subjects(self):
+        return self.update_sorted_subject_lst().replace(',', ', ')
     
     def save(self, *args, **kwargs):
-        ropes = []
-        various_one = []
-        various_two = []
-        one_block = []
-        two_block = []
-        night = []
-        self.sorted_subjects = []
-
-        self.subjects = [sub.course_name for sub in self.subject.all()]
-
-        for c in range(len(self.subjects)):
-            if self.subjects[c] in ["WM",'LCR','SLIDE']:
-                ropes.append(self.subjects[c])
-            elif class_len[self.subjects[c]] == 2 and class_locs[self.subjects[c]] == 'Various':
-                various_two.append(self.subjects[c])
-            elif class_len[self.subjects[c]] == 2:
-                two_block.append(self.subjects[c])
-            elif class_len[self.subjects[c]] == 1 and class_locs[self.subjects[c]]== 'Various' :
-                various_one.append(self.subjects[c])
-            elif class_len[self.subjects[c]] == 1:
-                one_block.append(self.subjects[c])
-            elif class_len[self.subjects[c]] == 0:
-                # 'N' = 0 now.
-                night.append(self.subjects[c])
-            else:
-                print(c)
-                print(self.subjects[c])
-                raise ValueError("There is no length for said class" )
-        
-        self.sorted_subjects.extend(ropes)
-        self.sorted_subjects.extend(two_block)
-        self.sorted_subjects.extend(various_two)
-        self.sorted_subjects.extend(one_block)
-        self.sorted_subjects.extend(various_one)
-        self.sorted_subjects.extend(night)
-        
-        self.sorted_subject_lst = ','.join(self.sorted_subjects)
+        if self.pk:
+            self.update_sorted_subject_lst()
         # Turn this into a string and it will save as needed 
         super().save(*args, **kwargs)
 
