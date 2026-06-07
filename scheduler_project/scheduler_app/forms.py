@@ -1,6 +1,7 @@
 from django import forms
 from django.db.models.base import Model
 from django.forms import ModelForm, widgets
+from django.db.models.functions import Lower
 from .models import Course, Locations, Schools, Instructor, TheSched
 
 
@@ -41,6 +42,29 @@ class CourseForm(ModelForm):
         }
 
 class SchoolsForm(ModelForm):
+    ACTIVITY_GROUPS = (
+        (2, 'Two-block daytime activities', '2 daytime blocks'),
+        (1, 'One-block daytime activities', '1 daytime block'),
+        (0, 'Night activities', 'night activity'),
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        courses_by_length = {
+            course_len: [] for course_len, _group_label, _cost_label in self.ACTIVITY_GROUPS
+        }
+        for course in Course.objects.order_by('-course_len', Lower('course_name')):
+            courses_by_length[course.course_len].append(course)
+
+        self.fields['subject'].choices = [
+            (
+                group_label,
+                [(course.pk, f'{course.course_name} — {cost_label}') for course in courses_by_length[course_len]],
+            )
+            for course_len, group_label, cost_label in self.ACTIVITY_GROUPS
+            if courses_by_length[course_len]
+        ]
+
     class Meta:
         model = Schools
         fields = "__all__"
@@ -54,10 +78,13 @@ class SchoolsForm(ModelForm):
         }
         widgets = {
             'school_name':forms.TextInput(attrs={'class':'form-control'}),
-            'subject':forms.SelectMultiple(attrs={'class':'form-control'}),
-            'arrive': forms.Select(),
-            'depart': forms.Select(),
-            'total_students':widgets.NumberInput(),
+            'subject': forms.CheckboxSelectMultiple(),
+            'arrive': forms.Select(attrs={'class': 'form-select'}),
+            'depart': forms.Select(attrs={'class': 'form-select'}),
+            'total_students': widgets.NumberInput(attrs={'class': 'form-control'}),
+            'ag_num': widgets.NumberInput(attrs={'class': 'form-control'}),
+            'attending_year': widgets.DateInput(attrs={'class': 'form-control', 'type': 'date'}),
+            'sorted_subject_lst': forms.TextInput(attrs={'class': 'form-control'}),
         }
 
     def save(self, commit=True):

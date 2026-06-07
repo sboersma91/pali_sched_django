@@ -1,4 +1,5 @@
 from django.test import Client, TestCase, override_settings
+from django.urls import reverse
 
 from .models import Course, Schools, class_len, class_locs
 
@@ -32,6 +33,69 @@ class SchoolFormWorkflowTests(TestCase):
             "attending_year": "2026-06-04",
             "sorted_subject_lst": "",
         }
+
+    def test_navbar_add_school_links_to_canonical_create_page(self):
+        response = self.client.get(reverse("school-create"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            f'<a class="dropdown-item" href="{reverse("school-create")}">Add School</a>',
+            html=True,
+        )
+
+    def test_school_list_add_new_school_links_to_canonical_create_page(self):
+        response = self.client.get(reverse("school-list"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            f'<a href="{reverse("school-create")}">Add New School</a>',
+            html=True,
+        )
+
+    def test_canonical_school_create_page_renders_successfully(self):
+        response = self.client.get(reverse("school-create"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Activities")
+        self.assertContains(response, "Schedule Block Summary")
+
+    def test_school_forms_render_grouped_activity_checkboxes_with_costs(self):
+        for url in ("/school_create", "/add_school"):
+            with self.subTest(url=url):
+                response = self.client.get(url)
+
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, "Two-block daytime activities")
+                self.assertContains(response, "One-block daytime activities")
+                self.assertContains(response, "Night activities")
+                self.assertContains(response, "WM — 2 daytime blocks")
+                self.assertContains(response, "Archery — 1 daytime block")
+                self.assertContains(response, "Night Hike — night activity")
+                self.assertContains(response, 'type="checkbox"', count=3)
+                self.assertNotContains(response, '<select name="subject"')
+
+    def test_school_update_checks_existing_activity_selections(self):
+        school = Schools(
+            school_name="Selected Activities School",
+            arrive="Mon",
+            depart="Wed",
+            total_students=16,
+            ag_num=1,
+            attending_year="2026-06-04",
+        )
+        school.save()
+        school.subject.set([self.wm, self.night_hike])
+        school.update_sorted_subject_lst()
+        school.save(update_fields=["sorted_subject_lst"])
+
+        response = self.client.get(f"/school_update/{school.id}/")
+
+        self.assertEqual(response.status_code, 200)
+        selected_values = {str(value) for value in response.context["form"]["subject"].value()}
+        self.assertEqual(selected_values, {str(self.wm.id), str(self.night_hike.id)})
+        self.assertContains(response, "checked", count=2)
 
     def test_school_create_saves_subjects_after_instance_has_id(self):
         response = self.client.post(
