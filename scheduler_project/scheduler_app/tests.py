@@ -307,3 +307,102 @@ class CourseFormWorkflowTests(TestCase):
             list(Course.objects.get(course_name="Legacy Course").primary_locs.all()),
             [self.available_location],
         )
+
+@override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
+class LocationFormWorkflowTests(TestCase):
+    def setUp(self):
+        self.location = Locations.objects.create(
+            loc_name="Existing Location",
+            loc_short="EX",
+            description="Existing operational notes.",
+            availible=True,
+        )
+        self.client = Client(HTTP_HOST="localhost")
+
+    def location_form_data(self, name, abbreviation, description, available=True):
+        data = {
+            "loc_name": name,
+            "loc_short": abbreviation,
+            "description": description,
+        }
+        if available:
+            data["availible"] = "on"
+        return data
+
+    def test_canonical_location_create_get_renders_improved_form(self):
+        response = self.client.get(reverse("add-loc"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Location Name")
+        self.assertContains(response, "Abbreviation")
+        self.assertContains(response, "Operator Notes")
+        self.assertContains(response, "Available for Scheduling")
+        self.assertContains(response, "Maximum 5 characters")
+        self.assertContains(response, "marking it unavailable for scheduling")
+        self.assertContains(response, '<textarea name="description"', html=False)
+
+    def test_canonical_location_create_post_preserves_fields_and_availability(self):
+        response = self.client.post(
+            reverse("add-loc"),
+            self.location_form_data(
+                "Created Location",
+                "NEW",
+                "Created location operational notes.",
+                available=True,
+            ),
+        )
+
+        self.assertRedirects(response, reverse("location-list"))
+        location = Locations.objects.get(loc_name="Created Location")
+        self.assertEqual(location.loc_short, "NEW")
+        self.assertEqual(location.description, "Created location operational notes.")
+        self.assertTrue(location.availible)
+
+    def test_canonical_location_update_get_preserves_description_and_availability(self):
+        response = self.client.get(reverse("location-update", args=[self.location.id]))
+
+        self.assertEqual(response.status_code, 200)
+        form = response.context["form"]
+        self.assertEqual(form["description"].value(), "Existing operational notes.")
+        self.assertTrue(form["availible"].value())
+        self.assertContains(response, "Existing operational notes.")
+        self.assertContains(response, 'name="availible"', html=False)
+        self.assertContains(response, "checked", count=1)
+
+    def test_canonical_location_update_post_preserves_description_and_unavailability(self):
+        response = self.client.post(
+            reverse("location-update", args=[self.location.id]),
+            self.location_form_data(
+                "Updated Location",
+                "UPD",
+                "Updated operational notes.",
+                available=False,
+            ),
+        )
+
+        self.assertRedirects(response, reverse("location-list"))
+        self.location.refresh_from_db()
+        self.assertEqual(self.location.loc_name, "Updated Location")
+        self.assertEqual(self.location.loc_short, "UPD")
+        self.assertEqual(self.location.description, "Updated operational notes.")
+        self.assertFalse(self.location.availible)
+
+    def test_legacy_add_location_workflow_remains_functional(self):
+        get_response = self.client.get(reverse("add-location"))
+        self.assertEqual(get_response.status_code, 200)
+        self.assertContains(get_response, "Operator Notes")
+
+        post_response = self.client.post(
+            reverse("add-location"),
+            self.location_form_data(
+                "Legacy Location",
+                "LEG",
+                "Legacy workflow notes.",
+                available=False,
+            ),
+        )
+
+        self.assertRedirects(post_response, "/add_location?submitted=True")
+        location = Locations.objects.get(loc_name="Legacy Location")
+        self.assertEqual(location.description, "Legacy workflow notes.")
+        self.assertFalse(location.availible)

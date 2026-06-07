@@ -10,17 +10,22 @@ class LocationsForm(ModelForm):
     class Meta:
         model = Locations
         fields = "__all__"
-        ordering =('loc_name','availible')
         labels = {
-            'loc_name':'Location', 
-            'loc_short':'Abbrviation',
-            'description':'Description', 
-            'availible': 'Availible',
+            'loc_name': 'Location Name',
+            'loc_short': 'Abbreviation',
+            'description': 'Operator Notes',
+            'availible': 'Available for Scheduling',
+        }
+        help_texts = {
+            'loc_short': 'Short label used in schedules and operational displays. Maximum 5 characters.',
+            'description': 'Add access details, restrictions, setup notes, or other information staff should know.',
+            'availible': 'Uncheck to keep this location record while marking it unavailable for scheduling.',
         }
         widgets = {
-            'loc_name': forms.TextInput(attrs={'class':'form-control'}),
-            'loc_short':forms.TextInput(attrs={'class':'form-control'}),
-            'description':forms.TextInput(attrs={'class':'form-control'}),
+            'loc_name': forms.TextInput(attrs={'class': 'form-control'}),
+            'loc_short': forms.TextInput(attrs={'class': 'form-control'}),
+            'description': forms.Textarea(attrs={'class': 'form-control', 'rows': 4}),
+            'availible': forms.CheckboxInput(attrs={'class': 'form-check-input'}),
         }
 
 class CourseForm(ModelForm):

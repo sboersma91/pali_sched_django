@@ -109,18 +109,15 @@ class LocationDetail(DetailView):
 
 class LocationCreate(CreateView):
     model = Locations
+    form_class = LocationsForm
     template_name = "pay_end/locations_form.html"
-    # fields = ['loc_name', 'loc_short', 'description','availible']
-    fields ="__all__"
     success_url = reverse_lazy('location-list')
 
 class LocationUpdate(UpdateView):
     model = Locations
+    form_class = LocationsForm
     template_name = "pay_end/locations_form.html"
-    fields = "__all__"
-    # ['loc_name', 'loc_short', 'description','availible']
     success_url = reverse_lazy('location-list')
-    # ideally change this success url to the detail version of the location.
 
 class LocationDelete(DeleteView):
     model = Locations
@@ -312,7 +309,7 @@ def add_location(request):
             return HttpResponseRedirect('/add_location?submitted=True')
         # if not form.is_valid: probably reload page? or redirect with submitted in the thing?
     else:
-        form = LocationsForm
+        form = LocationsForm()
         if 'submitted' in request.GET:
             submitted = True
     
