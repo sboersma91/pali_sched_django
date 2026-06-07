@@ -46,7 +46,6 @@ def create_master_locs():
     for l in Locations.objects.raw('SELECT loc_name, id FROM scheduler_app_locations WHERE availible = 1'):
         master_locs.append(l.loc_name)
     return master_locs
-create_master_locs()
 
 class_len = {}
 class_locs = {}
@@ -78,8 +77,20 @@ def create_class_locs_dict():
         if r[0] in class_locs and r[1] not in class_locs[r[0]]:
             class_locs[r[0]].append(r[1])
     return class_locs
-create_class_locs_dict()
-create_class_len_dict()
+
+
+scheduling_data_initialized = False
+
+def initialize_scheduling_data():
+    global scheduling_data_initialized
+    if scheduling_data_initialized:
+        return
+
+    create_master_locs()
+    create_class_locs_dict()
+    create_class_len_dict()
+    scheduling_data_initialized = True
+
 
 class Schools(models.Model):
     school_name = CharField(max_length=150, unique=True,)
@@ -108,6 +119,7 @@ class Schools(models.Model):
         '''
 
     def update_sorted_subject_lst(self):
+        initialize_scheduling_data()
         # Sorted order = Two Block w/ loc, two block no loc, one block w/ loc, one block no loc, night
         ropes = []
         various_one = []
@@ -181,6 +193,7 @@ class TheSched(models.Model):
 
     @property
     def create_sched(self): #save(self, *args, **kwargs):
+        initialize_scheduling_data()
         count=0
         for school in self.lst_of_school_names: #because of the foreign key this will only reference 1 school object
             count+= school.ag_num
