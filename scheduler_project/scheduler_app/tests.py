@@ -1,4 +1,5 @@
 from django.test import Client, TestCase, override_settings
+from django.urls import reverse
 
 from .models import Course, Schools, class_len, class_locs
 
@@ -32,6 +33,33 @@ class SchoolFormWorkflowTests(TestCase):
             "attending_year": "2026-06-04",
             "sorted_subject_lst": "",
         }
+
+    def test_navbar_add_school_links_to_canonical_create_page(self):
+        response = self.client.get(reverse("school-create"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            f'<a class="dropdown-item" href="{reverse("school-create")}">Add School</a>',
+            html=True,
+        )
+
+    def test_school_list_add_new_school_links_to_canonical_create_page(self):
+        response = self.client.get(reverse("school-list"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            f'<a href="{reverse("school-create")}">Add New School</a>',
+            html=True,
+        )
+
+    def test_canonical_school_create_page_renders_successfully(self):
+        response = self.client.get(reverse("school-create"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Activities")
+        self.assertContains(response, "Schedule Block Summary")
 
     def test_school_forms_render_grouped_activity_checkboxes_with_costs(self):
         for url in ("/school_create", "/add_school"):
