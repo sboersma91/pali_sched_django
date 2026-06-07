@@ -329,6 +329,57 @@ class LocationFormWorkflowTests(TestCase):
             data["availible"] = "on"
         return data
 
+    def test_location_list_renders_readable_table_and_actions(self):
+        response = self.client.get(reverse("location-list"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'class="table table-striped table-hover align-middle"', html=False)
+        self.assertContains(response, "Location Name")
+        self.assertContains(response, "Abbreviation")
+        self.assertContains(response, "Operator Notes")
+        self.assertContains(response, "Existing operational notes.")
+        self.assertContains(response, "View")
+        self.assertContains(response, "Edit")
+        self.assertContains(response, "Delete")
+
+    def test_location_list_renders_availability_badges(self):
+        Locations.objects.create(
+            loc_name="Unavailable Location",
+            loc_short="UN",
+            description="Unavailable notes.",
+            availible=False,
+        )
+
+        response = self.client.get(reverse("location-list"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '<span class="badge bg-success">Available</span>', html=True)
+        self.assertContains(response, '<span class="badge bg-secondary">Unavailable</span>', html=True)
+
+    def test_location_detail_renders_structured_information_and_actions(self):
+        response = self.client.get(reverse("location-detail", args=[self.location.id]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Existing Location", count=3)
+        self.assertContains(response, "Abbreviation")
+        self.assertContains(response, "EX")
+        self.assertContains(response, "Available for Scheduling")
+        self.assertContains(response, "Existing operational notes.")
+        self.assertContains(response, "Edit Location")
+        self.assertContains(response, "Delete Location")
+        self.assertContains(response, "Back to Locations")
+
+    def test_location_delete_confirmation_renders_destructive_warning(self):
+        response = self.client.get(reverse("location-delete", args=[self.location.id]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Confirm Location Deletion")
+        self.assertContains(response, "Existing Location")
+        self.assertContains(response, "may remove it from Course configurations")
+        self.assertContains(response, "This action cannot be undone.")
+        self.assertContains(response, "Confirm Delete")
+        self.assertContains(response, "Cancel")
+
     def test_canonical_location_create_get_renders_improved_form(self):
         response = self.client.get(reverse("add-loc"))
 
