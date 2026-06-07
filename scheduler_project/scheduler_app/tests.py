@@ -1,7 +1,7 @@
 from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 
-from .models import Course, Schools, class_len, class_locs
+from .models import Course, Locations, Schools, class_len, class_locs
 
 
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
@@ -181,3 +181,129 @@ class SchoolFormWorkflowTests(TestCase):
         self.assertContains(response, "Daytime status:</strong> under by 7")
         self.assertContains(response, "Night status:</strong> under by 1")
 
+
+@override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
+class CourseFormWorkflowTests(TestCase):
+    def setUp(self):
+        self.alphabetically_first_location = Locations.objects.create(
+            loc_name="apple Grove",
+            loc_short="AG",
+            availible=True,
+        )
+        self.available_location = Locations.objects.create(
+            loc_name="Archery Range",
+            loc_short="AR",
+            availible=True,
+        )
+        self.second_available_location = Locations.objects.create(
+            loc_name="Boathouse",
+            loc_short="BOAT",
+            availible=True,
+        )
+        self.unavailable_location = Locations.objects.create(
+            loc_name="Closed Field",
+            loc_short="CF",
+            availible=False,
+        )
+        self.course = Course.objects.create(
+            course_name="Existing Course",
+            abriviation="EX",
+            course_len=2,
+        )
+        self.course.primary_locs.set([self.available_location, self.unavailable_location])
+        self.client = Client(HTTP_HOST="localhost")
+
+    def course_form_data(self, name, abbreviation, course_len, locations):
+        return {
+            "course_name": name,
+            "abriviation": abbreviation,
+            "course_len": str(course_len),
+            "primary_locs": [str(location.id) for location in locations],
+        }
+
+    def test_canonical_course_create_get_renders_grouped_location_choices(self):
+        response = self.client.get(reverse("course-create"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Available Locations")
+        self.assertContains(response, "Unavailable Locations")
+        self.assertContains(response, "Archery Range — AR")
+        self.assertContains(response, "Closed Field — CF — unavailable")
+        self.assertLess(
+            response.content.index(b"apple Grove"),
+            response.content.index(b"Archery Range"),
+        )
+        self.assertContains(response, "Two-block daytime activity")
+        self.assertContains(response, "One-block daytime activity")
+        self.assertContains(response, "Night activity")
+        self.assertNotContains(response, '<select name="primary_locs"')
+
+    def test_canonical_course_create_post_saves_primary_locations(self):
+        response = self.client.post(
+            reverse("course-create"),
+            self.course_form_data(
+                "Created Course",
+                "NEW",
+                1,
+                [self.available_location, self.unavailable_location],
+            ),
+        )
+
+        self.assertRedirects(response, reverse("course-list"))
+        course = Course.objects.get(course_name="Created Course")
+        self.assertEqual(course.abriviation, "NEW")
+        self.assertEqual(course.course_len, 1)
+        self.assertEqual(
+            set(course.primary_locs.all()),
+            {self.available_location, self.unavailable_location},
+        )
+
+    def test_canonical_course_update_get_preserves_selected_primary_locations(self):
+        response = self.client.get(reverse("course-update", args=[self.course.id]))
+
+        self.assertEqual(response.status_code, 200)
+        selected_values = {str(value) for value in response.context["form"]["primary_locs"].value()}
+        self.assertEqual(
+            selected_values,
+            {str(self.available_location.id), str(self.unavailable_location.id)},
+        )
+        self.assertContains(response, "Closed Field — CF — unavailable")
+
+    def test_canonical_course_update_post_updates_fields_and_primary_locations(self):
+        response = self.client.post(
+            reverse("course-update", args=[self.course.id]),
+            self.course_form_data(
+                "Updated Course",
+                "UPD",
+                0,
+                [self.second_available_location],
+            ),
+        )
+
+        self.assertRedirects(response, reverse("course-list"))
+        self.course.refresh_from_db()
+        self.assertEqual(self.course.course_name, "Updated Course")
+        self.assertEqual(self.course.abriviation, "UPD")
+        self.assertEqual(self.course.course_len, 0)
+        self.assertEqual(list(self.course.primary_locs.all()), [self.second_available_location])
+
+    def test_legacy_add_course_workflow_remains_functional(self):
+        get_response = self.client.get(reverse("add-course"))
+        self.assertEqual(get_response.status_code, 200)
+        self.assertContains(get_response, "Available Locations")
+
+        post_response = self.client.post(
+            reverse("add-course"),
+            self.course_form_data(
+                "Legacy Course",
+                "LEG",
+                2,
+                [self.available_location],
+            ),
+        )
+
+        self.assertRedirects(post_response, "/add_course?submitted=True")
+        self.assertEqual(
+            list(Course.objects.get(course_name="Legacy Course").primary_locs.all()),
+            [self.available_location],
+        )

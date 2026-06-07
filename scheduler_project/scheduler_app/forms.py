@@ -24,21 +24,60 @@ class LocationsForm(ModelForm):
         }
 
 class CourseForm(ModelForm):
+    COURSE_LENGTH_CHOICES = (
+        (2, 'Two-block daytime activity'),
+        (1, 'One-block daytime activity'),
+        (0, 'Night activity'),
+    )
+
+    course_len = forms.TypedChoiceField(
+        choices=COURSE_LENGTH_CHOICES,
+        coerce=int,
+        label='Schedule Length',
+        help_text='Schedule length controls how this activity consumes schedule blocks.',
+        widget=forms.RadioSelect(),
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        locations_by_availability = {True: [], False: []}
+        for location in Locations.objects.order_by('-availible', Lower('loc_name')):
+            locations_by_availability[location.availible].append(location)
+
+        self.fields['primary_locs'].choices = [
+            (
+                group_label,
+                [
+                    (
+                        location.pk,
+                        f'{location.loc_name} — {location.loc_short or "No abbreviation"}'
+                        f'{" — unavailable" if not location.availible else ""}',
+                    )
+                    for location in locations_by_availability[available]
+                ],
+            )
+            for available, group_label in (
+                (True, 'Available Locations'),
+                (False, 'Unavailable Locations'),
+            )
+            if locations_by_availability[available]
+        ]
+
     class Meta:
         model = Course
         fields = '__all__'
-        ordering = ('course_name','course_len')
         labels = {
-            'course_name':'Program Name',
-            'abriviation': 'Abriviation',
-            'primary_locs':'Primary',
-            'course_len': 'Program Length',
+            'course_name': 'Course Name',
+            'abriviation': 'Abbreviation',
+            'primary_locs': 'Primary Locations',
+        }
+        help_texts = {
+            'primary_locs': 'Select every location where this activity can normally be scheduled.',
         }
         widgets = {
-            'course_name':forms.TextInput(attrs={'class':'form-control'}),
-            'abriviation':forms.TextInput(attrs={'class':'form-control'}),
-            'primary_locs': widgets.SelectMultiple(),
-            # 'prog_len':widgets.NumberInput()
+            'course_name': forms.TextInput(attrs={'class': 'form-control'}),
+            'abriviation': forms.TextInput(attrs={'class': 'form-control'}),
+            'primary_locs': forms.CheckboxSelectMultiple(),
         }
 
 class SchoolsForm(ModelForm):

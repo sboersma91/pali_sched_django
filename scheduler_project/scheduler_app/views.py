@@ -144,14 +144,14 @@ class CourseDetail(DetailView):
 
 class CourseCreate(CreateView):
     model = Course
+    form_class = CourseForm
     template_name = 'pay_end/course_form.html'
-    fields = "__all__"
     success_url = reverse_lazy('course-list')
 
 class CourseUpdate(UpdateView):
     model = Course
+    form_class = CourseForm
     template_name = 'pay_end/course_form.html'
-    fields = "__all__"
     success_url = reverse_lazy('course-list',)
 
 class CourseDelete(DeleteView):
@@ -326,7 +326,7 @@ def add_course(request):
             form.save()
             return HttpResponseRedirect('/add_course?submitted=True')
     else:
-        form = CourseForm
+        form = CourseForm()
         if 'submitted' in request.GET:
             submitted = True
             
