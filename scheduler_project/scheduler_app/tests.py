@@ -50,9 +50,97 @@ class SchoolFormWorkflowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(
             response,
-            f'<a href="{reverse("school-create")}">Add New School</a>',
+            f'<a href="{reverse("school-create")}" class="btn btn-primary">Add New School</a>',
             html=True,
         )
+
+    def create_school_with_activities(self):
+        school = Schools.schools_list.create(
+            school_name="Readability Test School",
+            arrive="Mon",
+            depart="Thur",
+            total_students=48,
+            ag_num=3,
+            attending_year="2026-06-04",
+        )
+        school.subject.set([self.wm, self.archery, self.night_hike])
+        return school
+
+    def test_school_list_renders_readable_table_and_actions(self):
+        self.create_school_with_activities()
+
+        response = self.client.get(reverse("school-list"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'class="table table-striped table-hover align-middle"', html=False)
+        self.assertContains(response, "School Name")
+        self.assertContains(response, "Arrival Day")
+        self.assertContains(response, "Departure Day")
+        self.assertContains(response, "Activity Groups")
+        self.assertContains(response, "Students")
+        self.assertContains(response, "Readability Test School")
+        self.assertContains(response, "Monday")
+        self.assertContains(response, "Thursday")
+        self.assertContains(response, "View")
+        self.assertContains(response, "Edit")
+        self.assertContains(response, "Delete")
+
+    def test_school_list_renders_selected_activity_summary(self):
+        self.create_school_with_activities()
+
+        response = self.client.get(reverse("school-list"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Selected Activities")
+        self.assertContains(response, "WM")
+        self.assertContains(response, "Archery")
+        self.assertContains(response, "Night Hike")
+
+    def test_school_detail_renders_structured_visit_information(self):
+        school = self.create_school_with_activities()
+
+        response = self.client.get(reverse("school-detail", args=[school.id]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Readability Test School")
+        self.assertContains(response, "Arrival Day")
+        self.assertContains(response, "Monday")
+        self.assertContains(response, "Departure Day")
+        self.assertContains(response, "Thursday")
+        self.assertContains(response, "Activity Groups")
+        self.assertContains(response, "Students")
+        self.assertContains(response, "Edit School")
+        self.assertContains(response, "Delete School")
+        self.assertContains(response, "Back to Schools")
+
+    def test_school_detail_groups_selected_activities_by_schedule_length(self):
+        school = self.create_school_with_activities()
+
+        response = self.client.get(reverse("school-detail", args=[school.id]))
+
+        self.assertEqual(response.status_code, 200)
+        content = response.content
+        two_block_heading = content.index(b"Two-block daytime activities")
+        one_block_heading = content.index(b"One-block daytime activities")
+        night_heading = content.index(b"Night activities")
+        self.assertLess(two_block_heading, content.index(b">WM</li>"))
+        self.assertLess(content.index(b">WM</li>"), one_block_heading)
+        self.assertLess(one_block_heading, content.index(b">Archery</li>"))
+        self.assertLess(content.index(b">Archery</li>"), night_heading)
+        self.assertLess(night_heading, content.index(b">Night Hike</li>"))
+
+    def test_school_delete_confirmation_renders_destructive_warning(self):
+        school = self.create_school_with_activities()
+
+        response = self.client.get(reverse("school-delete", args=[school.id]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Confirm School Deletion")
+        self.assertContains(response, "Readability Test School")
+        self.assertContains(response, "may affect generated schedules")
+        self.assertContains(response, "This action cannot be undone.")
+        self.assertContains(response, "Confirm Delete")
+        self.assertContains(response, "Cancel")
 
     def test_canonical_school_create_page_renders_successfully(self):
         response = self.client.get(reverse("school-create"))
