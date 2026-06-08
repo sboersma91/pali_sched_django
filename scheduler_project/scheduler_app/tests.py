@@ -221,6 +221,61 @@ class CourseFormWorkflowTests(TestCase):
             "primary_locs": [str(location.id) for location in locations],
         }
 
+    def test_course_list_renders_readable_table_and_actions(self):
+        response = self.client.get(reverse("course-list"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'class="table table-striped table-hover align-middle"', html=False)
+        self.assertContains(response, "Course Name")
+        self.assertContains(response, "Abbreviation")
+        self.assertContains(response, "Schedule Length")
+        self.assertContains(response, "Primary Locations")
+        self.assertContains(response, "Existing Course")
+        self.assertContains(response, "Archery Range")
+        self.assertContains(response, "Closed Field")
+        self.assertContains(response, "View")
+        self.assertContains(response, "Edit")
+        self.assertContains(response, "Delete")
+
+    def test_course_list_renders_human_readable_schedule_length_labels(self):
+        Course.objects.create(course_name="One Block Course", abriviation="ONE", course_len=1)
+        Course.objects.create(course_name="Night Course", abriviation="NGT", course_len=0)
+
+        response = self.client.get(reverse("course-list"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Two-block daytime activity")
+        self.assertContains(response, "One-block daytime activity")
+        self.assertContains(response, "Night activity")
+
+    def test_course_detail_renders_structured_information_and_primary_locations(self):
+        response = self.client.get(reverse("course-detail", args=[self.course.id]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Existing Course", count=3)
+        self.assertContains(response, "Abbreviation")
+        self.assertContains(response, "EX")
+        self.assertContains(response, "Two-block daytime activity", count=2)
+        self.assertContains(response, "Primary Locations")
+        self.assertContains(response, "Archery Range")
+        self.assertContains(response, "AR")
+        self.assertContains(response, "Closed Field")
+        self.assertContains(response, "CF")
+        self.assertContains(response, "Edit Course")
+        self.assertContains(response, "Delete Course")
+        self.assertContains(response, "Back to Courses")
+
+    def test_course_delete_confirmation_renders_destructive_warning(self):
+        response = self.client.get(reverse("course-delete", args=[self.course.id]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Confirm Course Deletion")
+        self.assertContains(response, "Existing Course")
+        self.assertContains(response, "may affect School activity selections and schedules")
+        self.assertContains(response, "This action cannot be undone.")
+        self.assertContains(response, "Confirm Delete")
+        self.assertContains(response, "Cancel")
+
     def test_canonical_course_create_get_renders_grouped_location_choices(self):
         response = self.client.get(reverse("course-create"))
 
