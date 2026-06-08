@@ -1,18 +1,50 @@
 {% extends 'pay_end/base_pay.html' %}
+{% block title %}Locations{% endblock title %}
 {% block content %}
-<a href="{% url 'add-loc' %}">Add New Location</a> 
-    <center>
-        <h1>Locations List html</h1>
-    {% for loc in location.all %}
-    <h4><strong>{{ loc.loc_name }}</strong></h4>
-    <a href="{% url 'location-detail' loc.id %}">Details</a>
-    <a href="{% url 'location-update' loc.id %}">Update</a>
-    <a href="{% url 'location-delete' loc.id %}">Delete</a>
-    <!-- <h5>{{ loc.loc_short }} </h5>
-    <h6>{{ loc.description }} </h6> -->
-    <hr>
-    {% empty %}
-    <h4>You have not made any locations yet</h4>
-    {% endfor %}
-    </center>
-{% endblock%}
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-4 mb-3">
+        <div>
+            <h1 class="mb-1">Locations</h1>
+            <p class="text-muted mb-0">Review location availability and operator notes.</p>
+        </div>
+        <a href="{% url 'add-loc' %}" class="btn btn-primary">Add New Location</a>
+    </div>
+
+    <div class="table-responsive">
+        <table class="table table-striped table-hover align-middle">
+            <thead class="table-light">
+                <tr>
+                    <th scope="col">Location Name</th>
+                    <th scope="col">Abbreviation</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Operator Notes</th>
+                    <th scope="col" class="text-end">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for loc in location %}
+                    <tr>
+                        <td><strong>{{ loc.loc_name }}</strong></td>
+                        <td>{{ loc.loc_short|default:"—" }}</td>
+                        <td>
+                            {% if loc.availible %}
+                                <span class="badge bg-success">Available</span>
+                            {% else %}
+                                <span class="badge bg-secondary">Unavailable</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ loc.description|default:"No operator notes."|truncatechars:80 }}</td>
+                        <td class="text-end text-nowrap">
+                            <a href="{% url 'location-detail' loc.id %}" class="btn btn-sm btn-outline-primary">View</a>
+                            <a href="{% url 'location-update' loc.id %}" class="btn btn-sm btn-outline-secondary">Edit</a>
+                            <a href="{% url 'location-delete' loc.id %}" class="btn btn-sm btn-outline-danger">Delete</a>
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr>
+                        <td colspan="5" class="text-center text-muted py-4">No locations have been added yet.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+{% endblock %}
