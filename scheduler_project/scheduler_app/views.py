@@ -1,6 +1,6 @@
 from django.shortcuts import render
 from .models import Locations, Course, Schools, TheSched
-from .forms import InstructorForm, LocationsForm, CourseForm, SchoolsForm
+from .forms import CourseForm, InstructorForm, LocationsForm, SchedForm, SchoolsForm
 from django.http import HttpResponseRedirect
 from django.urls import reverse_lazy
 
@@ -279,13 +279,13 @@ class SchedDetail(DetailView):
 class SchedCreate(CreateView):
     model = TheSched
     template_name = 'pay_end/sched_form.html'
-    fields = "__all__"
+    form_class = SchedForm
     success_url = reverse_lazy('sched-list')
 
 class SchedUpdate(UpdateView):
     model = TheSched
     template_name = 'pay_end/sched_form.html'
-    fields = "__all__"
+    form_class = SchedForm
     success_url = reverse_lazy('sched-list')
 
 class SchedDelete(DeleteView):

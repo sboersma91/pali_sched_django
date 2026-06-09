@@ -140,20 +140,25 @@ class SchoolsForm(ModelForm):
             school.save(update_fields=['sorted_subject_lst'])
         return school
 
-'''class SchedForm(ModelForm):
+class SchedForm(ModelForm):
     class Meta:
         model = TheSched
-        # need to edit fields once data is inserted
-        fields = "__all__"
+        fields = '__all__'
         labels = {
-            'sched_name':'Schedule Name',
-            'lst_of_school_names':'Schools.chools_list.all',
-            # 'sched_data' : 'Schedule'
+            'sched_name': 'Schedule Name',
+            'sched_data': 'Stored Schedule Data',
+        }
+        help_texts = {
+            'sched_name': 'Use a clear name that helps operators identify this schedule.',
+            'sched_data': (
+                'This required JSON field stores schedule record data. Generated schedule output '
+                'is built from the current School, Activity, and Location configuration when viewed.'
+            ),
         }
         widgets = {
-            'sched_name':forms.TextInput(attrs={'class':'form-control'}),
-            'lst_of_school_names':forms.SelectMultiple(attrs={'class':'form-control'})
-        }'''
+            'sched_name': forms.TextInput(attrs={'class': 'form-control'}),
+            'sched_data': forms.Textarea(attrs={'class': 'form-control font-monospace', 'rows': 8}),
+        }
 
 class InstructorForm(ModelForm):
     class Meta:

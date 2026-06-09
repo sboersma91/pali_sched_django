@@ -1,8 +1,11 @@
+from unittest.mock import PropertyMock, patch
+
 from django.contrib.auth import get_user_model
 from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 
-from .models import Course, Locations, Schools, class_len, class_locs
+from .forms import SchedForm
+from .models import Course, Locations, Schools, TheSched, class_len, class_locs
 
 
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
@@ -59,6 +62,105 @@ class OperationalNavigationTests(TestCase):
 
         self.assertContains(response, f'href="{reverse("logout")}">Log Out</a>', html=False)
         self.assertNotContains(response, "Log In")
+
+
+@override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
+class ScheduleWorkflowTests(TestCase):
+    def setUp(self):
+        self.client = Client(HTTP_HOST="localhost")
+        self.schedule = TheSched.objects.create(
+            sched_name="Existing Operational Schedule",
+            sched_data={"source": "test"},
+        )
+
+    def test_schedule_list_renders_readable_operational_summary(self):
+        response = self.client.get(reverse("sched-list"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'class="table table-striped table-hover align-middle"', html=False)
+        self.assertContains(response, "Schedule Name")
+        self.assertContains(response, "Created")
+        self.assertContains(response, "Record Data")
+        self.assertContains(response, "Existing Operational Schedule")
+        self.assertContains(response, "Stored data available")
+        self.assertContains(response, "Create Schedule")
+        self.assertContains(response, "View")
+        self.assertContains(response, "Edit")
+        self.assertContains(response, "Delete")
+        self.assertNotContains(response, "Add New Course")
+
+    def test_schedule_detail_renders_metadata_actions_and_readable_schedule_table(self):
+        generated_schedule = {
+            "ags": ["Example School 0"],
+            "mon_pm1": ["Archery"],
+        }
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Generated Schedule", count=2)
+        self.assertContains(response, "Schedule Name")
+        self.assertContains(response, "Created")
+        self.assertContains(response, "Stored Schedule Data")
+        self.assertContains(response, "Edit Schedule")
+        self.assertContains(response, "Delete Schedule")
+        self.assertContains(response, "Back to Schedules")
+        self.assertContains(response, 'class="table table-bordered table-sm align-middle text-center schedule-table"', html=False)
+        self.assertContains(response, "Activity Group")
+        self.assertContains(response, "Monday")
+        self.assertContains(response, "Example School 0")
+        self.assertContains(response, "Archery")
+
+    def test_schedule_create_and_update_render_dedicated_form_layout(self):
+        for route, args, heading in (
+            ("sched-create", [], "Create Schedule"),
+            ("sched-update", [self.schedule.id], "Edit Schedule"),
+        ):
+            with self.subTest(route=route):
+                response = self.client.get(reverse(route, args=args))
+
+                self.assertEqual(response.status_code, 200)
+                self.assertIsInstance(response.context["form"], SchedForm)
+                self.assertContains(response, heading)
+                self.assertContains(response, "Schedule Name")
+                self.assertContains(response, "Stored Schedule Data")
+                self.assertContains(response, "Use a clear name")
+                self.assertContains(response, "Generated schedule output")
+                self.assertContains(response, "current School, Activity, and Location configuration")
+                self.assertContains(response, '<textarea name="sched_data"', html=False)
+                self.assertNotContains(response, '<form action="", method=POST>', html=False)
+
+    def test_schedule_create_and_update_posts_preserve_existing_crud_behavior(self):
+        create_response = self.client.post(
+            reverse("sched-create"),
+            {"sched_name": "Created Schedule", "sched_data": '{"source": "created"}'},
+        )
+
+        self.assertRedirects(create_response, reverse("sched-list"))
+        created_schedule = TheSched.objects.get(sched_name="Created Schedule")
+        self.assertEqual(created_schedule.sched_data, {"source": "created"})
+
+        update_response = self.client.post(
+            reverse("sched-update", args=[created_schedule.id]),
+            {"sched_name": "Updated Schedule", "sched_data": '{"source": "updated"}'},
+        )
+
+        self.assertRedirects(update_response, reverse("sched-list"))
+        created_schedule.refresh_from_db()
+        self.assertEqual(created_schedule.sched_name, "Updated Schedule")
+        self.assertEqual(created_schedule.sched_data, {"source": "updated"})
+
+    def test_schedule_delete_confirmation_renders_destructive_warning(self):
+        response = self.client.get(reverse("sched-delete", args=[self.schedule.id]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Confirm Schedule Deletion")
+        self.assertContains(response, "Existing Operational Schedule")
+        self.assertContains(response, "removes its stored generated schedule data")
+        self.assertContains(response, "This action cannot be undone.")
+        self.assertContains(response, "Confirm Delete")
+        self.assertContains(response, "Cancel")
 
 
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
