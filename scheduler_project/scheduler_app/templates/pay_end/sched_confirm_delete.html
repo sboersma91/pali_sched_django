@@ -1,15 +1,19 @@
 {% extends 'pay_end/base_pay.html' %}
-{% block title %}Add sched{% endblock title %}
+{% block title %}Delete {{ sched.sched_name }}{% endblock title %}
 {% block content %}
-
-
- <a href="{% url 'sched-list' %}"> Go Back</a>
-
-<form method="POST">
-    {% csrf_token %}
-    <p>Are your sure you want to delete this sched? <b>{{sched}}</b> </p>
-    <input class="button" type="submit" value="Delete" />
-</form>
-
-
+  <div class="card border-danger mt-4 mb-4">
+    <div class="card-header bg-danger text-white">
+      <h1 class="h4 mb-0">Confirm Schedule Deletion</h1>
+    </div>
+    <div class="card-body">
+      <p>Are you sure you want to permanently delete <strong>{{ sched.sched_name }}</strong>?</p>
+      <p class="text-danger fw-bold">Deleting this schedule removes its stored generated schedule data.</p>
+      <p class="mb-4">This action cannot be undone.</p>
+      <form method="post" class="d-flex flex-wrap gap-2">
+        {% csrf_token %}
+        <button type="submit" class="btn btn-danger">Confirm Delete</button>
+        <a href="{% url 'sched-detail' sched.id %}" class="btn btn-secondary">Cancel</a>
+      </form>
+    </div>
+  </div>
 {% endblock content %}
