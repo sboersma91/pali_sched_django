@@ -1,14 +1,60 @@
 {% extends 'pay_end/base_pay.html' %}
-
+{% block title %}{{ course.course_name }}{% endblock title %}
 {% block content %}
-    <center>
-        <h1>{{course}} Details</h1>
-        <!-- <ul>{{ course.id }}</ul> -->
-        {% for p_loc in course.primary_locs.all %}
-        <ul><strong>Course Locations: </strong>{{ p_loc }}</ul>
-        {% endfor %}
-        <ul><strong>Course Length: </strong>{{ course.course_len }} </ul>
-        <hr><hr>
-        <!-- need to loop through the locations currently coming up as app.loctions.none??? -->
-    </center>
-    {% endblock %}
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-4 mb-3">
+        <div>
+            <h1 class="mb-1">{{ course.course_name }}</h1>
+            {% if course.course_len == 2 %}
+                <span class="badge bg-primary">Two-block daytime activity</span>
+            {% elif course.course_len == 1 %}
+                <span class="badge bg-info text-dark">One-block daytime activity</span>
+            {% elif course.course_len == 0 %}
+                <span class="badge bg-dark">Night activity</span>
+            {% else %}
+                <span class="badge bg-secondary">{{ course.course_len }} blocks</span>
+            {% endif %}
+        </div>
+        <div class="d-flex flex-wrap gap-2">
+            <a href="{% url 'course-update' course.id %}" class="btn btn-secondary">Edit Course</a>
+            <a href="{% url 'course-delete' course.id %}" class="btn btn-outline-danger">Delete Course</a>
+            <a href="{% url 'course-list' %}" class="btn btn-outline-primary">Back to Courses</a>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-body">
+            <dl class="row mb-4">
+                <dt class="col-sm-3">Course Name</dt>
+                <dd class="col-sm-9">{{ course.course_name }}</dd>
+
+                <dt class="col-sm-3">Abbreviation</dt>
+                <dd class="col-sm-9">{{ course.abriviation|default:"No abbreviation" }}</dd>
+
+                <dt class="col-sm-3">Schedule Length</dt>
+                <dd class="col-sm-9">
+                    {% if course.course_len == 2 %}
+                        Two-block daytime activity
+                    {% elif course.course_len == 1 %}
+                        One-block daytime activity
+                    {% elif course.course_len == 0 %}
+                        Night activity
+                    {% else %}
+                        {{ course.course_len }} blocks
+                    {% endif %}
+                </dd>
+            </dl>
+
+            <h2 class="h5">Primary Locations</h2>
+            <ul class="list-group list-group-flush">
+                {% for location in course.primary_locs.all %}
+                    <li class="list-group-item px-0 d-flex flex-wrap justify-content-between gap-2">
+                        <span>{{ location.loc_name }}</span>
+                        <span class="text-muted">{{ location.loc_short|default:"No abbreviation" }}</span>
+                    </li>
+                {% empty %}
+                    <li class="list-group-item px-0 text-muted">No primary locations have been assigned.</li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+{% endblock %}

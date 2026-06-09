@@ -1,18 +1,60 @@
 {% extends 'pay_end/base_pay.html' %}
+{% block title %}Courses{% endblock title %}
 {% block content %}
-<a href="{% url 'course-create' %}">Add New Course</a> 
-    <center>
-        <h1>Courses List html</h1>
-    {% for c in course.all %}
-    <h4><strong>{{ c.course_name }}</strong></h4>
-    <a href="{% url 'course-detail' c.id %}">Details</a>
-    <a href="{% url 'course-update' c.id %}">Update</a>
-    <a href="{% url 'course-delete' c.id %}">Delete</a>
-    <!-- <h5>{{ loc.loc_short }} </h5>
-    <h6>{{ loc.description }} </h6> -->
-    <hr>
-    {% empty %}
-    <h4>You have not made any locations yet</h4>
-    {% endfor %}
-    </center>
-{% endblock%}
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-4 mb-3">
+        <div>
+            <h1 class="mb-1">Courses</h1>
+            <p class="text-muted mb-0">Review schedule length and primary locations for each activity.</p>
+        </div>
+        <a href="{% url 'course-create' %}" class="btn btn-primary">Add New Course</a>
+    </div>
+
+    <div class="table-responsive">
+        <table class="table table-striped table-hover align-middle">
+            <thead class="table-light">
+                <tr>
+                    <th scope="col">Course Name</th>
+                    <th scope="col">Abbreviation</th>
+                    <th scope="col">Schedule Length</th>
+                    <th scope="col">Primary Locations</th>
+                    <th scope="col" class="text-end">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for c in course %}
+                    <tr>
+                        <td><strong>{{ c.course_name }}</strong></td>
+                        <td>{{ c.abriviation|default:"—" }}</td>
+                        <td>
+                            {% if c.course_len == 2 %}
+                                <span class="badge bg-primary">Two-block daytime activity</span>
+                            {% elif c.course_len == 1 %}
+                                <span class="badge bg-info text-dark">One-block daytime activity</span>
+                            {% elif c.course_len == 0 %}
+                                <span class="badge bg-dark">Night activity</span>
+                            {% else %}
+                                <span class="badge bg-secondary">{{ c.course_len }} blocks</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% for location in c.primary_locs.all %}
+                                {{ location.loc_name }}{% if not forloop.last %}, {% endif %}
+                            {% empty %}
+                                <span class="text-muted">No primary locations.</span>
+                            {% endfor %}
+                        </td>
+                        <td class="text-end text-nowrap">
+                            <a href="{% url 'course-detail' c.id %}" class="btn btn-sm btn-outline-primary">View</a>
+                            <a href="{% url 'course-update' c.id %}" class="btn btn-sm btn-outline-secondary">Edit</a>
+                            <a href="{% url 'course-delete' c.id %}" class="btn btn-sm btn-outline-danger">Delete</a>
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr>
+                        <td colspan="5" class="text-center text-muted py-4">No courses have been added yet.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+{% endblock %}
