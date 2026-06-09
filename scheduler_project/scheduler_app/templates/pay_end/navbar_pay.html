@@ -1,49 +1,36 @@
 <nav class="navbar navbar-expand-lg navbar-light bg-light">
-    <div class="container-fluid">
-      <a class="navbar-brand" href="#">Navbar</a>
-      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarSupportedContent" aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation">
-        <span class="navbar-toggler-icon"></span>
-      </button>
-      <div class="collapse navbar-collapse" id="navbarSupportedContent">
-        <ul class="navbar-nav me-auto mb-2 mb-lg-0">
-          <li class="nav-item">
-            <a class="nav-link active" aria-current="page" href="{% url 'home-paid' %}">Home</a>
-          </li>
-          <li class="nav-item">
-            <a class="nav-link" href="{% url 'home-paid' %}">Link</a>
-          </li>
-          <li class="nav-item dropdown">
-            <a class="nav-link dropdown-toggle" href="#" id="navbarDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
-              Forms_Add
-            </a>
-            <ul class="dropdown-menu" aria-labelledby="navbarDropdown">
-              <li><a class="dropdown-item" href="{% url 'add-location' %}">Add Location</a></li>
-              <li><a class="dropdown-item" href="{% url 'add-course' %}">Add Courses</a></li>
-              <li><a class="dropdown-item" href="{% url 'school-create' %}">Add School</a></li>
-              <li><a class="dropdown-item" href="{% url 'add-instructor' %}">Add Instructor</a></li>
-              <li><hr class="dropdown-divider"></li>
-              <li><a class="dropdown-item" href="{% url 'add-instructor' %}">add instructor</a></li>
-            </ul>
-          </li>
-          <li class="nav-item dropdown">
-            <a class="nav-link dropdown-toggle" href="#" id="navbarDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
-              Crud
-            </a>
-            <ul class="dropdown-menu" aria-labelledby="navbarDropdown">
-              <li><a class="dropdown-item" href="{% url 'location-list' %}">Locations</a></li>
-              <li><a class="dropdown-item" href="{% url 'course-list' %}">Courses</a></li>
-              <li><a class="dropdown-item" href="{% url 'school-list' %}">School</a></li>
-              <li><a class="dropdown-item" href="{% url 'sched-list' %}">Schedule</a></li>
-              <li><hr class="dropdown-divider"></li>
-              <li><a class="dropdown-item" href="{% url 'home' %}">og_home</a></li>
-            </ul>
-          </li>
-        </ul>
-        <form class="d-flex" method="POST" action="{% url 'search-results'  %}">
-          {% csrf_token %}
-          <input class="form-control me-2" type="search" placeholder="Search" aria-label="Search" name="search-box">
-          <button class="btn btn-outline-success" type="submit">Search</button>
-        </form>
-      </div>
+  <div class="container-fluid">
+    <a class="navbar-brand" href="{% url 'home-paid' %}">Pali Scheduler</a>
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#operationalNavbar" aria-controls="operationalNavbar" aria-expanded="false" aria-label="Toggle navigation">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+    <div class="collapse navbar-collapse" id="operationalNavbar">
+      <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+        <li class="nav-item">
+          <a class="nav-link" href="{% url 'home-paid' %}">Dashboard</a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" href="{% url 'sched-list' %}">Schedules</a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" href="{% url 'school-list' %}">Schools</a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" href="{% url 'course-list' %}">Activities</a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" href="{% url 'location-list' %}">Locations</a>
+        </li>
+      </ul>
+      <ul class="navbar-nav ms-auto mb-2 mb-lg-0">
+        <li class="nav-item">
+          {% if user.is_authenticated %}
+            <a class="nav-link" href="{% url 'logout' %}">Log Out</a>
+          {% else %}
+            <a class="nav-link" href="{% url 'login' %}">Log In</a>
+          {% endif %}
+        </li>
+      </ul>
     </div>
-  </nav>
+  </div>
+</nav>

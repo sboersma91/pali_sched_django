@@ -1,7 +1,64 @@
+from django.contrib.auth import get_user_model
 from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 
 from .models import Course, Locations, Schools, class_len, class_locs
+
+
+@override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
+class OperationalNavigationTests(TestCase):
+    def setUp(self):
+        self.client = Client(HTTP_HOST="localhost")
+
+    def test_operational_navbar_renders_canonical_links(self):
+        response = self.client.get(reverse("home-paid"))
+
+        self.assertEqual(response.status_code, 200)
+        expected_links = {
+            "Pali Scheduler": reverse("home-paid"),
+            "Dashboard": reverse("home-paid"),
+            "Schedules": reverse("sched-list"),
+            "Schools": reverse("school-list"),
+            "Activities": reverse("course-list"),
+            "Locations": reverse("location-list"),
+        }
+        for label, url in expected_links.items():
+            with self.subTest(label=label):
+                self.assertContains(response, f'href="{url}">{label}</a>', html=False)
+
+    def test_operational_navbar_omits_placeholders_and_legacy_add_links(self):
+        response = self.client.get(reverse("home-paid"))
+
+        self.assertEqual(response.status_code, 200)
+        for removed_label in ("Forms_Add", "Crud", "og_home", "Add Instructor"):
+            with self.subTest(label=removed_label):
+                self.assertNotContains(response, removed_label)
+        for legacy_url in (
+            reverse("add-location"),
+            reverse("add-course"),
+            reverse("add-school"),
+            reverse("add-instructor"),
+            reverse("search-results"),
+        ):
+            with self.subTest(url=legacy_url):
+                self.assertNotContains(response, f'href="{legacy_url}"', html=False)
+        self.assertNotContains(response, ">Link</a>", html=False)
+        self.assertNotContains(response, 'type="search"', html=False)
+
+    def test_operational_navbar_shows_log_in_for_anonymous_user(self):
+        response = self.client.get(reverse("home-paid"))
+
+        self.assertContains(response, f'href="{reverse("login")}">Log In</a>', html=False)
+        self.assertNotContains(response, "Log Out")
+
+    def test_operational_navbar_shows_log_out_for_authenticated_user(self):
+        user = get_user_model().objects.create_user(username="operator", password="password")
+        self.client.force_login(user)
+
+        response = self.client.get(reverse("home-paid"))
+
+        self.assertContains(response, f'href="{reverse("logout")}">Log Out</a>', html=False)
+        self.assertNotContains(response, "Log In")
 
 
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
@@ -34,13 +91,13 @@ class SchoolFormWorkflowTests(TestCase):
             "sorted_subject_lst": "",
         }
 
-    def test_navbar_add_school_links_to_canonical_create_page(self):
+    def test_school_pages_link_to_canonical_school_list_in_navbar(self):
         response = self.client.get(reverse("school-create"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(
             response,
-            f'<a class="dropdown-item" href="{reverse("school-create")}">Add School</a>',
+            f'<a class="nav-link" href="{reverse("school-list")}">Schools</a>',
             html=True,
         )
 
