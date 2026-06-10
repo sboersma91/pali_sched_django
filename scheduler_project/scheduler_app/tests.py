@@ -9,6 +9,64 @@ from .models import Course, Locations, Schools, TheSched, class_len, class_locs
 
 
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
+class PublicLandingPageTests(TestCase):
+    def setUp(self):
+        self.client = Client(HTTP_HOST="localhost")
+
+    def test_public_home_renders_product_heading_and_workflow(self):
+        response = self.client.get(reverse("home"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Create clear operational activity schedules")
+        self.assertContains(
+            response,
+            "Configure Locations, Activities, and School visits, then generate a readable weekly Schedule for each activity group.",
+        )
+        self.assertContains(response, "How Pali Scheduler Works")
+        self.assertContains(response, "Review the operational output")
+        self.assertContains(response, "activity group, weekday, and time block")
+        self.assertNotContains(response, "Hello and Welcome to the Scheduler app!")
+
+    def test_public_home_renders_four_workflow_cards_without_crud_links(self):
+        response = self.client.get(reverse("home"))
+
+        self.assertEqual(response.status_code, 200)
+        for workflow in ("Locations", "Activities", "Schools", "Schedules"):
+            with self.subTest(workflow=workflow):
+                self.assertContains(response, f'<h3 class="h5 card-title">{workflow}</h3>', html=True)
+        for operational_route in (
+            "location-list",
+            "add-loc",
+            "course-list",
+            "course-create",
+            "school-list",
+            "school-create",
+            "sched-list",
+            "sched-create",
+        ):
+            with self.subTest(route=operational_route):
+                self.assertNotContains(response, f'href="{reverse(operational_route)}"', html=False)
+
+    def test_public_home_shows_login_and_create_account_for_anonymous_user(self):
+        response = self.client.get(reverse("home"))
+
+        self.assertContains(response, f'<a href="{reverse("login")}" class="btn btn-primary btn-lg">Log In</a>', html=True)
+        self.assertContains(response, f'<a href="{reverse("register_user")}" class="btn btn-outline-primary btn-lg">Create Account</a>', html=True)
+        self.assertNotContains(response, "Open Operational Dashboard")
+
+    def test_public_home_shows_dashboard_action_for_authenticated_user(self):
+        user = get_user_model().objects.create_user(username="operator", password="password")
+        self.client.force_login(user)
+
+        response = self.client.get(reverse("home"))
+
+        self.assertContains(response, f'<a href="{reverse("home-paid")}" class="btn btn-primary btn-lg">Open Operational Dashboard</a>', html=True)
+        self.assertNotContains(response, f'<a href="{reverse("login")}" class="btn btn-primary btn-lg">Log In</a>', html=True)
+        self.assertNotContains(response, "Create Account")
+
+
+
+@override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
 class OperationalNavigationTests(TestCase):
     def setUp(self):
         self.client = Client(HTTP_HOST="localhost")
