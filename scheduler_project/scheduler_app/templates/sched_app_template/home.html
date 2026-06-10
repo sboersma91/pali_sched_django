@@ -1,13 +1,77 @@
 {% extends 'sched_app_template/base.html' %}
-
 {% block content %}
+  <section class="py-5">
+    <div class="row align-items-center g-4">
+      <div class="col-lg-8">
+        <h1 class="display-5 fw-bold mb-3">Create clear operational activity schedules</h1>
+        <p class="lead text-muted mb-4">Configure Locations, Activities, and School visits, then generate a readable weekly Schedule for each activity group.</p>
+        <div class="d-flex flex-wrap gap-2">
+          {% if user.is_authenticated %}
+            <a href="{% url 'home-paid' %}" class="btn btn-primary btn-lg">Open Operational Dashboard</a>
+          {% else %}
+            <a href="{% url 'login' %}" class="btn btn-primary btn-lg">Log In</a>
+            <a href="{% url 'register_user' %}" class="btn btn-outline-primary btn-lg">Create Account</a>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </section>
 
-    <center>
-        <br><br>
-        <h1>Hello and Welcome to the Scheduler app!</h1>
-        <p>Here you will find a tool to help you with scheduling. Weather this schedule is for your staff or for coordinating staff for classes, classes for available spaces, and overall class materials  </p>
+  <section class="py-4" aria-labelledby="how-it-works-heading">
+    <div class="mb-4">
+      <h2 id="how-it-works-heading" class="h2 mb-2">How Pali Scheduler Works</h2>
+      <p class="text-muted mb-0">Move through four clear operational steps to prepare and review a weekly Schedule.</p>
+    </div>
 
+    <div class="row g-4">
+      <div class="col-md-6 col-xl-3">
+        <div class="card h-100">
+          <div class="card-body">
+            <p class="text-primary fw-bold mb-2">Step 1</p>
+            <h3 class="h5 card-title">Locations</h3>
+            <p class="card-text text-muted mb-0">Define the spaces available for scheduling and record useful operator notes.</p>
+          </div>
+        </div>
+      </div>
 
-    </center>
+      <div class="col-md-6 col-xl-3">
+        <div class="card h-100">
+          <div class="card-body">
+            <p class="text-primary fw-bold mb-2">Step 2</p>
+            <h3 class="h5 card-title">Activities</h3>
+            <p class="card-text text-muted mb-0">Configure activity Schedule length and the Locations where each Activity can run.</p>
+          </div>
+        </div>
+      </div>
 
+      <div class="col-md-6 col-xl-3">
+        <div class="card h-100">
+          <div class="card-body">
+            <p class="text-primary fw-bold mb-2">Step 3</p>
+            <h3 class="h5 card-title">Schools</h3>
+            <p class="card-text text-muted mb-0">Prepare School visits with dates, activity groups, students, and selected Activities.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-md-6 col-xl-3">
+        <div class="card h-100 border-primary">
+          <div class="card-body">
+            <p class="text-primary fw-bold mb-2">Step 4</p>
+            <h3 class="h5 card-title">Schedules</h3>
+            <p class="card-text text-muted mb-0">Generate and review the weekly operational Schedule from the current configuration.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="py-5" aria-labelledby="schedule-output-heading">
+    <div class="card bg-light border-0">
+      <div class="card-body p-4 p-lg-5">
+        <h2 id="schedule-output-heading" class="h3 mb-3">Review the operational output</h2>
+        <p class="lead mb-0">Generated Schedules can be reviewed by activity group, weekday, and time block.</p>
+      </div>
+    </div>
+  </section>
 {% endblock %}

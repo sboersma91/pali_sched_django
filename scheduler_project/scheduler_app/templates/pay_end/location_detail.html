@@ -1,14 +1,43 @@
 {% extends 'pay_end/base_pay.html' %}
+{% block title %}{{ location.loc_name }}{% endblock title %}
 {% block content %}
-    <center>
-        <h1>{{location}} Details</h1>
-        <!-- <ul>{{ location.id }}</ul> -->
-        <ul>Abriiation: {{ location.loc_short }}</ul>
-        <ul>Description: {{ location.description }}</ul>
-        {% if location.availible %}
-        <ul>Availible</ul>
-        {% else %}
-        <ul>Not Availible</ul>
-        {% endif %}
-    </center>
-{% endblock%}
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-4 mb-3">
+        <div>
+            <h1 class="mb-1">{{ location.loc_name }}</h1>
+            {% if location.availible %}
+                <span class="badge bg-success">Available</span>
+            {% else %}
+                <span class="badge bg-secondary">Unavailable</span>
+            {% endif %}
+        </div>
+        <div class="d-flex flex-wrap gap-2">
+            <a href="{% url 'location-update' location.id %}" class="btn btn-secondary">Edit Location</a>
+            <a href="{% url 'location-delete' location.id %}" class="btn btn-outline-danger">Delete Location</a>
+            <a href="{% url 'location-list' %}" class="btn btn-outline-primary">Back to Locations</a>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-body">
+            <dl class="row mb-0">
+                <dt class="col-sm-3">Location Name</dt>
+                <dd class="col-sm-9">{{ location.loc_name }}</dd>
+
+                <dt class="col-sm-3">Abbreviation</dt>
+                <dd class="col-sm-9">{{ location.loc_short|default:"No abbreviation" }}</dd>
+
+                <dt class="col-sm-3">Availability</dt>
+                <dd class="col-sm-9">
+                    {% if location.availible %}
+                        <span class="badge bg-success">Available for Scheduling</span>
+                    {% else %}
+                        <span class="badge bg-secondary">Unavailable for Scheduling</span>
+                    {% endif %}
+                </dd>
+
+                <dt class="col-sm-3">Operator Notes</dt>
+                <dd class="col-sm-9">{{ location.description|default:"No operator notes."|linebreaksbr }}</dd>
+            </dl>
+        </div>
+    </div>
+{% endblock %}

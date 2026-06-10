@@ -1,14 +1,31 @@
 {% extends 'pay_end/base_pay.html' %}
-{% block title %}Add sched{% endblock title %}
+{% block title %}{% if object %}Edit {{ object.sched_name }}{% else %}Create Schedule{% endif %}{% endblock title %}
 {% block content %}
+  <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-4 mb-3">
+    <div>
+      <h1 class="mb-1">{% if object %}Edit Schedule Record{% else %}Create Schedule{% endif %}</h1>
+      <p class="text-muted mb-0">{% if object %}Editing this record does not directly edit the generated Schedule table. {% endif %}Generated output uses the current Schools, Activities, and Locations each time the Schedule is viewed.</p>
+    </div>
+    <a href="{% url 'sched-list' %}" class="btn btn-outline-primary">Back to Schedules</a>
+  </div>
 
-    <center>
-        <h1>Schedule Form</h1>
-        <a href="{% url 'sched-list' %}">Back sched-list</a>
-            <form action="", method=POST>
-                {% csrf_token %}
-                {{ form.as_p }}
-            <input type="submit" value="Submit" class="btn btn-secondary">
-            </form>
-    </center>
+  <div class="alert alert-info" role="alert">
+    <h2 class="h5 alert-heading">Prepare before generating</h2>
+    <p class="mb-2">Review the current operational configuration before creating or viewing a Schedule:</p>
+    <div class="d-flex flex-wrap gap-2">
+      <a href="{% url 'location-list' %}" class="btn btn-sm btn-outline-primary">Review Locations</a>
+      <a href="{% url 'course-list' %}" class="btn btn-sm btn-outline-primary">Review Activities</a>
+      <a href="{% url 'school-list' %}" class="btn btn-sm btn-outline-primary">Review Schools</a>
+    </div>
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-body">
+      <form method="post">
+        {% csrf_token %}
+        {% include 'pay_end/_schedule_fields.html' %}
+        <button type="submit" class="btn btn-primary mt-4">{% if object %}Save Schedule Record{% else %}Create Schedule{% endif %}</button>
+      </form>
+    </div>
+  </div>
 {% endblock %}
