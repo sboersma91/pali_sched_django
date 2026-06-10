@@ -127,6 +127,9 @@ class SchedList(ListView):
     context_object_name = 'sched'
     ordering = ['sched_name']
 
+    def get_queryset(self):
+        return super().get_queryset().prefetch_related('schools')
+
 class SchedDetail(DetailView):
     model = TheSched
     template_name = 'pay_end/sched_detail.html'
@@ -196,8 +199,14 @@ class SchedDetail(DetailView):
                     cells.append(display_values.get(value, value))
             schedule_rows.append({'ag': ag, 'cells': cells})
 
+        context['selected_schools'] = self.object.schools.order_by('school_name')
         context['schedule_days'] = schedule_days
         context['schedule_rows'] = schedule_rows
+        context['generation_diagnostics'] = getattr(self.object, 'generation_diagnostics', [])
+        context['generation_blocked'] = bool(context['generation_diagnostics'])
+        context['generation_complete'] = getattr(self.object, 'generation_complete', True)
+        context['generation_succeeded'] = not context['generation_blocked'] and context['generation_complete']
+        context['generation_incomplete'] = not context['generation_blocked'] and not context['generation_complete']
         return context
 
 class SchedCreate(CreateView):

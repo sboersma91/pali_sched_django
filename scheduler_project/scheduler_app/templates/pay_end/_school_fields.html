@@ -82,3 +82,30 @@
         </div>
     </div>
 </div>
+
+<script>
+    (() => {
+        const totalStudents = document.getElementById('{{ form.total_students.id_for_label }}');
+        const activityGroups = document.getElementById('{{ form.ag_num.id_for_label }}');
+
+        if (!totalStudents || !activityGroups) return;
+
+        const targetGroupSize = Number.parseInt(activityGroups.dataset.targetGroupSize, 10);
+        const initialStudentCount = Number.parseInt(totalStudents.value, 10);
+        const initialSuggestion = initialStudentCount > 0 ? String(Math.ceil(initialStudentCount / targetGroupSize)) : '';
+        let lastSuggestion = !initialStudentCount || activityGroups.value === initialSuggestion ? activityGroups.value : '';
+
+        totalStudents.addEventListener('input', () => {
+            const studentCount = Number.parseInt(totalStudents.value, 10);
+            const suggestion = studentCount > 0 ? String(Math.ceil(studentCount / targetGroupSize)) : '';
+            if (!activityGroups.value || activityGroups.value === lastSuggestion) {
+                activityGroups.value = suggestion;
+                lastSuggestion = suggestion;
+            }
+        });
+
+        activityGroups.addEventListener('input', () => {
+            if (activityGroups.value !== lastSuggestion) lastSuggestion = '';
+        });
+    })();
+</script>

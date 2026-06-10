@@ -1,10 +1,11 @@
 from unittest.mock import PropertyMock, patch
 
 from django.contrib.auth import get_user_model
-from django.test import Client, TestCase, override_settings
+from django.test import Client, RequestFactory, TestCase, override_settings
 from django.urls import reverse
 
-from .forms import SchedForm
+from .forms import SchoolsForm, SchedForm, suggest_activity_group_count
+from .views import SchedDetail, SchedList
 from .models import (
     Course,
     Locations,
@@ -277,10 +278,19 @@ class OperationalDashboardTests(TestCase):
 class ScheduleWorkflowTests(TestCase):
     def setUp(self):
         self.client = Client(HTTP_HOST="localhost")
+        self.school = Schools.schools_list.create(
+            school_name="Existing Schedule School",
+            arrive="Thur",
+            depart="Fri",
+            total_students=16,
+            ag_num=1,
+            attending_year="2026-06-04",
+        )
         self.schedule = TheSched.objects.create(
             sched_name="Existing Operational Schedule",
             sched_data={"source": "test"},
         )
+        self.schedule.schools.add(self.school)
 
     def test_schedule_list_renders_readable_operational_summary(self):
         response = self.client.get(reverse("sched-list"))
@@ -289,15 +299,25 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, 'class="table table-striped table-hover align-middle"', html=False)
         self.assertContains(response, "Schedule Name")
         self.assertContains(response, "Created")
-        self.assertContains(response, "Record Data")
+        self.assertContains(response, "Selected Schools")
         self.assertContains(response, "Existing Operational Schedule")
-        self.assertContains(response, "Record data available")
+        self.assertContains(response, "1 School")
         self.assertContains(response, "Opening a Schedule regenerates its current output")
         self.assertContains(response, "Create Schedule")
         self.assertContains(response, "Generate / View")
         self.assertContains(response, "Edit Record")
         self.assertContains(response, "Delete")
         self.assertNotContains(response, "Add New Course")
+
+    def test_schedule_list_shows_selected_school_count(self):
+        request = RequestFactory().get(reverse("sched-list"))
+        response = SchedList.as_view()(request)
+        response.render()
+        rendered_content = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Selected Schools", rendered_content)
+        self.assertIn("1 School", rendered_content)
 
     def test_schedule_detail_renders_metadata_actions_and_readable_schedule_table(self):
         generated_schedule = {
@@ -312,7 +332,8 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, "Generated Schedule", count=2)
         self.assertContains(response, "Schedule Name")
         self.assertContains(response, "Created")
-        self.assertContains(response, "Schedule Record Data")
+        self.assertContains(response, "Selected Schools")
+        self.assertContains(response, "Existing Schedule School")
         self.assertContains(response, "Edit Schedule Record")
         self.assertContains(response, "Delete Schedule")
         self.assertContains(response, "Back to Schedules")
@@ -338,10 +359,10 @@ class ScheduleWorkflowTests(TestCase):
                 self.assertIsInstance(response.context["form"], SchedForm)
                 self.assertContains(response, heading)
                 self.assertContains(response, "Schedule Name")
-                self.assertContains(response, "Schedule Record Data")
+                self.assertContains(response, "Schools to Schedule")
                 self.assertContains(response, "Use a clear name")
-                self.assertContains(response, "does not directly control the generated Schedule table")
-                self.assertContains(response, "current Schools, Activities, and Locations")
+                self.assertContains(response, "Select the Schools that should be generated together")
+                self.assertContains(response, "selected Schools and their current Activities and Locations")
                 self.assertContains(response, "Prepare before generating")
                 self.assertContains(response, "Review Locations")
                 self.assertContains(response, "Review Activities")
@@ -349,30 +370,68 @@ class ScheduleWorkflowTests(TestCase):
                 self.assertContains(response, f'href="{reverse("location-list")}"', html=False)
                 self.assertContains(response, f'href="{reverse("course-list")}"', html=False)
                 self.assertContains(response, f'href="{reverse("school-list")}"', html=False)
-                self.assertContains(response, "Use <code>{}</code> as a valid empty JSON value.", html=False)
-                self.assertContains(response, 'placeholder="{}"', html=False)
-                self.assertContains(response, '<textarea name="sched_data"', html=False)
+                self.assertContains(response, f'name="schools" value="{self.school.id}"', html=False)
+                self.assertNotContains(response, 'name="sched_data"', html=False)
                 self.assertNotContains(response, '<form action="", method=POST>', html=False)
 
     def test_schedule_create_and_update_posts_preserve_existing_crud_behavior(self):
         create_response = self.client.post(
             reverse("sched-create"),
-            {"sched_name": "Created Schedule", "sched_data": '{"source": "created"}'},
+            {"sched_name": "Created Schedule", "schools": [str(self.school.id)]},
         )
 
         self.assertRedirects(create_response, reverse("sched-list"))
         created_schedule = TheSched.objects.get(sched_name="Created Schedule")
-        self.assertEqual(created_schedule.sched_data, {"source": "created"})
+        self.assertEqual(list(created_schedule.schools.all()), [self.school])
+        self.assertEqual(created_schedule.sched_data, {})
 
+        second_school = Schools.schools_list.create(
+            school_name="Updated Schedule School",
+            arrive="Thur",
+            depart="Fri",
+            total_students=16,
+            ag_num=1,
+            attending_year="2026-06-04",
+        )
         update_response = self.client.post(
             reverse("sched-update", args=[created_schedule.id]),
-            {"sched_name": "Updated Schedule", "sched_data": '{"source": "updated"}'},
+            {"sched_name": "Updated Schedule", "schools": [str(second_school.id)]},
         )
 
         self.assertRedirects(update_response, reverse("sched-list"))
         created_schedule.refresh_from_db()
         self.assertEqual(created_schedule.sched_name, "Updated Schedule")
-        self.assertEqual(created_schedule.sched_data, {"source": "updated"})
+        self.assertEqual(list(created_schedule.schools.all()), [second_school])
+        self.assertEqual(created_schedule.sched_data, {})
+
+    def test_schedule_form_saves_selected_schools_and_excludes_sched_data(self):
+        second_school = Schools.schools_list.create(
+            school_name="Second Form School",
+            arrive="Thur",
+            depart="Fri",
+            total_students=16,
+            ag_num=1,
+            attending_year="2026-06-04",
+        )
+        form = SchedForm(data={
+            "sched_name": "Form Selected Schedule",
+            "schools": [str(self.school.id), str(second_school.id)],
+            "sched_data": '{"operator": "should be ignored"}',
+        })
+
+        self.assertTrue(form.is_valid(), form.errors)
+        created_schedule = form.save()
+        self.assertEqual(set(created_schedule.schools.all()), {self.school, second_school})
+        self.assertEqual(created_schedule.sched_data, {})
+        self.assertNotIn("sched_data", form.fields)
+
+        update_form = SchedForm(
+            data={"sched_name": "Updated Form Schedule", "schools": [str(second_school.id)]},
+            instance=created_schedule,
+        )
+        self.assertTrue(update_form.is_valid(), update_form.errors)
+        updated_schedule = update_form.save()
+        self.assertEqual(list(updated_schedule.schools.all()), [second_school])
 
     def test_schedule_delete_confirmation_renders_destructive_warning(self):
         response = self.client.get(reverse("sched-delete", args=[self.schedule.id]))
@@ -385,6 +444,198 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, "This action cannot be undone.")
         self.assertContains(response, "Confirm Delete")
         self.assertContains(response, "Cancel")
+
+
+@override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
+class ScheduleGenerationRegressionTests(TestCase):
+    def setUp(self):
+        location = Locations.objects.create(loc_name="Schedule Regression Location", loc_short="SR")
+        ropes = Course.objects.create(course_name="Ropes", abriviation="ROP", course_len=2)
+        ropes.primary_locs.add(location)
+        self.two_block = Course.objects.create(course_name="Regression Two Block", abriviation="R2", course_len=2)
+        self.one_block = Course.objects.create(course_name="Regression One Block", abriviation="R1", course_len=1)
+        self.night = Course.objects.create(course_name="Regression Night", abriviation="RN", course_len=0)
+        for course in (self.two_block, self.one_block, self.night):
+            course.primary_locs.add(location)
+
+        self.school = Schools.schools_list.create(
+            school_name="Balanced Regression School",
+            arrive="Thur",
+            depart="Fri",
+            total_students=16,
+            ag_num=1,
+            attending_year="2026-06-04",
+        )
+        self.school.subject.set([self.two_block, self.one_block, self.night])
+        self.schedule = TheSched.objects.create(sched_name="Regression Schedule", sched_data={})
+        self.schedule.schools.add(self.school)
+
+    def render_schedule_detail(self):
+        request = RequestFactory().get(reverse("sched-detail", args=[self.schedule.id]))
+        response = SchedDetail.as_view()(request, pk=self.schedule.id)
+        response.render()
+        return response, response.content.decode()
+
+    def create_second_valid_school(self):
+        school = Schools.schools_list.create(
+            school_name="Second Scoped School",
+            arrive="Thur",
+            depart="Fri",
+            total_students=16,
+            ag_num=1,
+            attending_year="2026-06-04",
+        )
+        school.subject.set([self.two_block, self.one_block, self.night])
+        return school
+
+    def test_schedules_generate_only_their_attached_schools(self):
+        second_school = self.create_second_valid_school()
+        second_schedule = TheSched.objects.create(sched_name="Second Scoped Schedule")
+        second_schedule.schools.add(second_school)
+
+        first_output = self.schedule.create_sched
+        second_output = second_schedule.create_sched
+
+        self.assertEqual(first_output["ags"], ["Balanced Regression School 0"])
+        self.assertEqual(second_output["ags"], ["Second Scoped School 0"])
+        self.assertNotEqual(first_output["ags"], second_output["ags"])
+
+    def test_diagnostics_ignore_unattached_schools(self):
+        unattached_school = Schools.schools_list.create(
+            school_name="Unattached Invalid School",
+            arrive="Thur",
+            depart="Fri",
+            total_students=16,
+            ag_num=1,
+            attending_year="2026-06-04",
+        )
+        invalid_activity = Course.objects.create(course_name="Unattached Invalid Activity", abriviation="UIA", course_len=1)
+        unattached_school.subject.set([invalid_activity])
+
+        generated_schedule = self.schedule.create_sched
+
+        self.assertEqual(self.schedule.generation_diagnostics, [])
+        self.assertTrue(self.schedule.generation_complete)
+        self.assertEqual(generated_schedule["ags"], ["Balanced Regression School 0"])
+
+    def test_schedule_generation_refreshes_blank_sorted_activity_list(self):
+        self.assertEqual(self.school.sorted_subject_lst, "")
+
+        generated_schedule = self.schedule.create_sched
+
+        self.assertNotIn("", [activity for values in generated_schedule.values() for activity in values])
+        self.school.refresh_from_db()
+        self.assertEqual(self.school.sorted_subject_lst, "")
+
+    def test_schedule_recursion_does_not_look_up_empty_activity_name(self):
+        class RejectEmptyActivityLookup(dict):
+            def __getitem__(self, activity_name):
+                if not activity_name:
+                    raise AssertionError("Scheduling recursion received an empty activity name")
+                return super().__getitem__(activity_name)
+
+        with patch("scheduler_app.models.class_locs", RejectEmptyActivityLookup()):
+            self.schedule.create_sched
+
+    def test_activity_with_no_primary_locations_aborts_generation_gracefully(self):
+        activity = Course.objects.create(course_name="No Location Activity", abriviation="NLA", course_len=1)
+        self.school.subject.set([self.two_block, activity, self.night])
+
+        generated_schedule = self.schedule.create_sched
+
+        self.assertEqual(generated_schedule, {})
+        self.assertEqual(self.schedule.generation_diagnostics, [{
+            "school": "Balanced Regression School",
+            "activity": "No Location Activity",
+            "reason": "Activity is not connected to any scheduling Locations.",
+        }])
+
+    def test_activity_missing_from_current_location_lookups_is_diagnosed(self):
+        initialize_scheduling_data(force=True)
+        class_locs.pop(self.one_block.course_name)
+
+        diagnostics = self.schedule.get_scheduling_diagnostics()
+
+        self.assertIn({
+            "school": "Balanced Regression School",
+            "activity": "Regression One Block",
+            "reason": "Activity does not appear in current scheduling Location lookups.",
+        }, diagnostics)
+
+    def test_activity_with_only_unavailable_locations_aborts_generation_gracefully(self):
+        unavailable_location = Locations.objects.create(
+            loc_name="Unavailable Regression Location",
+            loc_short="URL",
+            availible=False,
+        )
+        activity = Course.objects.create(course_name="Unavailable Location Activity", abriviation="ULA", course_len=1)
+        activity.primary_locs.add(unavailable_location)
+        self.school.subject.set([self.two_block, activity, self.night])
+
+        generated_schedule = self.schedule.create_sched
+
+        self.assertEqual(generated_schedule, {})
+        self.assertEqual(self.schedule.generation_diagnostics, [{
+            "school": "Balanced Regression School",
+            "activity": "Unavailable Location Activity",
+            "reason": "Activity has no available scheduling Locations.",
+        }])
+
+    def make_location_valid_schedule_unassignable(self):
+        location = Locations.objects.get(loc_name="Schedule Regression Location")
+        extra_two_block = Course.objects.create(course_name="Competing Two Block", abriviation="C2", course_len=2)
+        extra_two_block.primary_locs.add(location)
+        self.school.subject.set([self.two_block, extra_two_block, self.one_block, self.night])
+
+    def test_location_valid_schedule_that_cannot_fit_reports_incomplete_generation(self):
+        self.make_location_valid_schedule_unassignable()
+
+        generated_schedule = self.schedule.create_sched
+
+        self.assertFalse(self.schedule.generation_complete)
+        self.assertEqual(self.schedule.generation_diagnostics, [])
+        self.assertEqual(generated_schedule["ags"], ["Balanced Regression School 0"])
+
+    def test_schedule_detail_marks_unassignable_location_valid_output_incomplete(self):
+        self.make_location_valid_schedule_unassignable()
+
+        response, rendered_content = self.render_schedule_detail()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Schedule generation is incomplete", rendered_content)
+        self.assertIn("Activity and Location configuration passed initial checks", rendered_content)
+        self.assertIn("Location capacity, timing constraints, or Activity combinations", rendered_content)
+        self.assertIn("Incomplete Schedule Output", rendered_content)
+        self.assertIn("must not be treated as a fully generated Schedule", rendered_content)
+        self.assertIn("<table", rendered_content)
+
+    def test_schedule_detail_renders_activity_location_diagnostic_instead_of_table(self):
+        activity = Course.objects.create(course_name="Diagnostic Activity", abriviation="DA", course_len=1)
+        self.school.subject.set([self.two_block, activity, self.night])
+
+        response, rendered_content = self.render_schedule_detail()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Schedule generation could not continue", rendered_content)
+        self.assertIn("Schedule generation cannot continue until", rendered_content)
+        self.assertIn("Balanced Regression School", rendered_content)
+        self.assertIn("Diagnostic Activity", rendered_content)
+        self.assertIn("Activity is not connected to any scheduling Locations.", rendered_content)
+        self.assertNotIn("<table", rendered_content)
+
+    def test_schedule_detail_generates_and_renders_balanced_school(self):
+        response, rendered_content = self.render_schedule_detail()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.context_data["generation_complete"])
+        self.assertIn("Schedule generated successfully", rendered_content)
+        self.assertIn("Selected Schools", rendered_content)
+        self.assertIn("Balanced Regression School", rendered_content)
+        self.assertIn("Balanced Regression School 0", rendered_content)
+        self.assertIn("Regression Two Block", rendered_content)
+        self.assertIn("Regression One Block", rendered_content)
+        self.assertIn("Regression Night", rendered_content)
+        self.assertIn("<table", rendered_content)
 
 
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
@@ -412,6 +663,56 @@ class SchoolFormWorkflowTests(TestCase):
             "attending_year": "2026-06-04",
             "sorted_subject_lst": "",
         }
+
+    def test_activity_group_suggestion_uses_default_target_size(self):
+        self.assertEqual(suggest_activity_group_count(1), 1)
+        self.assertEqual(suggest_activity_group_count(16), 1)
+        self.assertEqual(suggest_activity_group_count(17), 2)
+        self.assertEqual(suggest_activity_group_count(33), 3)
+
+    def test_blank_activity_groups_use_server_side_suggestion_when_saved(self):
+        form_data = self.school_form_data(
+            "Suggested Group School", [self.wm, self.archery, self.night_hike], arrive="Thur", depart="Fri"
+        )
+        form_data["total_students"] = "33"
+        form_data["ag_num"] = ""
+        form = SchoolsForm(data=form_data)
+
+        self.assertTrue(form.is_valid(), form.errors)
+        school = form.save()
+        self.assertEqual(school.ag_num, 3)
+
+    def test_manual_activity_group_override_is_preserved(self):
+        form_data = self.school_form_data(
+            "Manual Group School", [self.wm, self.archery, self.night_hike], arrive="Thur", depart="Fri"
+        )
+        form_data["total_students"] = "33"
+        form_data["ag_num"] = "5"
+        form = SchoolsForm(data=form_data)
+
+        self.assertTrue(form.is_valid(), form.errors)
+        school = form.save()
+        self.assertEqual(school.ag_num, 5)
+
+    def test_activity_group_suggestion_preserves_existing_activity_validation(self):
+        form_data = self.school_form_data(
+            "Suggested Invalid School", [self.wm, self.night_hike], arrive="Thur", depart="Fri"
+        )
+        form_data["total_students"] = "33"
+        form_data["ag_num"] = ""
+        form = SchoolsForm(data=form_data)
+
+        self.assertFalse(form.is_valid())
+        self.assertEqual(form.data["ag_num"], "3")
+        self.assertIn("Daytime blocks: required 3, selected 2 (under by 1).", form.non_field_errors())
+
+    def test_school_form_explains_activity_group_suggestion_and_override(self):
+        form = SchoolsForm()
+
+        self.assertEqual(form.fields["ag_num"].label, "Activity Groups")
+        self.assertIn("one group per 16 students", form.fields["ag_num"].help_text)
+        self.assertIn("Adjust this value manually", form.fields["ag_num"].help_text)
+        self.assertEqual(form.fields["ag_num"].widget.attrs["data-target-group-size"], 16)
 
     def test_school_pages_link_to_canonical_school_list_in_navbar(self):
         response = self.client.get(reverse("school-create"))
