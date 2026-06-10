@@ -1,39 +1,78 @@
 {% extends 'pay_end/base_pay.html' %}
+{% block title %}{{ sched.sched_name }}{% endblock title %}
 {% block content %}
-    <center>
-        <h1>{{sched}} Details</h1>
-        <ul>{{ sched.id }}</ul>
-        <ul>Name: {{ sched.sched_name }}</ul>
-        <ul>Schools: {{ sched.lst_of_school }}</ul>
-        <hr>
+  <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-4 mb-3">
+    <div>
+      <p class="text-uppercase text-muted small mb-1">Generated Schedule</p>
+      <h1 class="mb-1">{{ sched.sched_name }}</h1>
+      <p class="text-muted mb-0">Current operational output generated when this page was opened.</p>
+    </div>
+    <div class="d-flex flex-wrap gap-2">
+      <a href="{% url 'sched-update' sched.id %}" class="btn btn-secondary">Edit Schedule Record</a>
+      <a href="{% url 'sched-delete' sched.id %}" class="btn btn-outline-danger">Delete Schedule</a>
+      <a href="{% url 'sched-list' %}" class="btn btn-outline-primary">Back to Schedules</a>
+    </div>
+  </div>
 
-        <h2>The Schedule</h2>
-        <table border="1" cellpadding="6" cellspacing="0">
-            <thead>
-                <tr>
-                    <th rowspan="2">Activity Group</th>
-                    {% for day in schedule_days %}
-                        <th colspan="{{ day.slots|length }}">{{ day.name }}</th>
-                    {% endfor %}
-                </tr>
-                <tr>
-                    {% for day in schedule_days %}
-                        {% for slot in day.slots %}
-                            <th>{{ slot.label }}</th>
-                        {% endfor %}
-                    {% endfor %}
-                </tr>
-            </thead>
-            <tbody>
-                {% for row in schedule_rows %}
-                    <tr>
-                        <th>{{ row.ag }}</th>
-                        {% for value in row.cells %}
-                            <td>{{ value }}</td>
-                        {% endfor %}
-                    </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </center>
-{% endblock%}
+  <div class="card mb-4">
+    <div class="card-body">
+      <dl class="row mb-0">
+        <dt class="col-sm-3">Schedule Name</dt>
+        <dd class="col-sm-9">{{ sched.sched_name }}</dd>
+        <dt class="col-sm-3">Created</dt>
+        <dd class="col-sm-9">{{ sched.timestamp_og|date:"M j, Y" }}</dd>
+        <dt class="col-sm-3">Schedule Record Data</dt>
+        <dd class="col-sm-9">{% if sched.sched_data %}Available{% else %}No record data{% endif %}</dd>
+      </dl>
+    </div>
+  </div>
+
+  <div class="alert alert-info mb-4" role="alert">
+    <h2 class="h5 alert-heading">How this Schedule record works</h2>
+    <p class="mb-0">Generated output uses the current Schools, Activities, and Locations. Viewing this page regenerates the current output; editing the Schedule record does not directly edit the generated table.</p>
+  </div>
+
+  <section class="mb-4" aria-labelledby="generated-schedule-heading">
+    <div class="mb-3">
+      <h2 id="generated-schedule-heading" class="h3 mb-1">Generated Schedule</h2>
+      <p class="text-muted mb-2">Activity groups are shown across the available daytime and night schedule blocks.</p>
+      <div class="d-flex flex-wrap gap-3 small" aria-label="Schedule table legend">
+        <span><code>/////</code> = unavailable or not present</span>
+        <span><code>****</code> = unassigned available block</span>
+      </div>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-bordered table-sm align-middle text-center schedule-table">
+        <thead class="table-light">
+          <tr>
+            <th rowspan="2" scope="col" class="align-middle">Activity Group</th>
+            {% for day in schedule_days %}
+              <th colspan="{{ day.slots|length }}" scope="colgroup">{{ day.name }}</th>
+            {% endfor %}
+          </tr>
+          <tr>
+            {% for day in schedule_days %}
+              {% for slot in day.slots %}
+                <th scope="col">{{ slot.label }}</th>
+              {% endfor %}
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in schedule_rows %}
+            <tr>
+              <th scope="row">{{ row.ag }}</th>
+              {% for value in row.cells %}
+                <td>{{ value }}</td>
+              {% endfor %}
+            </tr>
+          {% empty %}
+            <tr>
+              <td colspan="21" class="text-muted py-4">No activity groups are available for this generated schedule.</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endblock %}

@@ -1,6 +1,6 @@
 from django.shortcuts import render
 from .models import Locations, Course, Schools, TheSched
-from .forms import InstructorForm, LocationsForm, CourseForm, SchoolsForm
+from .forms import CourseForm, InstructorForm, LocationsForm, SchedForm, SchoolsForm
 from django.http import HttpResponseRedirect
 from django.urls import reverse_lazy
 
@@ -109,18 +109,15 @@ class LocationDetail(DetailView):
 
 class LocationCreate(CreateView):
     model = Locations
+    form_class = LocationsForm
     template_name = "pay_end/locations_form.html"
-    # fields = ['loc_name', 'loc_short', 'description','availible']
-    fields ="__all__"
     success_url = reverse_lazy('location-list')
 
 class LocationUpdate(UpdateView):
     model = Locations
+    form_class = LocationsForm
     template_name = "pay_end/locations_form.html"
-    fields = "__all__"
-    # ['loc_name', 'loc_short', 'description','availible']
     success_url = reverse_lazy('location-list')
-    # ideally change this success url to the detail version of the location.
 
 class LocationDelete(DeleteView):
     model = Locations
@@ -144,14 +141,14 @@ class CourseDetail(DetailView):
 
 class CourseCreate(CreateView):
     model = Course
+    form_class = CourseForm
     template_name = 'pay_end/course_form.html'
-    fields = "__all__"
     success_url = reverse_lazy('course-list')
 
 class CourseUpdate(UpdateView):
     model = Course
+    form_class = CourseForm
     template_name = 'pay_end/course_form.html'
-    fields = "__all__"
     success_url = reverse_lazy('course-list',)
 
 class CourseDelete(DeleteView):
@@ -282,13 +279,13 @@ class SchedDetail(DetailView):
 class SchedCreate(CreateView):
     model = TheSched
     template_name = 'pay_end/sched_form.html'
-    fields = "__all__"
+    form_class = SchedForm
     success_url = reverse_lazy('sched-list')
 
 class SchedUpdate(UpdateView):
     model = TheSched
     template_name = 'pay_end/sched_form.html'
-    fields = "__all__"
+    form_class = SchedForm
     success_url = reverse_lazy('sched-list')
 
 class SchedDelete(DeleteView):
@@ -312,7 +309,7 @@ def add_location(request):
             return HttpResponseRedirect('/add_location?submitted=True')
         # if not form.is_valid: probably reload page? or redirect with submitted in the thing?
     else:
-        form = LocationsForm
+        form = LocationsForm()
         if 'submitted' in request.GET:
             submitted = True
     
@@ -326,7 +323,7 @@ def add_course(request):
             form.save()
             return HttpResponseRedirect('/add_course?submitted=True')
     else:
-        form = CourseForm
+        form = CourseForm()
         if 'submitted' in request.GET:
             submitted = True
             
