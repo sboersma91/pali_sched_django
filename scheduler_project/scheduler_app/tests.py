@@ -4,7 +4,7 @@ from django.contrib.auth import get_user_model
 from django.test import Client, RequestFactory, TestCase, override_settings
 from django.urls import reverse
 
-from .forms import SchedForm
+from .forms import SchoolsForm, SchedForm, suggest_activity_group_count
 from .views import SchedDetail, SchedList
 from .models import (
     Course,
@@ -663,6 +663,56 @@ class SchoolFormWorkflowTests(TestCase):
             "attending_year": "2026-06-04",
             "sorted_subject_lst": "",
         }
+
+    def test_activity_group_suggestion_uses_default_target_size(self):
+        self.assertEqual(suggest_activity_group_count(1), 1)
+        self.assertEqual(suggest_activity_group_count(16), 1)
+        self.assertEqual(suggest_activity_group_count(17), 2)
+        self.assertEqual(suggest_activity_group_count(33), 3)
+
+    def test_blank_activity_groups_use_server_side_suggestion_when_saved(self):
+        form_data = self.school_form_data(
+            "Suggested Group School", [self.wm, self.archery, self.night_hike], arrive="Thur", depart="Fri"
+        )
+        form_data["total_students"] = "33"
+        form_data["ag_num"] = ""
+        form = SchoolsForm(data=form_data)
+
+        self.assertTrue(form.is_valid(), form.errors)
+        school = form.save()
+        self.assertEqual(school.ag_num, 3)
+
+    def test_manual_activity_group_override_is_preserved(self):
+        form_data = self.school_form_data(
+            "Manual Group School", [self.wm, self.archery, self.night_hike], arrive="Thur", depart="Fri"
+        )
+        form_data["total_students"] = "33"
+        form_data["ag_num"] = "5"
+        form = SchoolsForm(data=form_data)
+
+        self.assertTrue(form.is_valid(), form.errors)
+        school = form.save()
+        self.assertEqual(school.ag_num, 5)
+
+    def test_activity_group_suggestion_preserves_existing_activity_validation(self):
+        form_data = self.school_form_data(
+            "Suggested Invalid School", [self.wm, self.night_hike], arrive="Thur", depart="Fri"
+        )
+        form_data["total_students"] = "33"
+        form_data["ag_num"] = ""
+        form = SchoolsForm(data=form_data)
+
+        self.assertFalse(form.is_valid())
+        self.assertEqual(form.data["ag_num"], "3")
+        self.assertIn("Daytime blocks: required 3, selected 2 (under by 1).", form.non_field_errors())
+
+    def test_school_form_explains_activity_group_suggestion_and_override(self):
+        form = SchoolsForm()
+
+        self.assertEqual(form.fields["ag_num"].label, "Activity Groups")
+        self.assertIn("one group per 16 students", form.fields["ag_num"].help_text)
+        self.assertIn("Adjust this value manually", form.fields["ag_num"].help_text)
+        self.assertEqual(form.fields["ag_num"].widget.attrs["data-target-group-size"], 16)
 
     def test_school_pages_link_to_canonical_school_list_in_navbar(self):
         response = self.client.get(reverse("school-create"))

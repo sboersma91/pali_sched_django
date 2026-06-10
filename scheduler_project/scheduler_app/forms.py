@@ -7,6 +7,19 @@ from .models import Course, Locations, Schools, Instructor, TheSched
 from .school_accounting import calculate_school_slot_accounting
 
 
+DEFAULT_ACTIVITY_GROUP_SIZE = 16
+
+
+def suggest_activity_group_count(total_students):
+    try:
+        total_students = int(total_students)
+    except (TypeError, ValueError):
+        return None
+    if total_students <= 0:
+        return None
+    return (total_students + DEFAULT_ACTIVITY_GROUP_SIZE - 1) // DEFAULT_ACTIVITY_GROUP_SIZE
+
+
 
 class LocationsForm(ModelForm):
     class Meta:
@@ -95,6 +108,17 @@ class SchoolsForm(ModelForm):
     )
 
     def __init__(self, *args, **kwargs):
+        bound_data = args[0] if args else kwargs.get('data')
+        if bound_data is not None and not bound_data.get('ag_num'):
+            suggested_group_count = suggest_activity_group_count(bound_data.get('total_students'))
+            if suggested_group_count is not None:
+                bound_data = bound_data.copy()
+                bound_data['ag_num'] = str(suggested_group_count)
+                if args:
+                    args = (bound_data, *args[1:])
+                else:
+                    kwargs['data'] = bound_data
+
         super().__init__(*args, **kwargs)
         courses_by_length = {
             course_len: [] for course_len, _group_label, _cost_label in self.ACTIVITY_GROUPS
@@ -149,6 +173,14 @@ class SchoolsForm(ModelForm):
             'arrive':'Arrival Day',
             'depart':'Departure Day',
             'total_students':'Total Students',
+            'ag_num':'Activity Groups',
+        }
+        help_texts = {
+            'total_students': 'Enter the expected student count to receive an Activity Group suggestion.',
+            'ag_num': (
+                f'Automatically suggested at approximately one group per {DEFAULT_ACTIVITY_GROUP_SIZE} students. '
+                'Adjust this value manually when operational needs require a different group count.'
+            ),
         }
         widgets = {
             'school_name':forms.TextInput(attrs={'class':'form-control'}),
@@ -156,7 +188,10 @@ class SchoolsForm(ModelForm):
             'arrive': forms.Select(attrs={'class': 'form-select'}),
             'depart': forms.Select(attrs={'class': 'form-select'}),
             'total_students': widgets.NumberInput(attrs={'class': 'form-control'}),
-            'ag_num': widgets.NumberInput(attrs={'class': 'form-control'}),
+            'ag_num': widgets.NumberInput(attrs={
+                'class': 'form-control',
+                'data-target-group-size': DEFAULT_ACTIVITY_GROUP_SIZE,
+            }),
             'attending_year': widgets.DateInput(attrs={'class': 'form-control', 'type': 'date'}),
             'sorted_subject_lst': forms.TextInput(attrs={'class': 'form-control'}),
         }
