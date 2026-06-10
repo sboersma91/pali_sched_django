@@ -411,6 +411,12 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.school.subject.set([self.two_block, self.one_block, self.night])
         self.schedule = TheSched.objects.create(sched_name="Regression Schedule", sched_data={})
 
+    def render_schedule_detail(self):
+        request = RequestFactory().get(reverse("sched-detail", args=[self.schedule.id]))
+        response = SchedDetail.as_view()(request, pk=self.schedule.id)
+        response.render()
+        return response, response.content.decode()
+
     def test_schedule_generation_refreshes_blank_sorted_activity_list(self):
         self.assertEqual(self.school.sorted_subject_lst, "")
 
@@ -430,17 +436,74 @@ class ScheduleGenerationRegressionTests(TestCase):
         with patch("scheduler_app.models.class_locs", RejectEmptyActivityLookup()):
             self.schedule.create_sched
 
-    def test_schedule_detail_generates_and_renders_balanced_school(self):
-        request = RequestFactory().get(reverse("sched-detail", args=[self.schedule.id]))
-        response = SchedDetail.as_view()(request, pk=self.schedule.id)
-        response.render()
-        rendered_content = response.content.decode()
+    def test_activity_with_no_primary_locations_aborts_generation_gracefully(self):
+        activity = Course.objects.create(course_name="No Location Activity", abriviation="NLA", course_len=1)
+        self.school.subject.set([self.two_block, activity, self.night])
+
+        generated_schedule = self.schedule.create_sched
+
+        self.assertEqual(generated_schedule, {})
+        self.assertEqual(self.schedule.generation_diagnostics, [{
+            "school": "Balanced Regression School",
+            "activity": "No Location Activity",
+            "reason": "Activity is not connected to any scheduling Locations.",
+        }])
+
+    def test_activity_missing_from_current_location_lookups_is_diagnosed(self):
+        initialize_scheduling_data(force=True)
+        class_locs.pop(self.one_block.course_name)
+
+        diagnostics = self.schedule.get_scheduling_diagnostics()
+
+        self.assertIn({
+            "school": "Balanced Regression School",
+            "activity": "Regression One Block",
+            "reason": "Activity does not appear in current scheduling Location lookups.",
+        }, diagnostics)
+
+    def test_activity_with_only_unavailable_locations_aborts_generation_gracefully(self):
+        unavailable_location = Locations.objects.create(
+            loc_name="Unavailable Regression Location",
+            loc_short="URL",
+            availible=False,
+        )
+        activity = Course.objects.create(course_name="Unavailable Location Activity", abriviation="ULA", course_len=1)
+        activity.primary_locs.add(unavailable_location)
+        self.school.subject.set([self.two_block, activity, self.night])
+
+        generated_schedule = self.schedule.create_sched
+
+        self.assertEqual(generated_schedule, {})
+        self.assertEqual(self.schedule.generation_diagnostics, [{
+            "school": "Balanced Regression School",
+            "activity": "Unavailable Location Activity",
+            "reason": "Activity has no available scheduling Locations.",
+        }])
+
+    def test_schedule_detail_renders_activity_location_diagnostic_instead_of_table(self):
+        activity = Course.objects.create(course_name="Diagnostic Activity", abriviation="DA", course_len=1)
+        self.school.subject.set([self.two_block, activity, self.night])
+
+        response, rendered_content = self.render_schedule_detail()
 
         self.assertEqual(response.status_code, 200)
+        self.assertIn("Schedule generation could not continue", rendered_content)
+        self.assertIn("Schedule generation cannot continue until", rendered_content)
+        self.assertIn("Balanced Regression School", rendered_content)
+        self.assertIn("Diagnostic Activity", rendered_content)
+        self.assertIn("Activity is not connected to any scheduling Locations.", rendered_content)
+        self.assertNotIn("<table", rendered_content)
+
+    def test_schedule_detail_generates_and_renders_balanced_school(self):
+        response, rendered_content = self.render_schedule_detail()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Schedule generated successfully", rendered_content)
         self.assertIn("Balanced Regression School 0", rendered_content)
         self.assertIn("Regression Two Block", rendered_content)
         self.assertIn("Regression One Block", rendered_content)
         self.assertIn("Regression Night", rendered_content)
+        self.assertIn("<table", rendered_content)
 
 
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])

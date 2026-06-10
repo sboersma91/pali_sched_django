@@ -194,9 +194,33 @@ class TheSched(models.Model):
     def __str__(self):
         return self.sched_name
 
+    def get_scheduling_diagnostics(self):
+        diagnostics = []
+        for school in self.lst_of_school_names:
+            for activity in school.subject.all():
+                if not activity.primary_locs.exists():
+                    reason = "Activity is not connected to any scheduling Locations."
+                elif not activity.primary_locs.filter(availible=True).exists():
+                    reason = "Activity has no available scheduling Locations."
+                elif activity.course_name not in class_locs:
+                    reason = "Activity does not appear in current scheduling Location lookups."
+                else:
+                    continue
+
+                diagnostics.append({
+                    "school": school.school_name,
+                    "activity": activity.course_name,
+                    "reason": reason,
+                })
+        return diagnostics
+
     @property
     def create_sched(self): #save(self, *args, **kwargs):
         initialize_scheduling_data(force=True)
+        self.generation_diagnostics = self.get_scheduling_diagnostics()
+        if self.generation_diagnostics:
+            return {}
+
         count=0
         for school in self.lst_of_school_names: #because of the foreign key this will only reference 1 school object
             count+= school.ag_num

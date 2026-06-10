@@ -198,6 +198,8 @@ class SchedDetail(DetailView):
 
         context['schedule_days'] = schedule_days
         context['schedule_rows'] = schedule_rows
+        context['generation_diagnostics'] = getattr(self.object, 'generation_diagnostics', [])
+        context['generation_succeeded'] = not context['generation_diagnostics']
         return context
 
 class SchedCreate(CreateView):

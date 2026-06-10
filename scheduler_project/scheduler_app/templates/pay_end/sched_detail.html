@@ -27,11 +27,32 @@
     </div>
   </div>
 
+  <section class="mb-4" aria-labelledby="generation-status-heading">
+    <h2 id="generation-status-heading" class="h3 mb-3">Generation Status</h2>
+    {% if generation_succeeded %}
+      <div class="alert alert-success mb-0" role="status">
+        <h3 class="h5 alert-heading">Schedule generated successfully</h3>
+        <p class="mb-0">All selected Activities have available scheduling Locations.</p>
+      </div>
+    {% else %}
+      <div class="alert alert-danger mb-0" role="alert">
+        <h3 class="h5 alert-heading">Schedule generation could not continue</h3>
+        <p>Schedule generation cannot continue until the following Activity Location configuration is corrected.</p>
+        <ul class="mb-0">
+          {% for diagnostic in generation_diagnostics %}
+            <li><strong>{{ diagnostic.school }}</strong> — {{ diagnostic.activity }}: {{ diagnostic.reason }}</li>
+          {% endfor %}
+        </ul>
+      </div>
+    {% endif %}
+  </section>
+
   <div class="alert alert-info mb-4" role="alert">
     <h2 class="h5 alert-heading">How this Schedule record works</h2>
     <p class="mb-0">Generated output uses the current Schools, Activities, and Locations. Viewing this page regenerates the current output; editing the Schedule record does not directly edit the generated table.</p>
   </div>
 
+  {% if generation_succeeded %}
   <section class="mb-4" aria-labelledby="generated-schedule-heading">
     <div class="mb-3">
       <h2 id="generated-schedule-heading" class="h3 mb-1">Generated Schedule</h2>
@@ -75,4 +96,5 @@
       </table>
     </div>
   </section>
+  {% endif %}
 {% endblock %}
