@@ -1,10 +1,11 @@
 from unittest.mock import PropertyMock, patch
 
 from django.contrib.auth import get_user_model
-from django.test import Client, TestCase, override_settings
+from django.test import Client, RequestFactory, TestCase, override_settings
 from django.urls import reverse
 
 from .forms import SchedForm
+from .views import SchedDetail
 from .models import (
     Course,
     Locations,
@@ -385,6 +386,61 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, "This action cannot be undone.")
         self.assertContains(response, "Confirm Delete")
         self.assertContains(response, "Cancel")
+
+
+@override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
+class ScheduleGenerationRegressionTests(TestCase):
+    def setUp(self):
+        location = Locations.objects.create(loc_name="Schedule Regression Location", loc_short="SR")
+        ropes = Course.objects.create(course_name="Ropes", abriviation="ROP", course_len=2)
+        ropes.primary_locs.add(location)
+        self.two_block = Course.objects.create(course_name="Regression Two Block", abriviation="R2", course_len=2)
+        self.one_block = Course.objects.create(course_name="Regression One Block", abriviation="R1", course_len=1)
+        self.night = Course.objects.create(course_name="Regression Night", abriviation="RN", course_len=0)
+        for course in (self.two_block, self.one_block, self.night):
+            course.primary_locs.add(location)
+
+        self.school = Schools.schools_list.create(
+            school_name="Balanced Regression School",
+            arrive="Thur",
+            depart="Fri",
+            total_students=16,
+            ag_num=1,
+            attending_year="2026-06-04",
+        )
+        self.school.subject.set([self.two_block, self.one_block, self.night])
+        self.schedule = TheSched.objects.create(sched_name="Regression Schedule", sched_data={})
+
+    def test_schedule_generation_refreshes_blank_sorted_activity_list(self):
+        self.assertEqual(self.school.sorted_subject_lst, "")
+
+        generated_schedule = self.schedule.create_sched
+
+        self.assertNotIn("", [activity for values in generated_schedule.values() for activity in values])
+        self.school.refresh_from_db()
+        self.assertEqual(self.school.sorted_subject_lst, "")
+
+    def test_schedule_recursion_does_not_look_up_empty_activity_name(self):
+        class RejectEmptyActivityLookup(dict):
+            def __getitem__(self, activity_name):
+                if not activity_name:
+                    raise AssertionError("Scheduling recursion received an empty activity name")
+                return super().__getitem__(activity_name)
+
+        with patch("scheduler_app.models.class_locs", RejectEmptyActivityLookup()):
+            self.schedule.create_sched
+
+    def test_schedule_detail_generates_and_renders_balanced_school(self):
+        request = RequestFactory().get(reverse("sched-detail", args=[self.schedule.id]))
+        response = SchedDetail.as_view()(request, pk=self.schedule.id)
+        response.render()
+        rendered_content = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Balanced Regression School 0", rendered_content)
+        self.assertIn("Regression Two Block", rendered_content)
+        self.assertIn("Regression One Block", rendered_content)
+        self.assertIn("Regression Night", rendered_content)
 
 
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])

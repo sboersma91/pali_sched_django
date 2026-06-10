@@ -235,10 +235,12 @@ class TheSched(models.Model):
         day_offset = {'Mon':0, "Tue":5, "Wed":10, "Thur":15, "Fri":19}
         #  day_end_offsett = {'Mon':, 'Tues':, 'Wed':,'Fri':}
         for school in self.lst_of_school_names:
+            school.update_sorted_subject_lst()
+            sorted_subjects = [subject for subject in school.sorted_subject_lst.split(',') if subject]
             for i in range(school.ag_num):
                 sched['ags'].append(school.school_name + ' ' + str(i))
                 # ------------------
-                sched['classes_needed'].append(school.sorted_subject_lst.split(',')[::-1])
+                sched['classes_needed'].append(sorted_subjects[::-1])
             for key in list(sched.keys())[day_offset[school.arrive]:day_offset[school.depart]]:    
                 for i in range(group_count,group_count+school.ag_num):
                             sched[key][i]='empty'
