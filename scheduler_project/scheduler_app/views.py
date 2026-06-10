@@ -198,6 +198,11 @@ class SchedDetail(DetailView):
 
         context['schedule_days'] = schedule_days
         context['schedule_rows'] = schedule_rows
+        context['generation_diagnostics'] = getattr(self.object, 'generation_diagnostics', [])
+        context['generation_blocked'] = bool(context['generation_diagnostics'])
+        context['generation_complete'] = getattr(self.object, 'generation_complete', True)
+        context['generation_succeeded'] = not context['generation_blocked'] and context['generation_complete']
+        context['generation_incomplete'] = not context['generation_blocked'] and not context['generation_complete']
         return context
 
 class SchedCreate(CreateView):

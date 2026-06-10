@@ -194,9 +194,34 @@ class TheSched(models.Model):
     def __str__(self):
         return self.sched_name
 
+    def get_scheduling_diagnostics(self):
+        diagnostics = []
+        for school in self.lst_of_school_names:
+            for activity in school.subject.all():
+                if not activity.primary_locs.exists():
+                    reason = "Activity is not connected to any scheduling Locations."
+                elif not activity.primary_locs.filter(availible=True).exists():
+                    reason = "Activity has no available scheduling Locations."
+                elif activity.course_name not in class_locs:
+                    reason = "Activity does not appear in current scheduling Location lookups."
+                else:
+                    continue
+
+                diagnostics.append({
+                    "school": school.school_name,
+                    "activity": activity.course_name,
+                    "reason": reason,
+                })
+        return diagnostics
+
     @property
     def create_sched(self): #save(self, *args, **kwargs):
         initialize_scheduling_data(force=True)
+        self.generation_diagnostics = self.get_scheduling_diagnostics()
+        if self.generation_diagnostics:
+            self.generation_complete = False
+            return {}
+
         count=0
         for school in self.lst_of_school_names: #because of the foreign key this will only reference 1 school object
             count+= school.ag_num
@@ -235,10 +260,12 @@ class TheSched(models.Model):
         day_offset = {'Mon':0, "Tue":5, "Wed":10, "Thur":15, "Fri":19}
         #  day_end_offsett = {'Mon':, 'Tues':, 'Wed':,'Fri':}
         for school in self.lst_of_school_names:
+            school.update_sorted_subject_lst()
+            sorted_subjects = [subject for subject in school.sorted_subject_lst.split(',') if subject]
             for i in range(school.ag_num):
                 sched['ags'].append(school.school_name + ' ' + str(i))
                 # ------------------
-                sched['classes_needed'].append(school.sorted_subject_lst.split(',')[::-1])
+                sched['classes_needed'].append(sorted_subjects[::-1])
             for key in list(sched.keys())[day_offset[school.arrive]:day_offset[school.depart]]:    
                 for i in range(group_count,group_count+school.ag_num):
                             sched[key][i]='empty'
@@ -314,7 +341,7 @@ class TheSched(models.Model):
             classes_needed.append(current_class)
             return False
         
-        search_open_slot(locs_open,schedule=self.sched,)
+        self.generation_complete = search_open_slot(locs_open,schedule=self.sched,)
         self.sched.popitem()
         # self.sched_data = self.sched.copy()
 
