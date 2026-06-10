@@ -65,6 +65,61 @@ class OperationalNavigationTests(TestCase):
 
 
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
+class OperationalDashboardTests(TestCase):
+    def setUp(self):
+        self.client = Client(HTTP_HOST="localhost")
+
+    def test_dashboard_replaces_placeholder_with_operational_orientation(self):
+        response = self.client.get(reverse("home-paid"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Operational Dashboard")
+        self.assertContains(
+            response,
+            "Create schedules and maintain the Schools, Activities, and Locations used to generate them.",
+        )
+        self.assertContains(response, "Prepare a Schedule")
+        self.assertNotContains(response, "this is the home page of a person who has paid.")
+
+    def test_dashboard_renders_workflow_cards(self):
+        response = self.client.get(reverse("home-paid"))
+
+        self.assertEqual(response.status_code, 200)
+        for workflow in ("Locations", "Activities", "Schools", "Schedules"):
+            with self.subTest(workflow=workflow):
+                self.assertContains(response, f'<h3 class="h5 card-title">{workflow}</h3>', html=True)
+        self.assertContains(response, 'class="card h-100"', count=3, html=False)
+        self.assertContains(response, 'class="card h-100 border-primary"', count=1, html=False)
+
+    def test_dashboard_renders_primary_schedule_actions_with_canonical_routes(self):
+        response = self.client.get(reverse("home-paid"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, f'<a href="{reverse("sched-create")}" class="btn btn-primary">Create Schedule</a>', html=True)
+        self.assertContains(response, f'<a href="{reverse("sched-list")}" class="btn btn-outline-primary">View Schedules</a>', html=True)
+
+    def test_dashboard_workflow_actions_use_canonical_routes(self):
+        response = self.client.get(reverse("home-paid"))
+
+        self.assertEqual(response.status_code, 200)
+        expected_actions = (
+            ("location-list", "View Locations"),
+            ("add-loc", "Add Location"),
+            ("course-list", "View Activities"),
+            ("course-create", "Add Activity"),
+            ("school-list", "View Schools"),
+            ("school-create", "Add School"),
+            ("sched-list", "View Schedules"),
+            ("sched-create", "Create Schedule"),
+        )
+        for route, label in expected_actions:
+            with self.subTest(route=route):
+                self.assertContains(response, f'href="{reverse(route)}"', html=False)
+                self.assertContains(response, label)
+
+
+
+@override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
 class ScheduleWorkflowTests(TestCase):
     def setUp(self):
         self.client = Client(HTTP_HOST="localhost")
