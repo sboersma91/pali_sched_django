@@ -1,0 +1,76 @@
+<style>
+    .school-form-layout {
+        text-align: left;
+    }
+
+    .activity-options > div > div {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 0.5rem 1rem;
+        margin-bottom: 1.25rem;
+        padding: 1rem;
+        border: 1px solid #dee2e6;
+        border-radius: 0.25rem;
+    }
+
+    .activity-options > div > div > label {
+        grid-column: 1 / -1;
+        margin-bottom: 0.25rem;
+        font-size: 1.1rem;
+        font-weight: 600;
+    }
+
+    .activity-options > div > div > div label {
+        display: block;
+        padding: 0.4rem 0.5rem;
+        border-radius: 0.25rem;
+        background-color: #f8f9fa;
+        cursor: pointer;
+    }
+
+    .activity-options input {
+        margin-right: 0.4rem;
+    }
+</style>
+
+{{ form.non_field_errors }}
+<div class="school-form-layout row g-4">
+    <div class="col-lg-8">
+        <div class="row g-3 mb-4">
+            {% for field in form %}
+                {% if field.name != 'subject' %}
+                    <div class="col-md-6">
+                        <label for="{{ field.id_for_label }}" class="form-label fw-bold">{{ field.label }}</label>
+                        {{ field }}
+                        {% if field.help_text %}<div class="form-text">{{ field.help_text }}</div>{% endif %}
+                        {% for error in field.errors %}<div class="text-danger">{{ error }}</div>{% endfor %}
+                    </div>
+                {% endif %}
+            {% endfor %}
+        </div>
+
+        <fieldset>
+            <legend class="h3">Activities</legend>
+            <p class="text-muted">Select all requested activities. Activity length reflects how many schedule blocks each selection uses.</p>
+            {% for error in form.subject.errors %}<div class="text-danger mb-2">{{ error }}</div>{% endfor %}
+            <div class="activity-options">{{ form.subject }}</div>
+        </fieldset>
+    </div>
+
+    <div class="col-lg-4">
+        <div class="border rounded p-3 bg-light">
+            <h3>Schedule Block Summary</h3>
+            {% if slot_summary.has_trip_window %}
+                <p><strong>Required daytime blocks:</strong> {{ slot_summary.required_daytime }}</p>
+                <p><strong>Required night blocks:</strong> {{ slot_summary.required_night }}</p>
+            {% else %}
+                <p><strong>Required blocks:</strong> choose arrive and depart days to calculate.</p>
+            {% endif %}
+            <p><strong>Selected daytime blocks:</strong> {{ slot_summary.selected_daytime }}</p>
+            <p><strong>Selected night blocks:</strong> {{ slot_summary.selected_night }}</p>
+            <p><strong>Daytime status:</strong> {{ slot_summary.daytime_status }}</p>
+            <p><strong>Night status:</strong> {{ slot_summary.night_status }}</p>
+            <p class="mb-0"><em>Warning only: saves are not blocked by this summary.</em></p>
+        </div>
+    </div>
+</div>
