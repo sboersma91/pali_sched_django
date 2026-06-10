@@ -4,7 +4,7 @@
   <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-4 mb-3">
     <div>
       <h1 class="mb-1">{% if object %}Edit Schedule Record{% else %}Create Schedule{% endif %}</h1>
-      <p class="text-muted mb-0">{% if object %}Editing this record does not directly edit the generated Schedule table. {% endif %}Generated output uses the current Schools, Activities, and Locations each time the Schedule is viewed.</p>
+      <p class="text-muted mb-0">{% if object %}Editing this record does not directly edit the generated Schedule table. {% endif %}Generated output uses the selected Schools and their current Activities and Locations each time the Schedule is viewed.</p>
     </div>
     <a href="{% url 'sched-list' %}" class="btn btn-outline-primary">Back to Schedules</a>
   </div>
