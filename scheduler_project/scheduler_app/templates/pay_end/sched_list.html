@@ -1,16 +1,48 @@
 {% extends 'pay_end/base_pay.html' %}
+{% block title %}Schedules{% endblock title %}
 {% block content %}
-<a href="{% url 'sched-create' %}">Add New Course</a> 
-    <center>
-        <h1>Schedule List html</h1>
-    {% for s in sched.all %}
-    <h4><strong>{{ s.sched_name }}</strong></h4>
-    <a href="{% url 'sched-detail' s.id %}">Details</a>
-    <a href="{% url 'sched-update' s.id %}">Update</a>
-    <a href="{% url 'sched-delete' s.id %}">Delete</a>
-    <hr>
-    {% empty %}
-    <h4>No schedules exist</h4>
-    {% endfor %}
-    </center>
+  <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-4 mb-3">
+    <div>
+      <h1 class="mb-1">Schedules</h1>
+      <p class="text-muted mb-0">Opening a Schedule regenerates its current output from the latest Schools, Activities, and Locations.</p>
+    </div>
+    <a href="{% url 'sched-create' %}" class="btn btn-primary">Create Schedule</a>
+  </div>
+
+  <div class="table-responsive">
+    <table class="table table-striped table-hover align-middle">
+      <thead class="table-light">
+        <tr>
+          <th scope="col">Schedule Name</th>
+          <th scope="col">Created</th>
+          <th scope="col">Record Data</th>
+          <th scope="col" class="text-end">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in sched.all %}
+          <tr>
+            <td><strong>{{ s.sched_name }}</strong></td>
+            <td>{{ s.timestamp_og|date:"M j, Y" }}</td>
+            <td>
+              {% if s.sched_data %}
+                <span class="badge bg-success">Record data available</span>
+              {% else %}
+                <span class="badge bg-secondary">No record data</span>
+              {% endif %}
+            </td>
+            <td class="text-end text-nowrap">
+              <a href="{% url 'sched-detail' s.id %}" class="btn btn-sm btn-outline-primary">Generate / View</a>
+              <a href="{% url 'sched-update' s.id %}" class="btn btn-sm btn-outline-secondary">Edit Record</a>
+              <a href="{% url 'sched-delete' s.id %}" class="btn btn-sm btn-outline-danger">Delete</a>
+            </td>
+          </tr>
+        {% empty %}
+          <tr>
+            <td colspan="4" class="text-center text-muted py-4">No schedules have been created yet.</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 {% endblock %}
