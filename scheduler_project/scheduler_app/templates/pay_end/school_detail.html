@@ -1,21 +1,76 @@
 {% extends 'pay_end/base_pay.html' %}
+{% block title %}{{ school.school_name }}{% endblock title %}
 {% block content %}
-    <center>
-        <h1>{{school}} Details</h1>
-        <!-- <ul>{{ school.id }}</ul> -->
-        <ul>Abriviation: {{ school.school_name }}</ul>
-        {% for sch in school.subject.all %}
-        
-        <ul>Description: {{ sch }}</ul>
-        {% endfor %}
-        
-        <ul><strong>Arrive: </strong>{{school.arrive}}</ul>
-        <ul><strong>Depart: </strong>{{school.depart}}</ul>
-        <ul><strong>total_students: </strong>{{school.total_students}}</ul>
-        <p>{{ school.ag_numbers }}</p>
-        <hr>
-        <p> <strong>Sorted School list: </strong> {{ school.sort_subjects }}</p>
-       
-      
-    </center>
-{% endblock%}
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-4 mb-3">
+        <div>
+            <h1 class="mb-1">{{ school.school_name }}</h1>
+            <p class="text-muted mb-0">School visit details and selected activities grouped by schedule length.</p>
+        </div>
+        <div class="d-flex flex-wrap gap-2">
+            <a href="{% url 'school-update' school.id %}" class="btn btn-secondary">Edit School</a>
+            <a href="{% url 'school-delete' school.id %}" class="btn btn-outline-danger">Delete School</a>
+            <a href="{% url 'school-list' %}" class="btn btn-outline-primary">Back to Schools</a>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-body">
+            <dl class="row mb-0">
+                <dt class="col-sm-3">School Name</dt>
+                <dd class="col-sm-9">{{ school.school_name }}</dd>
+
+                <dt class="col-sm-3">Arrival Day</dt>
+                <dd class="col-sm-9">{{ school.get_arrive_display }}</dd>
+
+                <dt class="col-sm-3">Departure Day</dt>
+                <dd class="col-sm-9">{{ school.get_depart_display }}</dd>
+
+                <dt class="col-sm-3">Activity Groups</dt>
+                <dd class="col-sm-9">{{ school.ag_num }}</dd>
+
+                <dt class="col-sm-3">Students</dt>
+                <dd class="col-sm-9">{{ school.total_students }}</dd>
+            </dl>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-header">
+            <h2 class="h5 mb-0">Selected Activities</h2>
+        </div>
+        <div class="card-body">
+            <div class="row g-4">
+                <div class="col-md-4">
+                    <h3 class="h6">Two-block daytime activities</h3>
+                    <ul class="list-group list-group-flush">
+                        {% for activity in school.subject.all %}
+                            {% if activity.course_len == 2 %}
+                                <li class="list-group-item px-0">{{ activity.course_name }}</li>
+                            {% endif %}
+                        {% endfor %}
+                    </ul>
+                </div>
+                <div class="col-md-4">
+                    <h3 class="h6">One-block daytime activities</h3>
+                    <ul class="list-group list-group-flush">
+                        {% for activity in school.subject.all %}
+                            {% if activity.course_len == 1 %}
+                                <li class="list-group-item px-0">{{ activity.course_name }}</li>
+                            {% endif %}
+                        {% endfor %}
+                    </ul>
+                </div>
+                <div class="col-md-4">
+                    <h3 class="h6">Night activities</h3>
+                    <ul class="list-group list-group-flush">
+                        {% for activity in school.subject.all %}
+                            {% if activity.course_len == 0 %}
+                                <li class="list-group-item px-0">{{ activity.course_name }}</li>
+                            {% endif %}
+                        {% endfor %}
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+{% endblock %}

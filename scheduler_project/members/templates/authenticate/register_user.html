@@ -1,24 +1,23 @@
-<!-- Log in page -->
-
 {% extends 'sched_app_template/base.html' %}
-{% block title %}New User{% endblock title %}
+{% block title %}Create Account | FlowLine{% endblock title %}
 {% block content %}
-
-{% if form.errors %}
-<p>Something went wrong??</p>
-{% endif %}
-
-        <h1>User Registratioon</h1>
-        <br><br>
-        <form action="{% url 'register_user' %}" method=POST>
-            <!-- action=? -->
+  <div class="row justify-content-center py-5">
+    <div class="col-md-8 col-lg-6">
+      <div class="card shadow-sm">
+        <div class="card-body p-4">
+          <h1 class="h3 mb-2">Create Account</h1>
+          <p class="text-muted mb-4">Create an account to access the FlowLine operational tools.</p>
+          {% if form.errors %}
+            <div class="alert alert-danger" role="alert">Please correct the errors below.</div>
+          {% endif %}
+          <form action="{% url 'register_user' %}" method="post">
             {% csrf_token %}
-                {{ form.as_p }}
-                <button type="submit" class="btn btn-primary">Submit</button>
-
-            <!-- <input type="submit" name="" id=""> -->
-        </form>
-
-
-
+            {{ form.as_p }}
+            <button type="submit" class="btn btn-primary">Create Account</button>
+            <a href="{% url 'login' %}" class="btn btn-outline-secondary">Back to Log In</a>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
 {% endblock %}
