@@ -81,11 +81,14 @@ def create_class_locs_dict():
 
 scheduling_data_initialized = False
 
-def initialize_scheduling_data():
+def initialize_scheduling_data(force=False):
     global scheduling_data_initialized
-    if scheduling_data_initialized:
+    if scheduling_data_initialized and not force:
         return
 
+    master_locs.clear()
+    class_locs.clear()
+    class_len.clear()
     create_master_locs()
     create_class_locs_dict()
     create_class_len_dict()
@@ -119,7 +122,7 @@ class Schools(models.Model):
         '''
 
     def update_sorted_subject_lst(self):
-        initialize_scheduling_data()
+        initialize_scheduling_data(force=True)
         # Sorted order = Two Block w/ loc, two block no loc, one block w/ loc, one block no loc, night
         ropes = []
         various_one = []
@@ -193,7 +196,7 @@ class TheSched(models.Model):
 
     @property
     def create_sched(self): #save(self, *args, **kwargs):
-        initialize_scheduling_data()
+        initialize_scheduling_data(force=True)
         count=0
         for school in self.lst_of_school_names: #because of the foreign key this will only reference 1 school object
             count+= school.ag_num

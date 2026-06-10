@@ -5,7 +5,15 @@ from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 
 from .forms import SchedForm
-from .models import Course, Locations, Schools, TheSched, class_len, class_locs
+from .models import (
+    Course,
+    Locations,
+    Schools,
+    TheSched,
+    class_len,
+    class_locs,
+    initialize_scheduling_data,
+)
 
 
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
@@ -359,19 +367,15 @@ class ScheduleWorkflowTests(TestCase):
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
 class SchoolFormWorkflowTests(TestCase):
     def setUp(self):
-        class_len.update({
-            "WM": 2,
-            "Night Hike": 0,
-            "Archery": 1,
-        })
-        class_locs.update({
-            "WM": ["WM"],
-            "Night Hike": ["Various"],
-            "Archery": ["Range"],
-        })
+        wm_location = Locations.objects.create(loc_name="WM", loc_short="WM")
+        various_location = Locations.objects.create(loc_name="Various", loc_short="VAR")
+        range_location = Locations.objects.create(loc_name="Range", loc_short="RNG")
         self.wm = Course.objects.create(course_name="WM", abriviation="WM", course_len=2)
+        self.wm.primary_locs.add(wm_location)
         self.night_hike = Course.objects.create(course_name="Night Hike", abriviation="NH", course_len=0)
+        self.night_hike.primary_locs.add(various_location)
         self.archery = Course.objects.create(course_name="Archery", abriviation="ARCH", course_len=1)
+        self.archery.primary_locs.add(range_location)
         self.client = Client(HTTP_HOST="localhost")
 
     def school_form_data(self, name, subjects, arrive="Mon", depart="Wed"):
@@ -620,6 +624,65 @@ class SchoolFormWorkflowTests(TestCase):
         self.assertContains(response, "Selected night blocks:</strong> 1")
         self.assertContains(response, "Daytime status:</strong> under by 7")
         self.assertContains(response, "Night status:</strong> under by 1")
+
+
+@override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
+class SchedulingLookupRefreshTests(TestCase):
+    def setUp(self):
+        self.client = Client(HTTP_HOST="localhost")
+        self.first_location = Locations.objects.create(loc_name="Training Room", loc_short="TR")
+        self.second_location = Locations.objects.create(loc_name="Conference Hall", loc_short="CH")
+        self.school = Schools.schools_list.create(
+            school_name="Lookup Refresh School",
+            arrive="Mon",
+            depart="Wed",
+            total_students=16,
+            ag_num=1,
+            attending_year="2026-06-04",
+        )
+
+    def school_form_data(self, course):
+        return {
+            "school_name": self.school.school_name,
+            "subject": [str(course.id)],
+            "arrive": self.school.arrive,
+            "depart": self.school.depart,
+            "total_students": str(self.school.total_students),
+            "ag_num": str(self.school.ag_num),
+            "attending_year": "2026-06-04",
+            "sorted_subject_lst": self.school.sorted_subject_lst,
+        }
+
+    def test_school_update_refreshes_lookups_for_new_course(self):
+        initialize_scheduling_data(force=True)
+        course = Course.objects.create(course_name="Sales Training", abriviation="ST", course_len=1)
+        course.primary_locs.add(self.first_location)
+
+        response = self.client.post(
+            reverse("school-update", args=[self.school.id]),
+            self.school_form_data(course),
+        )
+
+        self.assertRedirects(response, reverse("school-list"))
+        self.school.refresh_from_db()
+        self.assertEqual(self.school.sorted_subject_lst, "Sales Training")
+        self.assertEqual(class_len["Sales Training"], 1)
+        self.assertEqual(class_locs["Sales Training"], ["Training Room"])
+
+    def test_school_sorting_refreshes_updated_course_length_and_locations(self):
+        course = Course.objects.create(course_name="Sales Training", abriviation="ST", course_len=1)
+        course.primary_locs.add(self.first_location)
+        self.school.subject.set([course])
+        self.school.update_sorted_subject_lst()
+
+        course.course_len = 0
+        course.save(update_fields=["course_len"])
+        course.primary_locs.set([self.second_location])
+        self.school.update_sorted_subject_lst()
+
+        self.assertEqual(self.school.sorted_subject_lst, "Sales Training")
+        self.assertEqual(class_len["Sales Training"], 0)
+        self.assertEqual(class_locs["Sales Training"], ["Conference Hall"])
 
 
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
