@@ -74,7 +74,7 @@ class CourseForm(ModelForm):
         model = Course
         fields = '__all__'
         labels = {
-            'course_name': 'Course Name',
+            'course_name': 'Activity Name',
             'abriviation': 'Abbreviation',
             'primary_locs': 'Primary Locations',
         }

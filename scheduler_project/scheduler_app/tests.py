@@ -31,7 +31,7 @@ class PublicLandingPageTests(TestCase):
             response,
             "Configure Locations, Activities, and School visits, then generate a readable weekly Schedule for each activity group.",
         )
-        self.assertContains(response, "How Pali Scheduler Works")
+        self.assertContains(response, "How FlowLine Works")
         self.assertContains(response, "Review the operational output")
         self.assertContains(response, "activity group, weekday, and time block")
         self.assertNotContains(response, "Hello and Welcome to the Scheduler app!")
@@ -84,7 +84,7 @@ class PublicShellPresentationTests(TestCase):
         response = self.client.get(reverse("home"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, f'<a class="navbar-brand" href="{reverse("home")}">Pali Scheduler</a>', html=True)
+        self.assertContains(response, f'<a class="navbar-brand" href="{reverse("home")}">FlowLine</a>', html=True)
         self.assertContains(response, f'<a class="nav-link" href="{reverse("login")}">Log In</a>', html=True)
         self.assertContains(response, f'<a class="nav-link" href="{reverse("register_user")}">Create Account</a>', html=True)
         for removed_content in ("Plans", "Contact", "Payed", "Search Venues"):
@@ -109,9 +109,9 @@ class PublicShellPresentationTests(TestCase):
         login_response = self.client.get(reverse("login"))
         register_response = self.client.get(reverse("register_user"))
 
-        self.assertContains(home_response, "<title>Pali Scheduler</title>", html=True)
-        self.assertContains(login_response, "<title>Log In | Pali Scheduler</title>", html=True)
-        self.assertContains(register_response, "<title>Create Account | Pali Scheduler</title>", html=True)
+        self.assertContains(home_response, "<title>FlowLine</title>", html=True)
+        self.assertContains(login_response, "<title>Log In | FlowLine</title>", html=True)
+        self.assertContains(register_response, "<title>Create Account | FlowLine</title>", html=True)
         self.assertNotContains(home_response, "Hello, world!")
 
     def test_login_page_renders_improved_presentation_and_existing_form_action(self):
@@ -131,13 +131,35 @@ class PublicShellPresentationTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, '<h1 class="h3 mb-2">Create Account</h1>', html=True)
-        self.assertContains(response, "Create an account to access the Pali Scheduler operational tools.")
+        self.assertContains(response, "Create an account to access the FlowLine operational tools.")
         self.assertContains(response, f'<form action="{reverse("register_user")}" method="post">', html=False)
         self.assertContains(response, '<button type="submit" class="btn btn-primary">Create Account</button>', html=True)
         self.assertContains(response, "Back to Log In")
         self.assertNotContains(response, "User Registratioon")
         self.assertNotContains(response, "Something went wrong??")
 
+
+
+@override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
+class PresentationTerminologyTests(TestCase):
+    def setUp(self):
+        self.client = Client(HTTP_HOST="localhost")
+
+    def test_public_and_operational_navigation_use_flowline_branding(self):
+        for route in ("home", "home-paid"):
+            with self.subTest(route=route):
+                response = self.client.get(reverse(route))
+                self.assertContains(response, ">FlowLine</a>", html=False)
+                self.assertNotContains(response, "Pali Scheduler")
+
+    def test_activity_pages_use_activity_terminology(self):
+        for route in ("course-list", "course-create", "add-course"):
+            with self.subTest(route=route):
+                response = self.client.get(reverse(route))
+                self.assertContains(response, "Activity")
+                self.assertNotContains(response, "Course Name")
+                self.assertNotContains(response, "Add Course")
+                self.assertNotContains(response, ">Courses<", html=False)
 
 
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
@@ -150,7 +172,7 @@ class OperationalNavigationTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         expected_links = {
-            "Pali Scheduler": reverse("home-paid"),
+            "FlowLine": reverse("home-paid"),
             "Dashboard": reverse("home-paid"),
             "Schedules": reverse("sched-list"),
             "Schools": reverse("school-list"),
@@ -826,7 +848,7 @@ class CourseFormWorkflowTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'class="table table-striped table-hover align-middle"', html=False)
-        self.assertContains(response, "Course Name")
+        self.assertContains(response, "Activity Name")
         self.assertContains(response, "Abbreviation")
         self.assertContains(response, "Schedule Length")
         self.assertContains(response, "Primary Locations")
@@ -861,15 +883,15 @@ class CourseFormWorkflowTests(TestCase):
         self.assertContains(response, "AR")
         self.assertContains(response, "Closed Field")
         self.assertContains(response, "CF")
-        self.assertContains(response, "Edit Course")
-        self.assertContains(response, "Delete Course")
-        self.assertContains(response, "Back to Courses")
+        self.assertContains(response, "Edit Activity")
+        self.assertContains(response, "Delete Activity")
+        self.assertContains(response, "Back to Activities")
 
     def test_course_delete_confirmation_renders_destructive_warning(self):
         response = self.client.get(reverse("course-delete", args=[self.course.id]))
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Confirm Course Deletion")
+        self.assertContains(response, "Confirm Activity Deletion")
         self.assertContains(response, "Existing Course")
         self.assertContains(response, "may affect School activity selections and schedules")
         self.assertContains(response, "This action cannot be undone.")
@@ -1085,7 +1107,7 @@ class LocationFormWorkflowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Confirm Location Deletion")
         self.assertContains(response, "Existing Location")
-        self.assertContains(response, "may remove it from Course configurations")
+        self.assertContains(response, "may remove it from Activity configurations")
         self.assertContains(response, "This action cannot be undone.")
         self.assertContains(response, "Confirm Delete")
         self.assertContains(response, "Cancel")

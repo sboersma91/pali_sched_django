@@ -15,16 +15,16 @@
             {% endif %}
         </div>
         <div class="d-flex flex-wrap gap-2">
-            <a href="{% url 'course-update' course.id %}" class="btn btn-secondary">Edit Course</a>
-            <a href="{% url 'course-delete' course.id %}" class="btn btn-outline-danger">Delete Course</a>
-            <a href="{% url 'course-list' %}" class="btn btn-outline-primary">Back to Courses</a>
+            <a href="{% url 'course-update' course.id %}" class="btn btn-secondary">Edit Activity</a>
+            <a href="{% url 'course-delete' course.id %}" class="btn btn-outline-danger">Delete Activity</a>
+            <a href="{% url 'course-list' %}" class="btn btn-outline-primary">Back to Activities</a>
         </div>
     </div>
 
     <div class="card mb-4">
         <div class="card-body">
             <dl class="row mb-4">
-                <dt class="col-sm-3">Course Name</dt>
+                <dt class="col-sm-3">Activity Name</dt>
                 <dd class="col-sm-9">{{ course.course_name }}</dd>
 
                 <dt class="col-sm-3">Abbreviation</dt>
