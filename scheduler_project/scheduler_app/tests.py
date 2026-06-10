@@ -67,6 +67,71 @@ class PublicLandingPageTests(TestCase):
 
 
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
+class PublicShellPresentationTests(TestCase):
+    def setUp(self):
+        self.client = Client(HTTP_HOST="localhost")
+
+    def test_public_navbar_renders_clean_anonymous_navigation(self):
+        response = self.client.get(reverse("home"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, f'<a class="navbar-brand" href="{reverse("home")}">Pali Scheduler</a>', html=True)
+        self.assertContains(response, f'<a class="nav-link" href="{reverse("login")}">Log In</a>', html=True)
+        self.assertContains(response, f'<a class="nav-link" href="{reverse("register_user")}">Create Account</a>', html=True)
+        for removed_content in ("Plans", "Contact", "Payed", "Search Venues"):
+            with self.subTest(content=removed_content):
+                self.assertNotContains(response, removed_content)
+        self.assertNotContains(response, 'href="#"', html=False)
+        self.assertNotContains(response, 'type="search"', html=False)
+
+    def test_public_navbar_renders_authenticated_navigation(self):
+        user = get_user_model().objects.create_user(username="operator", password="password")
+        self.client.force_login(user)
+
+        response = self.client.get(reverse("home"))
+
+        self.assertContains(response, f'<a class="nav-link" href="{reverse("home-paid")}">Open Dashboard</a>', html=True)
+        self.assertContains(response, f'<a class="nav-link" href="{reverse("logout")}">Log Out</a>', html=True)
+        self.assertNotContains(response, f'<a class="nav-link" href="{reverse("login")}">Log In</a>', html=True)
+        self.assertNotContains(response, f'<a class="nav-link" href="{reverse("register_user")}">Create Account</a>', html=True)
+
+    def test_public_base_renders_default_and_page_specific_titles(self):
+        home_response = self.client.get(reverse("home"))
+        login_response = self.client.get(reverse("login"))
+        register_response = self.client.get(reverse("register_user"))
+
+        self.assertContains(home_response, "<title>Pali Scheduler</title>", html=True)
+        self.assertContains(login_response, "<title>Log In | Pali Scheduler</title>", html=True)
+        self.assertContains(register_response, "<title>Create Account | Pali Scheduler</title>", html=True)
+        self.assertNotContains(home_response, "Hello, world!")
+
+    def test_login_page_renders_improved_presentation_and_existing_form_action(self):
+        response = self.client.get(reverse("login"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '<h1 class="h3 mb-2">Log In</h1>', html=True)
+        self.assertContains(response, "Access the operational dashboard to prepare and review schedules.")
+        self.assertContains(response, f'<form action="{reverse("login")}" method="post">', html=False)
+        self.assertContains(response, '<label for="username" class="form-label">Username</label>', html=True)
+        self.assertContains(response, '<button type="submit" class="btn btn-primary w-100">Log In</button>', html=True)
+        self.assertNotContains(response, ">Submit</button>", html=False)
+        self.assertNotContains(response, "Email address")
+
+    def test_registration_page_renders_improved_presentation_and_existing_form_action(self):
+        response = self.client.get(reverse("register_user"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '<h1 class="h3 mb-2">Create Account</h1>', html=True)
+        self.assertContains(response, "Create an account to access the Pali Scheduler operational tools.")
+        self.assertContains(response, f'<form action="{reverse("register_user")}" method="post">', html=False)
+        self.assertContains(response, '<button type="submit" class="btn btn-primary">Create Account</button>', html=True)
+        self.assertContains(response, "Back to Log In")
+        self.assertNotContains(response, "User Registratioon")
+        self.assertNotContains(response, "Something went wrong??")
+
+
+
+@override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
 class OperationalNavigationTests(TestCase):
     def setUp(self):
         self.client = Client(HTTP_HOST="localhost")
