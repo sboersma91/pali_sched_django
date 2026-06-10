@@ -1,8 +1,10 @@
 from django import forms
+from django.core.exceptions import ValidationError
 from django.db.models.base import Model
 from django.forms import ModelForm, widgets
 from django.db.models.functions import Lower
 from .models import Course, Locations, Schools, Instructor, TheSched
+from .school_accounting import calculate_school_slot_accounting
 
 
 
@@ -108,6 +110,34 @@ class SchoolsForm(ModelForm):
             for course_len, group_label, cost_label in self.ACTIVITY_GROUPS
             if courses_by_length[course_len]
         ]
+
+    def clean(self):
+        cleaned_data = super().clean()
+        arrive = cleaned_data.get('arrive')
+        depart = cleaned_data.get('depart')
+        subjects = cleaned_data.get('subject', Course.objects.none())
+        if not arrive or not depart:
+            return cleaned_data
+
+        summary = calculate_school_slot_accounting(arrive, depart, subjects)
+        errors = []
+        for label, selected_key, required_key, status_key in (
+            ('Daytime blocks', 'selected_daytime', 'required_daytime', 'daytime_status'),
+            ('Night blocks', 'selected_night', 'required_night', 'night_status'),
+            ('Total blocks', 'selected_total', 'required_total', 'total_status'),
+        ):
+            if summary[selected_key] != summary[required_key]:
+                errors.append(
+                    f'{label}: required {summary[required_key]}, selected {summary[selected_key]} '
+                    f'({summary[status_key]}).'
+                )
+
+        if errors:
+            raise ValidationError([
+                'Selected activities must exactly match the required trip blocks before the School can be saved.',
+                *errors,
+            ])
+        return cleaned_data
 
     class Meta:
         model = Schools

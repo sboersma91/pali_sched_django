@@ -33,7 +33,12 @@
     }
 </style>
 
-{{ form.non_field_errors }}
+{% if form.non_field_errors %}
+    <div class="alert alert-danger" role="alert">
+        <h2 class="h5 alert-heading">School cannot be saved</h2>
+        {{ form.non_field_errors }}
+    </div>
+{% endif %}
 <div class="school-form-layout row g-4">
     <div class="col-lg-8">
         <div class="row g-3 mb-4">
@@ -68,9 +73,12 @@
             {% endif %}
             <p><strong>Selected daytime blocks:</strong> {{ slot_summary.selected_daytime }}</p>
             <p><strong>Selected night blocks:</strong> {{ slot_summary.selected_night }}</p>
+            <p><strong>Required total blocks:</strong> {{ slot_summary.required_total }}</p>
+            <p><strong>Selected total blocks:</strong> {{ slot_summary.selected_total }}</p>
             <p><strong>Daytime status:</strong> {{ slot_summary.daytime_status }}</p>
             <p><strong>Night status:</strong> {{ slot_summary.night_status }}</p>
-            <p class="mb-0"><em>Warning only: saves are not blocked by this summary.</em></p>
+            <p><strong>Total status:</strong> {{ slot_summary.total_status }}</p>
+            <p class="mb-0"><em>Selected activities must exactly match the required trip blocks before the School can be saved.</em></p>
         </div>
     </div>
 </div>

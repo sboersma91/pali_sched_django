@@ -544,13 +544,13 @@ class SchoolFormWorkflowTests(TestCase):
     def test_school_create_saves_subjects_after_instance_has_id(self):
         response = self.client.post(
             "/school_create",
-            self.school_form_data("Create Test School", [self.wm, self.night_hike]),
+            self.school_form_data("Create Test School", [self.wm, self.archery, self.night_hike], arrive="Thur", depart="Fri"),
         )
 
         self.assertEqual(response.status_code, 302)
         school = Schools.schools_list.get(school_name="Create Test School")
-        self.assertEqual(list(school.subject.order_by("course_name")), [self.night_hike, self.wm])
-        self.assertEqual(school.sorted_subject_lst, "WM,Night Hike")
+        self.assertEqual(list(school.subject.order_by("course_name")), [self.archery, self.night_hike, self.wm])
+        self.assertEqual(school.sorted_subject_lst, "WM,Archery,Night Hike")
 
     def test_school_update_refreshes_sorted_subjects_after_subject_changes(self):
         school = Schools(school_name="Update Test School", arrive="Mon", depart="Wed", total_students=16, ag_num=1, attending_year="2026-06-04")
@@ -561,25 +561,25 @@ class SchoolFormWorkflowTests(TestCase):
 
         response = self.client.post(
             f"/school_update/{school.id}/",
-            self.school_form_data("Update Test School", [self.archery, self.night_hike], arrive="Tue", depart="Thur"),
+            self.school_form_data("Update Test School", [self.wm, self.archery, self.night_hike], arrive="Thur", depart="Fri"),
         )
 
         self.assertEqual(response.status_code, 302)
         school.refresh_from_db()
-        self.assertEqual(school.arrive, "Tue")
-        self.assertEqual(school.depart, "Thur")
-        self.assertEqual(list(school.subject.order_by("course_name")), [self.archery, self.night_hike])
-        self.assertEqual(school.sorted_subject_lst, "Archery,Night Hike")
+        self.assertEqual(school.arrive, "Thur")
+        self.assertEqual(school.depart, "Fri")
+        self.assertEqual(list(school.subject.order_by("course_name")), [self.archery, self.night_hike, self.wm])
+        self.assertEqual(school.sorted_subject_lst, "WM,Archery,Night Hike")
 
     def test_add_school_function_view_uses_valid_form_save(self):
         response = self.client.post(
             "/add_school",
-            self.school_form_data("Function Test School", [self.wm, self.night_hike]),
+            self.school_form_data("Function Test School", [self.wm, self.archery, self.night_hike], arrive="Thur", depart="Fri"),
         )
 
         self.assertEqual(response.status_code, 302)
         school = Schools.schools_list.get(school_name="Function Test School")
-        self.assertEqual(school.sorted_subject_lst, "WM,Night Hike")
+        self.assertEqual(school.sorted_subject_lst, "WM,Archery,Night Hike")
 
     def test_add_school_page_includes_slot_accounting_summary(self):
         response = self.client.get("/add_school")
@@ -627,11 +627,107 @@ class SchoolFormWorkflowTests(TestCase):
 
 
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
+class SchoolActivityBlockValidationTests(TestCase):
+    def setUp(self):
+        location = Locations.objects.create(loc_name="Validation Location", loc_short="VL")
+        self.two_block = Course.objects.create(course_name="Two Block", abriviation="TB", course_len=2)
+        self.one_block = Course.objects.create(course_name="One Block", abriviation="OB", course_len=1)
+        self.extra_daytime = Course.objects.create(course_name="Extra Daytime", abriviation="ED", course_len=1)
+        self.night = Course.objects.create(course_name="Night One", abriviation="N1", course_len=0)
+        self.extra_night = Course.objects.create(course_name="Night Two", abriviation="N2", course_len=0)
+        for course in (self.two_block, self.one_block, self.extra_daytime, self.night, self.extra_night):
+            course.primary_locs.add(location)
+        self.client = Client(HTTP_HOST="localhost")
+
+    def form_data(self, name, subjects):
+        return {
+            "school_name": name,
+            "subject": [str(subject.id) for subject in subjects],
+            "arrive": "Thur",
+            "depart": "Fri",
+            "total_students": "16",
+            "ag_num": "1",
+            "attending_year": "2026-06-04",
+            "sorted_subject_lst": "",
+        }
+
+    def assert_blocked(self, response, expected_message, selected_subjects):
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "School cannot be saved")
+        self.assertContains(response, "Selected activities must exactly match the required trip blocks")
+        self.assertContains(response, expected_message)
+        selected_values = {str(value) for value in response.context["form"]["subject"].value()}
+        self.assertEqual(selected_values, {str(subject.id) for subject in selected_subjects})
+
+    def test_balanced_selection_saves_in_canonical_and_legacy_workflows(self):
+        selected = [self.two_block, self.one_block, self.night]
+        canonical = self.client.post(reverse("school-create"), self.form_data("Canonical Balanced", selected))
+        legacy = self.client.post(reverse("add-school"), self.form_data("Legacy Balanced", selected))
+
+        self.assertRedirects(canonical, reverse("school-list"))
+        self.assertEqual(legacy.status_code, 302)
+        self.assertTrue(Schools.schools_list.filter(school_name="Canonical Balanced").exists())
+        self.assertTrue(Schools.schools_list.filter(school_name="Legacy Balanced").exists())
+
+    def test_daytime_under_selection_blocks_save(self):
+        selected = [self.two_block, self.night]
+        response = self.client.post(reverse("school-create"), self.form_data("Daytime Under", selected))
+        self.assert_blocked(response, "Daytime blocks: required 3, selected 2 (under by 1).", selected)
+
+    def test_legacy_workflow_blocks_invalid_selection(self):
+        selected = [self.two_block, self.night]
+        response = self.client.post(reverse("add-school"), self.form_data("Legacy Invalid", selected))
+
+        self.assert_blocked(response, "Daytime blocks: required 3, selected 2 (under by 1).", selected)
+        self.assertFalse(Schools.schools_list.filter(school_name="Legacy Invalid").exists())
+
+    def test_daytime_over_selection_blocks_save(self):
+        selected = [self.two_block, self.one_block, self.extra_daytime, self.night]
+        response = self.client.post(reverse("school-create"), self.form_data("Daytime Over", selected))
+        self.assert_blocked(response, "Daytime blocks: required 3, selected 4 (over by 1).", selected)
+
+    def test_night_under_selection_blocks_save(self):
+        selected = [self.two_block, self.one_block]
+        response = self.client.post(reverse("school-create"), self.form_data("Night Under", selected))
+        self.assert_blocked(response, "Night blocks: required 1, selected 0 (under by 1).", selected)
+
+    def test_night_over_selection_blocks_save(self):
+        selected = [self.two_block, self.one_block, self.night, self.extra_night]
+        response = self.client.post(reverse("school-create"), self.form_data("Night Over", selected))
+        self.assert_blocked(response, "Night blocks: required 1, selected 2 (over by 1).", selected)
+
+    def test_update_validation_blocks_save_and_preserves_existing_record(self):
+        school = Schools.schools_list.create(
+            school_name="Update Validation",
+            arrive="Thur",
+            depart="Fri",
+            total_students=16,
+            ag_num=1,
+            attending_year="2026-06-04",
+        )
+        school.subject.set([self.two_block, self.one_block, self.night])
+        selected = [self.two_block, self.night]
+
+        response = self.client.post(
+            reverse("school-update", args=[school.id]),
+            self.form_data("Update Validation", selected),
+        )
+
+        self.assert_blocked(response, "Total blocks: required 4, selected 3 (under by 1).", selected)
+        school.refresh_from_db()
+        self.assertEqual(set(school.subject.all()), {self.two_block, self.one_block, self.night})
+
+
+@override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
 class SchedulingLookupRefreshTests(TestCase):
     def setUp(self):
         self.client = Client(HTTP_HOST="localhost")
         self.first_location = Locations.objects.create(loc_name="Training Room", loc_short="TR")
         self.second_location = Locations.objects.create(loc_name="Conference Hall", loc_short="CH")
+        self.support_daytime = Course.objects.create(course_name="Support Daytime", abriviation="SD", course_len=2)
+        self.support_daytime.primary_locs.add(self.first_location)
+        self.support_night = Course.objects.create(course_name="Support Night", abriviation="SN", course_len=0)
+        self.support_night.primary_locs.add(self.first_location)
         self.school = Schools.schools_list.create(
             school_name="Lookup Refresh School",
             arrive="Mon",
@@ -644,9 +740,9 @@ class SchedulingLookupRefreshTests(TestCase):
     def school_form_data(self, course):
         return {
             "school_name": self.school.school_name,
-            "subject": [str(course.id)],
-            "arrive": self.school.arrive,
-            "depart": self.school.depart,
+            "subject": [str(course.id), str(self.support_daytime.id), str(self.support_night.id)],
+            "arrive": "Thur",
+            "depart": "Fri",
             "total_students": str(self.school.total_students),
             "ag_num": str(self.school.ag_num),
             "attending_year": "2026-06-04",
@@ -665,7 +761,7 @@ class SchedulingLookupRefreshTests(TestCase):
 
         self.assertRedirects(response, reverse("school-list"))
         self.school.refresh_from_db()
-        self.assertEqual(self.school.sorted_subject_lst, "Sales Training")
+        self.assertIn("Sales Training", self.school.sorted_subject_lst)
         self.assertEqual(class_len["Sales Training"], 1)
         self.assertEqual(class_locs["Sales Training"], ["Training Room"])
 
