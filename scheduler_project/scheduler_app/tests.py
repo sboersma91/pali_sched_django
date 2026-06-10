@@ -480,6 +480,34 @@ class ScheduleGenerationRegressionTests(TestCase):
             "reason": "Activity has no available scheduling Locations.",
         }])
 
+    def make_location_valid_schedule_unassignable(self):
+        location = Locations.objects.get(loc_name="Schedule Regression Location")
+        extra_two_block = Course.objects.create(course_name="Competing Two Block", abriviation="C2", course_len=2)
+        extra_two_block.primary_locs.add(location)
+        self.school.subject.set([self.two_block, extra_two_block, self.one_block, self.night])
+
+    def test_location_valid_schedule_that_cannot_fit_reports_incomplete_generation(self):
+        self.make_location_valid_schedule_unassignable()
+
+        generated_schedule = self.schedule.create_sched
+
+        self.assertFalse(self.schedule.generation_complete)
+        self.assertEqual(self.schedule.generation_diagnostics, [])
+        self.assertEqual(generated_schedule["ags"], ["Balanced Regression School 0"])
+
+    def test_schedule_detail_marks_unassignable_location_valid_output_incomplete(self):
+        self.make_location_valid_schedule_unassignable()
+
+        response, rendered_content = self.render_schedule_detail()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Schedule generation is incomplete", rendered_content)
+        self.assertIn("Activity and Location configuration passed initial checks", rendered_content)
+        self.assertIn("Location capacity, timing constraints, or Activity combinations", rendered_content)
+        self.assertIn("Incomplete Schedule Output", rendered_content)
+        self.assertIn("must not be treated as a fully generated Schedule", rendered_content)
+        self.assertIn("<table", rendered_content)
+
     def test_schedule_detail_renders_activity_location_diagnostic_instead_of_table(self):
         activity = Course.objects.create(course_name="Diagnostic Activity", abriviation="DA", course_len=1)
         self.school.subject.set([self.two_block, activity, self.night])
@@ -498,6 +526,7 @@ class ScheduleGenerationRegressionTests(TestCase):
         response, rendered_content = self.render_schedule_detail()
 
         self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.context_data["generation_complete"])
         self.assertIn("Schedule generated successfully", rendered_content)
         self.assertIn("Balanced Regression School 0", rendered_content)
         self.assertIn("Regression Two Block", rendered_content)

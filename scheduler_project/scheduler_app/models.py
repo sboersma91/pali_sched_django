@@ -219,6 +219,7 @@ class TheSched(models.Model):
         initialize_scheduling_data(force=True)
         self.generation_diagnostics = self.get_scheduling_diagnostics()
         if self.generation_diagnostics:
+            self.generation_complete = False
             return {}
 
         count=0
@@ -340,7 +341,7 @@ class TheSched(models.Model):
             classes_needed.append(current_class)
             return False
         
-        search_open_slot(locs_open,schedule=self.sched,)
+        self.generation_complete = search_open_slot(locs_open,schedule=self.sched,)
         self.sched.popitem()
         # self.sched_data = self.sched.copy()
 

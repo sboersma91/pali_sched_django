@@ -32,7 +32,13 @@
     {% if generation_succeeded %}
       <div class="alert alert-success mb-0" role="status">
         <h3 class="h5 alert-heading">Schedule generated successfully</h3>
-        <p class="mb-0">All selected Activities have available scheduling Locations.</p>
+        <p class="mb-0">All selected Activities have available scheduling Locations and were fully assigned.</p>
+      </div>
+    {% elif generation_incomplete %}
+      <div class="alert alert-warning mb-0" role="alert">
+        <h3 class="h5 alert-heading">Schedule generation is incomplete</h3>
+        <p>Activity and Location configuration passed initial checks, but the complete Schedule could not be fully assigned.</p>
+        <p class="mb-0">This may be due to Location capacity, timing constraints, or Activity combinations. Review School activity selections, Activity lengths, and available Locations.</p>
       </div>
     {% else %}
       <div class="alert alert-danger mb-0" role="alert">
@@ -52,11 +58,11 @@
     <p class="mb-0">Generated output uses the current Schools, Activities, and Locations. Viewing this page regenerates the current output; editing the Schedule record does not directly edit the generated table.</p>
   </div>
 
-  {% if generation_succeeded %}
+  {% if not generation_blocked %}
   <section class="mb-4" aria-labelledby="generated-schedule-heading">
     <div class="mb-3">
-      <h2 id="generated-schedule-heading" class="h3 mb-1">Generated Schedule</h2>
-      <p class="text-muted mb-2">Activity groups are shown across the available daytime and night schedule blocks.</p>
+      <h2 id="generated-schedule-heading" class="h3 mb-1">{% if generation_incomplete %}Incomplete Schedule Output{% else %}Generated Schedule{% endif %}</h2>
+      <p class="text-muted mb-2">{% if generation_incomplete %}This output is incomplete and must not be treated as a fully generated Schedule.{% else %}Activity groups are shown across the available daytime and night schedule blocks.{% endif %}</p>
       <div class="d-flex flex-wrap gap-3 small" aria-label="Schedule table legend">
         <span><code>/////</code> = unavailable or not present</span>
         <span><code>****</code> = unassigned available block</span>
