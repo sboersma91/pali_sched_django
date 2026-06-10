@@ -21,8 +21,14 @@
         <dd class="col-sm-9">{{ sched.sched_name }}</dd>
         <dt class="col-sm-3">Created</dt>
         <dd class="col-sm-9">{{ sched.timestamp_og|date:"M j, Y" }}</dd>
-        <dt class="col-sm-3">Schedule Record Data</dt>
-        <dd class="col-sm-9">{% if sched.sched_data %}Available{% else %}No record data{% endif %}</dd>
+        <dt class="col-sm-3">Selected Schools</dt>
+        <dd class="col-sm-9">
+          {% for school in selected_schools %}
+            <span class="badge bg-primary me-1">{{ school.school_name }}</span>
+          {% empty %}
+            <span class="text-muted">No Schools selected</span>
+          {% endfor %}
+        </dd>
       </dl>
     </div>
   </div>
@@ -55,7 +61,7 @@
 
   <div class="alert alert-info mb-4" role="alert">
     <h2 class="h5 alert-heading">How this Schedule record works</h2>
-    <p class="mb-0">Generated output uses the current Schools, Activities, and Locations. Viewing this page regenerates the current output; editing the Schedule record does not directly edit the generated table.</p>
+    <p class="mb-0">Generated output uses this Schedule’s selected Schools and their current Activities and Locations. Viewing this page regenerates the current output; editing the Schedule record does not directly edit the generated table.</p>
   </div>
 
   {% if not generation_blocked %}

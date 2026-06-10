@@ -185,8 +185,8 @@ class Schools(models.Model):
 
 class TheSched(models.Model):
     sched_name = CharField(max_length=150)
-    lst_of_school_names = Schools.schools_list.all()
-    sched_data = JSONField()
+    schools = ManyToManyField(Schools)
+    sched_data = JSONField(null=True)
     timestamp_og = DateField(auto_now_add=True)
 
  
@@ -196,7 +196,7 @@ class TheSched(models.Model):
 
     def get_scheduling_diagnostics(self):
         diagnostics = []
-        for school in self.lst_of_school_names:
+        for school in self.schools.all():
             for activity in school.subject.all():
                 if not activity.primary_locs.exists():
                     reason = "Activity is not connected to any scheduling Locations."
@@ -223,7 +223,7 @@ class TheSched(models.Model):
             return {}
 
         count=0
-        for school in self.lst_of_school_names: #because of the foreign key this will only reference 1 school object
+        for school in self.schools.all():
             count+= school.ag_num
         global sched
         sched = {
@@ -259,7 +259,7 @@ class TheSched(models.Model):
         group_count=0
         day_offset = {'Mon':0, "Tue":5, "Wed":10, "Thur":15, "Fri":19}
         #  day_end_offsett = {'Mon':, 'Tues':, 'Wed':,'Fri':}
-        for school in self.lst_of_school_names:
+        for school in self.schools.all():
             school.update_sorted_subject_lst()
             sorted_subjects = [subject for subject in school.sorted_subject_lst.split(',') if subject]
             for i in range(school.ag_num):

@@ -171,27 +171,33 @@ class SchoolsForm(ModelForm):
         return school
 
 class SchedForm(ModelForm):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['schools'].queryset = Schools.schools_list.order_by(Lower('school_name'))
+
+    def save(self, commit=True):
+        schedule = super().save(commit=False)
+        if schedule.sched_data is None:
+            schedule.sched_data = {}
+        if commit:
+            schedule.save()
+            self.save_m2m()
+        return schedule
+
     class Meta:
         model = TheSched
-        fields = '__all__'
+        fields = ('sched_name', 'schools')
         labels = {
             'sched_name': 'Schedule Name',
-            'sched_data': 'Schedule Record Data',
+            'schools': 'Schools to Schedule',
         }
         help_texts = {
             'sched_name': 'Use a clear name that helps operators identify this schedule.',
-            'sched_data': (
-                'This required JSON field stores record-level data and does not directly control the generated '
-                'Schedule table. Generated output uses the current Schools, Activities, and Locations when viewed.'
-            ),
+            'schools': 'Select the Schools that should be generated together in this Schedule.',
         }
         widgets = {
             'sched_name': forms.TextInput(attrs={'class': 'form-control'}),
-            'sched_data': forms.Textarea(attrs={
-                'class': 'form-control font-monospace',
-                'rows': 8,
-                'placeholder': '{}',
-            }),
+            'schools': forms.CheckboxSelectMultiple(),
         }
 
 class InstructorForm(ModelForm):

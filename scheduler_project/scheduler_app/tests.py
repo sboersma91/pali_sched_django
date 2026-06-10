@@ -5,7 +5,7 @@ from django.test import Client, RequestFactory, TestCase, override_settings
 from django.urls import reverse
 
 from .forms import SchedForm
-from .views import SchedDetail
+from .views import SchedDetail, SchedList
 from .models import (
     Course,
     Locations,
@@ -278,10 +278,19 @@ class OperationalDashboardTests(TestCase):
 class ScheduleWorkflowTests(TestCase):
     def setUp(self):
         self.client = Client(HTTP_HOST="localhost")
+        self.school = Schools.schools_list.create(
+            school_name="Existing Schedule School",
+            arrive="Thur",
+            depart="Fri",
+            total_students=16,
+            ag_num=1,
+            attending_year="2026-06-04",
+        )
         self.schedule = TheSched.objects.create(
             sched_name="Existing Operational Schedule",
             sched_data={"source": "test"},
         )
+        self.schedule.schools.add(self.school)
 
     def test_schedule_list_renders_readable_operational_summary(self):
         response = self.client.get(reverse("sched-list"))
@@ -290,15 +299,25 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, 'class="table table-striped table-hover align-middle"', html=False)
         self.assertContains(response, "Schedule Name")
         self.assertContains(response, "Created")
-        self.assertContains(response, "Record Data")
+        self.assertContains(response, "Selected Schools")
         self.assertContains(response, "Existing Operational Schedule")
-        self.assertContains(response, "Record data available")
+        self.assertContains(response, "1 School")
         self.assertContains(response, "Opening a Schedule regenerates its current output")
         self.assertContains(response, "Create Schedule")
         self.assertContains(response, "Generate / View")
         self.assertContains(response, "Edit Record")
         self.assertContains(response, "Delete")
         self.assertNotContains(response, "Add New Course")
+
+    def test_schedule_list_shows_selected_school_count(self):
+        request = RequestFactory().get(reverse("sched-list"))
+        response = SchedList.as_view()(request)
+        response.render()
+        rendered_content = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Selected Schools", rendered_content)
+        self.assertIn("1 School", rendered_content)
 
     def test_schedule_detail_renders_metadata_actions_and_readable_schedule_table(self):
         generated_schedule = {
@@ -313,7 +332,8 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, "Generated Schedule", count=2)
         self.assertContains(response, "Schedule Name")
         self.assertContains(response, "Created")
-        self.assertContains(response, "Schedule Record Data")
+        self.assertContains(response, "Selected Schools")
+        self.assertContains(response, "Existing Schedule School")
         self.assertContains(response, "Edit Schedule Record")
         self.assertContains(response, "Delete Schedule")
         self.assertContains(response, "Back to Schedules")
@@ -339,10 +359,10 @@ class ScheduleWorkflowTests(TestCase):
                 self.assertIsInstance(response.context["form"], SchedForm)
                 self.assertContains(response, heading)
                 self.assertContains(response, "Schedule Name")
-                self.assertContains(response, "Schedule Record Data")
+                self.assertContains(response, "Schools to Schedule")
                 self.assertContains(response, "Use a clear name")
-                self.assertContains(response, "does not directly control the generated Schedule table")
-                self.assertContains(response, "current Schools, Activities, and Locations")
+                self.assertContains(response, "Select the Schools that should be generated together")
+                self.assertContains(response, "selected Schools and their current Activities and Locations")
                 self.assertContains(response, "Prepare before generating")
                 self.assertContains(response, "Review Locations")
                 self.assertContains(response, "Review Activities")
@@ -350,30 +370,68 @@ class ScheduleWorkflowTests(TestCase):
                 self.assertContains(response, f'href="{reverse("location-list")}"', html=False)
                 self.assertContains(response, f'href="{reverse("course-list")}"', html=False)
                 self.assertContains(response, f'href="{reverse("school-list")}"', html=False)
-                self.assertContains(response, "Use <code>{}</code> as a valid empty JSON value.", html=False)
-                self.assertContains(response, 'placeholder="{}"', html=False)
-                self.assertContains(response, '<textarea name="sched_data"', html=False)
+                self.assertContains(response, f'name="schools" value="{self.school.id}"', html=False)
+                self.assertNotContains(response, 'name="sched_data"', html=False)
                 self.assertNotContains(response, '<form action="", method=POST>', html=False)
 
     def test_schedule_create_and_update_posts_preserve_existing_crud_behavior(self):
         create_response = self.client.post(
             reverse("sched-create"),
-            {"sched_name": "Created Schedule", "sched_data": '{"source": "created"}'},
+            {"sched_name": "Created Schedule", "schools": [str(self.school.id)]},
         )
 
         self.assertRedirects(create_response, reverse("sched-list"))
         created_schedule = TheSched.objects.get(sched_name="Created Schedule")
-        self.assertEqual(created_schedule.sched_data, {"source": "created"})
+        self.assertEqual(list(created_schedule.schools.all()), [self.school])
+        self.assertEqual(created_schedule.sched_data, {})
 
+        second_school = Schools.schools_list.create(
+            school_name="Updated Schedule School",
+            arrive="Thur",
+            depart="Fri",
+            total_students=16,
+            ag_num=1,
+            attending_year="2026-06-04",
+        )
         update_response = self.client.post(
             reverse("sched-update", args=[created_schedule.id]),
-            {"sched_name": "Updated Schedule", "sched_data": '{"source": "updated"}'},
+            {"sched_name": "Updated Schedule", "schools": [str(second_school.id)]},
         )
 
         self.assertRedirects(update_response, reverse("sched-list"))
         created_schedule.refresh_from_db()
         self.assertEqual(created_schedule.sched_name, "Updated Schedule")
-        self.assertEqual(created_schedule.sched_data, {"source": "updated"})
+        self.assertEqual(list(created_schedule.schools.all()), [second_school])
+        self.assertEqual(created_schedule.sched_data, {})
+
+    def test_schedule_form_saves_selected_schools_and_excludes_sched_data(self):
+        second_school = Schools.schools_list.create(
+            school_name="Second Form School",
+            arrive="Thur",
+            depart="Fri",
+            total_students=16,
+            ag_num=1,
+            attending_year="2026-06-04",
+        )
+        form = SchedForm(data={
+            "sched_name": "Form Selected Schedule",
+            "schools": [str(self.school.id), str(second_school.id)],
+            "sched_data": '{"operator": "should be ignored"}',
+        })
+
+        self.assertTrue(form.is_valid(), form.errors)
+        created_schedule = form.save()
+        self.assertEqual(set(created_schedule.schools.all()), {self.school, second_school})
+        self.assertEqual(created_schedule.sched_data, {})
+        self.assertNotIn("sched_data", form.fields)
+
+        update_form = SchedForm(
+            data={"sched_name": "Updated Form Schedule", "schools": [str(second_school.id)]},
+            instance=created_schedule,
+        )
+        self.assertTrue(update_form.is_valid(), update_form.errors)
+        updated_schedule = update_form.save()
+        self.assertEqual(list(updated_schedule.schools.all()), [second_school])
 
     def test_schedule_delete_confirmation_renders_destructive_warning(self):
         response = self.client.get(reverse("sched-delete", args=[self.schedule.id]))
@@ -410,12 +468,55 @@ class ScheduleGenerationRegressionTests(TestCase):
         )
         self.school.subject.set([self.two_block, self.one_block, self.night])
         self.schedule = TheSched.objects.create(sched_name="Regression Schedule", sched_data={})
+        self.schedule.schools.add(self.school)
 
     def render_schedule_detail(self):
         request = RequestFactory().get(reverse("sched-detail", args=[self.schedule.id]))
         response = SchedDetail.as_view()(request, pk=self.schedule.id)
         response.render()
         return response, response.content.decode()
+
+    def create_second_valid_school(self):
+        school = Schools.schools_list.create(
+            school_name="Second Scoped School",
+            arrive="Thur",
+            depart="Fri",
+            total_students=16,
+            ag_num=1,
+            attending_year="2026-06-04",
+        )
+        school.subject.set([self.two_block, self.one_block, self.night])
+        return school
+
+    def test_schedules_generate_only_their_attached_schools(self):
+        second_school = self.create_second_valid_school()
+        second_schedule = TheSched.objects.create(sched_name="Second Scoped Schedule")
+        second_schedule.schools.add(second_school)
+
+        first_output = self.schedule.create_sched
+        second_output = second_schedule.create_sched
+
+        self.assertEqual(first_output["ags"], ["Balanced Regression School 0"])
+        self.assertEqual(second_output["ags"], ["Second Scoped School 0"])
+        self.assertNotEqual(first_output["ags"], second_output["ags"])
+
+    def test_diagnostics_ignore_unattached_schools(self):
+        unattached_school = Schools.schools_list.create(
+            school_name="Unattached Invalid School",
+            arrive="Thur",
+            depart="Fri",
+            total_students=16,
+            ag_num=1,
+            attending_year="2026-06-04",
+        )
+        invalid_activity = Course.objects.create(course_name="Unattached Invalid Activity", abriviation="UIA", course_len=1)
+        unattached_school.subject.set([invalid_activity])
+
+        generated_schedule = self.schedule.create_sched
+
+        self.assertEqual(self.schedule.generation_diagnostics, [])
+        self.assertTrue(self.schedule.generation_complete)
+        self.assertEqual(generated_schedule["ags"], ["Balanced Regression School 0"])
 
     def test_schedule_generation_refreshes_blank_sorted_activity_list(self):
         self.assertEqual(self.school.sorted_subject_lst, "")
@@ -528,6 +629,8 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.context_data["generation_complete"])
         self.assertIn("Schedule generated successfully", rendered_content)
+        self.assertIn("Selected Schools", rendered_content)
+        self.assertIn("Balanced Regression School", rendered_content)
         self.assertIn("Balanced Regression School 0", rendered_content)
         self.assertIn("Regression Two Block", rendered_content)
         self.assertIn("Regression One Block", rendered_content)
