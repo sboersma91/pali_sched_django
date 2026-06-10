@@ -13,6 +13,7 @@ from .models import (
     class_len,
     class_locs,
     initialize_scheduling_data,
+    master_locs,
 )
 
 
@@ -961,6 +962,61 @@ class CourseFormWorkflowTests(TestCase):
             list(Course.objects.get(course_name="Legacy Course").primary_locs.all()),
             [self.available_location],
         )
+
+class LocationAvailabilitySchedulingLookupTests(TestCase):
+    def setUp(self):
+        self.available_location = Locations.objects.create(
+            loc_name="Available Range",
+            loc_short="AR",
+            availible=True,
+        )
+        self.unavailable_location = Locations.objects.create(
+            loc_name="Closed Range",
+            loc_short="CR",
+            availible=False,
+        )
+        self.course = Course.objects.create(
+            course_name="Availability Test Activity",
+            abriviation="ATA",
+            course_len=1,
+        )
+        self.course.primary_locs.set([self.available_location, self.unavailable_location])
+
+    def test_available_location_is_in_scheduling_lookups(self):
+        initialize_scheduling_data(force=True)
+
+        self.assertIn("Available Range", master_locs)
+        self.assertEqual(class_locs["Availability Test Activity"], ["Available Range"])
+
+    def test_unavailable_location_is_excluded_from_scheduling_lookups(self):
+        initialize_scheduling_data(force=True)
+
+        self.assertNotIn("Closed Range", master_locs)
+        self.assertNotIn("Closed Range", class_locs["Availability Test Activity"])
+
+    def test_available_to_unavailable_change_is_reflected_after_forced_refresh(self):
+        initialize_scheduling_data(force=True)
+        self.available_location.availible = False
+        self.available_location.save(update_fields=["availible"])
+
+        initialize_scheduling_data(force=True)
+
+        self.assertNotIn("Available Range", master_locs)
+        self.assertNotIn("Availability Test Activity", class_locs)
+
+    def test_unavailable_to_available_change_is_reflected_after_forced_refresh(self):
+        initialize_scheduling_data(force=True)
+        self.unavailable_location.availible = True
+        self.unavailable_location.save(update_fields=["availible"])
+
+        initialize_scheduling_data(force=True)
+
+        self.assertIn("Closed Range", master_locs)
+        self.assertEqual(
+            set(class_locs["Availability Test Activity"]),
+            {"Available Range", "Closed Range"},
+        )
+
 
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
 class LocationFormWorkflowTests(TestCase):
