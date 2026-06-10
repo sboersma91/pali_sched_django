@@ -7,7 +7,7 @@
     </div>
     <div class="card-body">
       <p>Are you sure you want to permanently delete <strong>{{ sched.sched_name }}</strong>?</p>
-      <p class="text-danger fw-bold">Deleting this schedule removes its stored generated schedule data.</p>
+      <p class="text-danger fw-bold">Deleting this Schedule record removes its record data. Generated output can only be viewed again by creating another Schedule record from the current configuration.</p>
       <p class="mb-4">This action cannot be undone.</p>
       <form method="post" class="d-flex flex-wrap gap-2">
         {% csrf_token %}

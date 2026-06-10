@@ -146,18 +146,22 @@ class SchedForm(ModelForm):
         fields = '__all__'
         labels = {
             'sched_name': 'Schedule Name',
-            'sched_data': 'Stored Schedule Data',
+            'sched_data': 'Schedule Record Data',
         }
         help_texts = {
             'sched_name': 'Use a clear name that helps operators identify this schedule.',
             'sched_data': (
-                'This required JSON field stores schedule record data. Generated schedule output '
-                'is built from the current School, Activity, and Location configuration when viewed.'
+                'This required JSON field stores record-level data and does not directly control the generated '
+                'Schedule table. Generated output uses the current Schools, Activities, and Locations when viewed.'
             ),
         }
         widgets = {
             'sched_name': forms.TextInput(attrs={'class': 'form-control'}),
-            'sched_data': forms.Textarea(attrs={'class': 'form-control font-monospace', 'rows': 8}),
+            'sched_data': forms.Textarea(attrs={
+                'class': 'form-control font-monospace',
+                'rows': 8,
+                'placeholder': '{}',
+            }),
         }
 
 class InstructorForm(ModelForm):
