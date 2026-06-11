@@ -63,7 +63,14 @@
     </div>
 
     <div class="col-lg-4">
-        <div class="border rounded p-3 bg-light">
+        <div
+            id="schedule-block-summary"
+            class="border rounded p-3 bg-light {% if slot_summary.has_trip_window and slot_summary.daytime_status == 'balanced' and slot_summary.night_status == 'balanced' and slot_summary.total_status == 'balanced' %}border-success{% else %}border-warning{% endif %}"
+            data-required-daytime="{{ slot_summary.required_daytime }}"
+            data-required-night="{{ slot_summary.required_night }}"
+            data-required-total="{{ slot_summary.required_total }}"
+            data-has-trip-window="{{ slot_summary.has_trip_window|yesno:'true,false' }}"
+        >
             <h3>Schedule Block Summary</h3>
             {% if slot_summary.has_trip_window %}
                 <p><strong>Required daytime blocks:</strong> {{ slot_summary.required_daytime }}</p>
@@ -71,14 +78,17 @@
             {% else %}
                 <p><strong>Required blocks:</strong> choose arrive and depart days to calculate.</p>
             {% endif %}
-            <p><strong>Selected daytime blocks:</strong> {{ slot_summary.selected_daytime }}</p>
-            <p><strong>Selected night blocks:</strong> {{ slot_summary.selected_night }}</p>
+            <p><strong>Selected daytime blocks:</strong> <span data-summary-value="selected-daytime">{{ slot_summary.selected_daytime }}</span></p>
+            <p><strong>Selected night blocks:</strong> <span data-summary-value="selected-night">{{ slot_summary.selected_night }}</span></p>
             <p><strong>Required total blocks:</strong> {{ slot_summary.required_total }}</p>
-            <p><strong>Selected total blocks:</strong> {{ slot_summary.selected_total }}</p>
-            <p><strong>Daytime status:</strong> {{ slot_summary.daytime_status }}</p>
-            <p><strong>Night status:</strong> {{ slot_summary.night_status }}</p>
-            <p><strong>Total status:</strong> {{ slot_summary.total_status }}</p>
-            <p class="mb-0"><em>Selected activities must exactly match the required trip blocks before the School can be saved.</em></p>
+            <p><strong>Selected total blocks:</strong> <span data-summary-value="selected-total">{{ slot_summary.selected_total }}</span></p>
+            <p><strong>Daytime status:</strong> <span data-summary-status="daytime">{{ slot_summary.daytime_status }}</span></p>
+            <p><strong>Night status:</strong> <span data-summary-status="night">{{ slot_summary.night_status }}</span></p>
+            <p><strong>Total status:</strong> <span data-summary-status="total">{{ slot_summary.total_status }}</span></p>
+            <p class="fw-bold {% if slot_summary.has_trip_window and slot_summary.daytime_status == 'balanced' and slot_summary.night_status == 'balanced' and slot_summary.total_status == 'balanced' %}text-success{% else %}text-warning{% endif %}" data-summary-readiness>
+                {% if slot_summary.has_trip_window and slot_summary.daytime_status == 'balanced' and slot_summary.night_status == 'balanced' and slot_summary.total_status == 'balanced' %}Ready to save: selected Activities exactly match required blocks.{% else %}Not ready to save: selected Activities must exactly match required blocks.{% endif %}
+            </p>
+            <p class="mb-0"><em>Server-side validation remains authoritative when the School is saved.</em></p>
         </div>
     </div>
 </div>
@@ -107,5 +117,65 @@
         activityGroups.addEventListener('input', () => {
             if (activityGroups.value !== lastSuggestion) lastSuggestion = '';
         });
+    })();
+</script>
+
+
+<script>
+    (() => {
+        const summary = document.getElementById('schedule-block-summary');
+        const activities = document.querySelectorAll('input[name="subject"][data-daytime-blocks][data-night-blocks]');
+        if (!summary || !activities.length) return;
+
+        const selectedDaytime = summary.querySelector('[data-summary-value="selected-daytime"]');
+        const selectedNight = summary.querySelector('[data-summary-value="selected-night"]');
+        const selectedTotal = summary.querySelector('[data-summary-value="selected-total"]');
+        const daytimeStatus = summary.querySelector('[data-summary-status="daytime"]');
+        const nightStatus = summary.querySelector('[data-summary-status="night"]');
+        const totalStatus = summary.querySelector('[data-summary-status="total"]');
+        const readiness = summary.querySelector('[data-summary-readiness]');
+        const requiredDaytime = Number.parseInt(summary.dataset.requiredDaytime, 10);
+        const requiredNight = Number.parseInt(summary.dataset.requiredNight, 10);
+        const requiredTotal = Number.parseInt(summary.dataset.requiredTotal, 10);
+        const hasTripWindow = summary.dataset.hasTripWindow === 'true';
+
+        const status = (selected, required) => {
+            const difference = selected - required;
+            if (difference > 0) return `over by ${difference}`;
+            if (difference < 0) return `under by ${Math.abs(difference)}`;
+            return 'balanced';
+        };
+
+        const updateSummary = () => {
+            let daytime = 0;
+            let night = 0;
+            activities.forEach((activity) => {
+                if (!activity.checked) return;
+                daytime += Number.parseInt(activity.dataset.daytimeBlocks, 10);
+                night += Number.parseInt(activity.dataset.nightBlocks, 10);
+            });
+            const total = daytime + night;
+            const daytimeResult = status(daytime, requiredDaytime);
+            const nightResult = status(night, requiredNight);
+            const totalResult = status(total, requiredTotal);
+            const ready = hasTripWindow && daytimeResult === 'balanced' && nightResult === 'balanced' && totalResult === 'balanced';
+
+            selectedDaytime.textContent = daytime;
+            selectedNight.textContent = night;
+            selectedTotal.textContent = total;
+            daytimeStatus.textContent = daytimeResult;
+            nightStatus.textContent = nightResult;
+            totalStatus.textContent = totalResult;
+            summary.classList.toggle('border-success', ready);
+            summary.classList.toggle('border-warning', !ready);
+            readiness.classList.toggle('text-success', ready);
+            readiness.classList.toggle('text-warning', !ready);
+            readiness.textContent = ready
+                ? 'Ready to save: selected Activities exactly match required blocks.'
+                : 'Not ready to save: selected Activities must exactly match required blocks.';
+        };
+
+        activities.forEach((activity) => activity.addEventListener('change', updateSummary));
+        updateSummary();
     })();
 </script>

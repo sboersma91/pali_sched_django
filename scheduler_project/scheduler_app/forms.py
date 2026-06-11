@@ -100,6 +100,20 @@ class CourseForm(ModelForm):
             'primary_locs': forms.CheckboxSelectMultiple(),
         }
 
+class ActivityCheckboxSelectMultiple(forms.CheckboxSelectMultiple):
+    def __init__(self, *args, activity_blocks=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.activity_blocks = activity_blocks or {}
+
+    def create_option(self, name, value, label, selected, index, subindex=None, attrs=None):
+        option = super().create_option(name, value, label, selected, index, subindex, attrs)
+        block_metadata = self.activity_blocks.get(str(value))
+        if block_metadata:
+            option['attrs']['data-daytime-blocks'] = block_metadata['daytime']
+            option['attrs']['data-night-blocks'] = block_metadata['night']
+        return option
+
+
 class SchoolsForm(ModelForm):
     ACTIVITY_GROUPS = (
         (2, 'Two-block daytime activities', '2 daytime blocks'),
@@ -134,6 +148,17 @@ class SchoolsForm(ModelForm):
             for course_len, group_label, cost_label in self.ACTIVITY_GROUPS
             if courses_by_length[course_len]
         ]
+        self.fields['subject'].widget = ActivityCheckboxSelectMultiple(
+            activity_blocks={
+                str(course.pk): {
+                    'daytime': course.course_len if course.course_len > 0 else 0,
+                    'night': 1 if course.course_len == 0 else 0,
+                }
+                for courses in courses_by_length.values()
+                for course in courses
+            }
+        )
+        self.fields['subject'].widget.choices = self.fields['subject'].choices
 
     def clean(self):
         cleaned_data = super().clean()
