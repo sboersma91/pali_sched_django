@@ -1,14 +1,20 @@
 {% extends 'pay_end/base_pay.html' %}
-{% block title %}Add location{% endblock title %}
+{% block title %}Delete {{ school.school_name }}{% endblock title %}
 {% block content %}
+    <div class="card border-danger mt-4 mb-4">
+        <div class="card-header bg-danger text-white">
+            <h1 class="h4 mb-0">Confirm School Deletion</h1>
+        </div>
+        <div class="card-body">
+            <p>Are you sure you want to permanently delete <strong>{{ school.school_name }}</strong>?</p>
+            <p class="text-danger fw-bold">Deleting this school may affect generated schedules that currently use it.</p>
+            <p class="mb-4">This action cannot be undone.</p>
 
-
- <a href="{% url 'school-list' %}"> Go Back</a>
-
-<form method="POST">
-    {% csrf_token %}
-    <p>Are your sure you want to delete<b>{{school}}</b> </p>
-    <input class="button" type="submit" value="Delete" />
-</form>
-
+            <form method="post" class="d-flex flex-wrap gap-2">
+                {% csrf_token %}
+                <button type="submit" class="btn btn-danger">Confirm Delete</button>
+                <a href="{% url 'school-detail' school.id %}" class="btn btn-secondary">Cancel</a>
+            </form>
+        </div>
+    </div>
 {% endblock content %}
