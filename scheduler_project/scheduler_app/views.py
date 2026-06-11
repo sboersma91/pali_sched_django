@@ -1,8 +1,11 @@
-from django.shortcuts import render
+import csv
+
+from django.shortcuts import get_object_or_404, render
 from .models import Locations, Course, Schools, TheSched
 from .forms import CourseForm, InstructorForm, LocationsForm, SchedForm, SchoolsForm
-from django.http import HttpResponseRedirect
+from django.http import HttpResponse, HttpResponseRedirect
 from django.urls import reverse_lazy
+from django.utils.text import slugify
 
 from .school_accounting import school_slot_accounting_summary
 
@@ -120,6 +123,69 @@ class SchoolDelete(DeleteView):
     success_url = reverse_lazy('school-list')
     context_object_name = "school"
 
+SCHEDULE_DAYS = [
+    {'name': 'Monday', 'slots': [
+        {'label': 'PM1', 'key': 'mon_pm1'}, {'label': 'PM2', 'key': 'mon_pm2'}, {'label': 'Night', 'key': 'mon_night'},
+    ]},
+    {'name': 'Tuesday', 'slots': [
+        {'label': 'AM1', 'key': 'tue_am1'}, {'label': 'AM2', 'key': 'tue_am2'},
+        {'label': 'PM1', 'key': 'tue_pm1'}, {'label': 'PM2', 'key': 'tue_pm2'}, {'label': 'Night', 'key': 'tue_night'},
+    ]},
+    {'name': 'Wednesday', 'slots': [
+        {'label': 'AM1', 'key': 'wed_am1'}, {'label': 'AM2', 'key': 'wed_am2'},
+        {'label': 'PM1', 'key': 'wed_pm1'}, {'label': 'PM2', 'key': 'wed_pm2'}, {'label': 'Night', 'key': 'wed_night'},
+    ]},
+    {'name': 'Thursday', 'slots': [
+        {'label': 'AM1', 'key': 'thur_am1'}, {'label': 'AM2', 'key': 'thur_am2'},
+        {'label': 'PM1', 'key': 'thur_pm1'}, {'label': 'PM2', 'key': 'thur_pm2'}, {'label': 'Night', 'key': 'thur_night'},
+    ]},
+    {'name': 'Friday', 'slots': [
+        {'label': 'AM1', 'key': 'fri_am1'}, {'label': 'AM2', 'key': 'fri_am2'},
+    ]},
+]
+SCHEDULE_DISPLAY_VALUES = {'g_box': '/////', 'empty': '****'}
+CSV_ACTIVITY_VALUES = {'g_box': 'Unavailable / Not present', 'empty': 'Unassigned'}
+
+
+def schedule_csv_export(request, pk):
+    schedule_record = get_object_or_404(TheSched, pk=pk)
+    generated_schedule = schedule_record.create_sched
+    diagnostics = getattr(schedule_record, 'generation_diagnostics', [])
+    if diagnostics:
+        diagnostic_text = '; '.join(
+            f"{diagnostic['school']} — {diagnostic['activity']}: {diagnostic['reason']}"
+            for diagnostic in diagnostics
+        )
+        return HttpResponse(
+            f'Schedule CSV export is unavailable because generation is blocked. {diagnostic_text}',
+            status=409,
+            content_type='text/plain',
+        )
+
+    generation_status = 'Complete' if getattr(schedule_record, 'generation_complete', True) else 'Incomplete'
+    filename = slugify(schedule_record.sched_name) or f'schedule-{schedule_record.pk}'
+    response = HttpResponse(content_type='text/csv')
+    response['Content-Disposition'] = f'attachment; filename="{filename}.csv"'
+    writer = csv.writer(response)
+    writer.writerow(['Schedule Name', 'Generation Status', 'Day', 'Time Block', 'Activity Group', 'Activity', 'Location'])
+
+    for group_index, activity_group in enumerate(generated_schedule.get('ags', [])):
+        for day in SCHEDULE_DAYS:
+            for slot in day['slots']:
+                slot_values = generated_schedule.get(slot['key'], [])
+                value = slot_values[group_index] if group_index < len(slot_values) else 'empty'
+                writer.writerow([
+                    schedule_record.sched_name,
+                    generation_status,
+                    day['name'],
+                    slot['label'],
+                    activity_group,
+                    CSV_ACTIVITY_VALUES.get(value, value),
+                    '',
+                ])
+    return response
+
+
 '''Starting of function based views'''
 class SchedList(ListView):
     model = TheSched
@@ -138,57 +204,8 @@ class SchedDetail(DetailView):
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         schedule = self.object.create_sched
-        schedule_days = [
-            {
-                'name': 'Monday',
-                'slots': [
-                    {'label': 'PM1', 'key': 'mon_pm1'},
-                    {'label': 'PM2', 'key': 'mon_pm2'},
-                    {'label': 'Night', 'key': 'mon_night'},
-                ],
-            },
-            {
-                'name': 'Tuesday',
-                'slots': [
-                    {'label': 'AM1', 'key': 'tue_am1'},
-                    {'label': 'AM2', 'key': 'tue_am2'},
-                    {'label': 'PM1', 'key': 'tue_pm1'},
-                    {'label': 'PM2', 'key': 'tue_pm2'},
-                    {'label': 'Night', 'key': 'tue_night'},
-                ],
-            },
-            {
-                'name': 'Wednesday',
-                'slots': [
-                    {'label': 'AM1', 'key': 'wed_am1'},
-                    {'label': 'AM2', 'key': 'wed_am2'},
-                    {'label': 'PM1', 'key': 'wed_pm1'},
-                    {'label': 'PM2', 'key': 'wed_pm2'},
-                    {'label': 'Night', 'key': 'wed_night'},
-                ],
-            },
-            {
-                'name': 'Thursday',
-                'slots': [
-                    {'label': 'AM1', 'key': 'thur_am1'},
-                    {'label': 'AM2', 'key': 'thur_am2'},
-                    {'label': 'PM1', 'key': 'thur_pm1'},
-                    {'label': 'PM2', 'key': 'thur_pm2'},
-                    {'label': 'Night', 'key': 'thur_night'},
-                ],
-            },
-            {
-                'name': 'Friday',
-                'slots': [
-                    {'label': 'AM1', 'key': 'fri_am1'},
-                    {'label': 'AM2', 'key': 'fri_am2'},
-                ],
-            },
-        ]
-        display_values = {
-            'g_box': '/////',
-            'empty': '****',
-        }
+        schedule_days = SCHEDULE_DAYS
+        display_values = SCHEDULE_DISPLAY_VALUES
         schedule_rows = []
         for ag_index, ag in enumerate(schedule.get('ags', [])):
             cells = []

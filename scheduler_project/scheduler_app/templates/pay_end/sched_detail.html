@@ -8,6 +8,9 @@
       <p class="text-muted mb-0">Current operational output generated when this page was opened.</p>
     </div>
     <div class="d-flex flex-wrap gap-2">
+      {% if not generation_blocked %}
+        <a href="{% url 'sched-export' sched.id %}" class="btn btn-primary">Export CSV</a>
+      {% endif %}
       <a href="{% url 'sched-update' sched.id %}" class="btn btn-secondary">Edit Schedule Record</a>
       <a href="{% url 'sched-delete' sched.id %}" class="btn btn-outline-danger">Delete Schedule</a>
       <a href="{% url 'sched-list' %}" class="btn btn-outline-primary">Back to Schedules</a>
@@ -61,7 +64,8 @@
 
   <div class="alert alert-info mb-4" role="alert">
     <h2 class="h5 alert-heading">How this Schedule record works</h2>
-    <p class="mb-0">Generated output uses this Schedule’s selected Schools and their current Activities and Locations. Viewing this page regenerates the current output; editing the Schedule record does not directly edit the generated table.</p>
+    <p>Generated output uses this Schedule’s selected Schools and their current Activities and Locations. Viewing this page regenerates the current output; editing the Schedule record does not directly edit the generated table.</p>
+    {% if not generation_blocked %}<p class="mb-0"><strong>Export CSV:</strong> Download generated schedule for spreadsheet review.</p>{% endif %}
   </div>
 
   {% if not generation_blocked %}

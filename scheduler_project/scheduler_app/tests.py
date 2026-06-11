@@ -1,3 +1,5 @@
+import csv
+from io import StringIO
 from unittest.mock import PropertyMock, patch
 
 from django.contrib.auth import get_user_model
@@ -6,7 +8,7 @@ from django.test import Client, RequestFactory, TestCase, override_settings
 from django.urls import reverse
 
 from .forms import SchoolsForm, SchedForm, suggest_activity_group_count
-from .views import SchedDetail, SchedList
+from .views import SchedDetail, SchedList, schedule_csv_export
 from .school_accounting import school_slot_accounting_summary
 from .models import (
     Course,
@@ -478,6 +480,13 @@ class ScheduleGenerationRegressionTests(TestCase):
         response.render()
         return response, response.content.decode()
 
+    def export_schedule_csv(self):
+        request = RequestFactory().get(reverse("sched-export", args=[self.schedule.id]))
+        return schedule_csv_export(request, pk=self.schedule.id)
+
+    def parse_schedule_csv(self, response):
+        return list(csv.DictReader(StringIO(response.content.decode())))
+
     def create_second_valid_school(self):
         school = Schools.schools_list.create(
             school_name="Second Scoped School",
@@ -611,6 +620,17 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.assertIn("must not be treated as a fully generated Schedule", rendered_content)
         self.assertIn("<table", rendered_content)
 
+    def test_incomplete_schedule_csv_export_labels_output_and_unassigned_entries(self):
+        self.make_location_valid_schedule_unassignable()
+
+        response = self.export_schedule_csv()
+        rows = self.parse_schedule_csv(response)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(rows)
+        self.assertEqual({row["Generation Status"] for row in rows}, {"Incomplete"})
+        self.assertIn("Unassigned", {row["Activity"] for row in rows})
+
     def test_schedule_detail_renders_activity_location_diagnostic_instead_of_table(self):
         activity = Course.objects.create(course_name="Diagnostic Activity", abriviation="DA", course_len=1)
         self.school.subject.set([self.two_block, activity, self.night])
@@ -624,6 +644,22 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.assertIn("Diagnostic Activity", rendered_content)
         self.assertIn("Activity is not connected to any scheduling Locations.", rendered_content)
         self.assertNotIn("<table", rendered_content)
+        self.assertNotIn(reverse("sched-export", args=[self.schedule.id]), rendered_content)
+
+    def test_blocked_schedule_csv_export_returns_diagnostic_instead_of_empty_csv(self):
+        activity = Course.objects.create(course_name="Blocked Export Activity", abriviation="BEA", course_len=1)
+        self.school.subject.set([self.two_block, activity, self.night])
+
+        response = self.export_schedule_csv()
+        content = response.content.decode()
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response["Content-Type"], "text/plain")
+        self.assertNotIn("Content-Disposition", response)
+        self.assertIn("Schedule CSV export is unavailable because generation is blocked", content)
+        self.assertIn("Balanced Regression School", content)
+        self.assertIn("Blocked Export Activity", content)
+        self.assertNotIn("Schedule Name,Generation Status", content)
 
     def test_schedule_detail_generates_and_renders_balanced_school(self):
         response, rendered_content = self.render_schedule_detail()
@@ -638,6 +674,46 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.assertIn("Regression One Block", rendered_content)
         self.assertIn("Regression Night", rendered_content)
         self.assertIn("<table", rendered_content)
+        self.assertIn("Export CSV", rendered_content)
+        self.assertIn("Download generated schedule for spreadsheet review", rendered_content)
+        self.assertIn(reverse("sched-export", args=[self.schedule.id]), rendered_content)
+
+    def test_successful_schedule_csv_export_contains_operational_table_rows(self):
+        response = self.export_schedule_csv()
+        rows = self.parse_schedule_csv(response)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "text/csv")
+        self.assertEqual(response["Content-Disposition"], 'attachment; filename="regression-schedule.csv"')
+        self.assertEqual(list(rows[0]), [
+            "Schedule Name",
+            "Generation Status",
+            "Day",
+            "Time Block",
+            "Activity Group",
+            "Activity",
+            "Location",
+        ])
+        self.assertEqual(len(rows), 20)
+        self.assertEqual({row["Schedule Name"] for row in rows}, {"Regression Schedule"})
+        self.assertEqual({row["Generation Status"] for row in rows}, {"Complete"})
+        self.assertEqual({row["Activity Group"] for row in rows}, {"Balanced Regression School 0"})
+        self.assertIn("Regression Two Block", {row["Activity"] for row in rows})
+        self.assertIn("Regression One Block", {row["Activity"] for row in rows})
+        self.assertIn("Regression Night", {row["Activity"] for row in rows})
+        self.assertEqual({row["Location"] for row in rows}, {""})
+
+    def test_schedule_csv_export_uses_only_attached_schools(self):
+        other_school = self.create_second_valid_school()
+        other_schedule = TheSched.objects.create(sched_name="Other Export Schedule", sched_data={})
+        other_schedule.schools.add(other_school)
+
+        response = self.export_schedule_csv()
+        rows = self.parse_schedule_csv(response)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual({row["Activity Group"] for row in rows}, {"Balanced Regression School 0"})
+        self.assertNotIn("Second Valid School", response.content.decode())
 
 
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
