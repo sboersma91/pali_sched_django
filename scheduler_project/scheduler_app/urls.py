@@ -1,49 +1,61 @@
 # this file was created with the outline from the project urls file
 from django.urls import path
 from . import views
-from .views import CourseCreate, CourseDelete, CourseDetail, CourseList, CourseUpdate, LocationDelete, LocationDetail, LocationList, LocationCreate, LocationUpdate, SchoolCreate, SchoolDelete, SchoolDetail, SchoolList, SchoolUpdate, SchedCreate, SchedDelete, SchedUpdate, SchedList, SchedDetail
+from .views import (
+    CourseCreate,
+    CourseDelete,
+    CourseDetail,
+    CourseList,
+    CourseUpdate,
+    LocationDelete,
+    LocationDetail,
+    LocationList,
+    LocationCreate,
+    LocationUpdate,
+    SchoolCreate,
+    SchoolDelete,
+    SchoolDetail,
+    SchoolList,
+    SchoolUpdate,
+    SchedCreate,
+    SchedDelete,
+    SchedUpdate,
+    SchedList,
+    SchedDetail,
+)
 
 urlpatterns = [
-    path('', views.home, name="home"),
-    path('add_course', views.add_course, name="add-course"),
-    path('add_school', views.add_school, name="add-school"),
-    path('add_location', views.add_location, name="add-location"),
-    path('home_paid', views.home_paid, name='home-paid'),
-    path('add_instructor', views.add_instructor, name="add-instructor"),
-    path('search_results', views.search_results,name='search-results'),
-    path('class_view',views.class_view, name='class-view'),
-    
+    path("", views.home, name="home"),
+    path("add_course", views.add_course, name="add-course"),
+    path("add_school", views.add_school, name="add-school"),
+    path("add_location", views.add_location, name="add-location"),
+    path("home_paid", views.home_paid, name="home-paid"),
+    path("add_instructor", views.add_instructor, name="add-instructor"),
+    path("search_results", views.search_results, name="search-results"),
+    path("class_view", views.class_view, name="class-view"),
     # class Based views below
-    path('location_list', LocationList.as_view(), name='location-list'),
-    path('location/<int:pk>/', LocationDetail.as_view(), name='location-detail'),
-
-    path('add_loc', LocationCreate.as_view(), name='add-loc'),
-
-    path('location-update/<int:pk>/', LocationUpdate.as_view(), name='location-update'),
-    path('location-delete/<int:pk>/', LocationDelete.as_view(), name='location-delete'),
-    
-    
+    path("location_list", LocationList.as_view(), name="location-list"),
+    path("location/<int:pk>/", LocationDetail.as_view(), name="location-detail"),
+    path("add_loc", LocationCreate.as_view(), name="add-loc"),
+    path("location-update/<int:pk>/", LocationUpdate.as_view(), name="location-update"),
+    path("location-delete/<int:pk>/", LocationDelete.as_view(), name="location-delete"),
     # Course views
-    path('course_list', CourseList.as_view(), name='course-list'),
-    
-    path('course/<int:pk>/', CourseDetail.as_view(), name='course-detail'),
-    path('course_create', CourseCreate.as_view(), name='course-create'),
-    path('course_update/<int:pk>/', CourseUpdate.as_view(), name='course-update'),
-    path('course_delete/<int:pk>/', CourseDelete.as_view(), name='course-delete'),
-    
+    path("course_list", CourseList.as_view(), name="course-list"),
+    path("course/<int:pk>/", CourseDetail.as_view(), name="course-detail"),
+    path("course_create", CourseCreate.as_view(), name="course-create"),
+    path("course_update/<int:pk>/", CourseUpdate.as_view(), name="course-update"),
+    path("course_delete/<int:pk>/", CourseDelete.as_view(), name="course-delete"),
     # School views
-    path('school_list', SchoolList.as_view(), name='school-list'),
-    path('school_detail/<int:pk>/', SchoolDetail.as_view(), name='school-detail'),
-    path('school_create', SchoolCreate.as_view(), name='school-create'),
-    path('school_update/<int:pk>/', SchoolUpdate.as_view(), name='school-update'),
-    path('school_delete/<int:pk>/', SchoolDelete.as_view(), name='school-delete'),
-    
+    path("school_list", SchoolList.as_view(), name="school-list"),
+    path("school_detail/<int:pk>/", SchoolDetail.as_view(), name="school-detail"),
+    path("school_create", SchoolCreate.as_view(), name="school-create"),
+    path("school_update/<int:pk>/", SchoolUpdate.as_view(), name="school-update"),
+    path("school_delete/<int:pk>/", SchoolDelete.as_view(), name="school-delete"),
     # Schedule views
-    path('schedule_list', SchedList.as_view(), name='sched-list'),
-    path('schedule_detail/<int:pk>/', SchedDetail.as_view(), name='sched-detail'),
-    path('schedule_create', SchedCreate.as_view(), name='sched-create'),
-    path('schedule_update/<int:pk>/', SchedUpdate.as_view(), name='sched-update'),
-    path('schedule_delete/<int:pk>/', SchedDelete.as_view(), name='sched-delete'),
-
-
+    path("schedule_list", SchedList.as_view(), name="sched-list"),
+    path("schedule_detail/<int:pk>/", SchedDetail.as_view(), name="sched-detail"),
+    path("schedule_export/<int:pk>/", views.schedule_csv_export, name="sched-export"),
+    path("schedule_create", SchedCreate.as_view(), name="sched-create"),
+    path("schedule_update/<int:pk>/", SchedUpdate.as_view(), name="sched-update"),
+    path("schedule_delete/<int:pk>/", SchedDelete.as_view(), name="sched-delete"),
 ]

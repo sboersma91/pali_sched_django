@@ -1,19 +1,15 @@
 {% extends 'pay_end/base_pay.html' %}
+{% block title %}Add School{% endblock title %}
 {% block content %}
-    <center>
-        <h1>Add School</h1>
-        {% if submitted %}
-            You have added another school!
-            <br>
-            <div class="btn-group">
-                <a href="{% url 'add-school' %}" class="btn btn-primary active">add another? maybenot</a>>
-            </div>
-        {% else %}
-        <form action="", method=POST>
+    <h1 class="mt-4">Add School</h1>
+    {% if submitted %}
+        <p>You have added another school!</p>
+        <a href="{% url 'add-school' %}" class="btn btn-primary">Add another school</a>
+    {% else %}
+        <form action="" method="post" class="mt-3">
             {% csrf_token %}
-            {{ form.as_p }}
-            <input type="submit" class="btn btn-secondary">
+            {% include 'pay_end/_school_fields.html' %}
+            <input type="submit" value="Add school" class="btn btn-secondary mb-4">
         </form>
-        {% endif %}
-    </center>
-{% endblock%}
+    {% endif %}
+{% endblock %}

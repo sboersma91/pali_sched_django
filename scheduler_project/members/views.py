@@ -11,7 +11,7 @@ def login_user(request):
 
         if user is not None:
             login(request, user)
-            return redirect('home_pay')
+            return redirect('home-paid')
             # redirect is page to send them to.
         else:
             messages.success(request, "There was an error")

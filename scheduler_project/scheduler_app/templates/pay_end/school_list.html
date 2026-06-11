@@ -1,16 +1,54 @@
 {% extends 'pay_end/base_pay.html' %}
+{% block title %}Schools{% endblock title %}
 {% block content %}
-<a href="{% url 'school-create' %}">Add New School</a> 
-    <center>
-        <h1>School List html</h1>
-    {% for s in school.all %}
-    <h4><strong>{{ s.school_name }}</strong></h4>
-    <a href="{% url 'school-detail' s.id %}">Details</a>
-    <a href="{% url 'school-update' s.id %}">Update</a>
-    <a href="{% url 'school-delete' s.id %}">Delete</a>
-    <hr>
-    {% empty %}
-    <h4>You have not made any schools yet</h4>
-    {% endfor %}
-    </center>
-{% endblock%}
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-4 mb-3">
+        <div>
+            <h1 class="mb-1">Schools</h1>
+            <p class="text-muted mb-0">Review visit dates, group counts, student totals, and selected activities for each school.</p>
+        </div>
+        <a href="{% url 'school-create' %}" class="btn btn-primary">Add New School</a>
+    </div>
+
+    <div class="table-responsive">
+        <table class="table table-striped table-hover align-middle">
+            <thead class="table-light">
+                <tr>
+                    <th scope="col">School Name</th>
+                    <th scope="col">Arrival Day</th>
+                    <th scope="col">Departure Day</th>
+                    <th scope="col">Activity Groups</th>
+                    <th scope="col">Students</th>
+                    <th scope="col">Selected Activities</th>
+                    <th scope="col" class="text-end">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for s in school.all %}
+                    <tr>
+                        <td><strong>{{ s.school_name }}</strong></td>
+                        <td>{{ s.get_arrive_display }}</td>
+                        <td>{{ s.get_depart_display }}</td>
+                        <td>{{ s.ag_num }}</td>
+                        <td>{{ s.total_students }}</td>
+                        <td>
+                            {% for activity in s.subject.all %}
+                                {{ activity.course_name }}{% if not forloop.last %}, {% endif %}
+                            {% empty %}
+                                <span class="text-muted">No activities selected.</span>
+                            {% endfor %}
+                        </td>
+                        <td class="text-end text-nowrap">
+                            <a href="{% url 'school-detail' s.id %}" class="btn btn-sm btn-outline-primary">View</a>
+                            <a href="{% url 'school-update' s.id %}" class="btn btn-sm btn-outline-secondary">Edit</a>
+                            <a href="{% url 'school-delete' s.id %}" class="btn btn-sm btn-outline-danger">Delete</a>
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr>
+                        <td colspan="7" class="text-center text-muted py-4">No schools have been added yet.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+{% endblock %}
