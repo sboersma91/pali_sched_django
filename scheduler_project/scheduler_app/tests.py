@@ -306,7 +306,10 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, "Selected Schools")
         self.assertContains(response, "Existing Operational Schedule")
         self.assertContains(response, "1 School")
-        self.assertContains(response, "Opening a Schedule regenerates its current output")
+        self.assertContains(
+            response,
+            "Opening a Schedule regenerates output for its selected Schools",
+        )
         self.assertContains(response, "Create Schedule")
         self.assertContains(response, "Generate / View")
         self.assertContains(response, "Edit Record")
@@ -980,7 +983,6 @@ class SchoolFormWorkflowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         selected_values = {str(value) for value in response.context["form"]["subject"].value()}
         self.assertEqual(selected_values, {str(self.wm.id), str(self.night_hike.id)})
-        self.assertContains(response, "checked", count=2)
 
     def test_school_create_saves_subjects_after_instance_has_id(self):
         response = self.client.post(

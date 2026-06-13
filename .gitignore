@@ -1,2 +1,29 @@
-*.pyc
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
 scheduler_virt/
+
+# Django local state
+scheduler_project/db.sqlite3
+scheduler_project/db.sqlite3-*
+scheduler_project/media_root/
+
+# Test and tooling caches
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environment and editor/OS files
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
