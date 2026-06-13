@@ -6,11 +6,19 @@ from django.db.models.fields.related import ManyToManyField, ForeignKey
 from django.db import connection
 from django.db.models import JSONField
 
+from .schedule_blocks import (
+    DAY_OFFSETS,
+    SCHEDULE_SLOT_KEYS,
+    UNASSIGNED_SLOT_VALUE,
+    UNAVAILABLE_SLOT_VALUE,
+    WEEKDAY_CHOICES,
+)
+
 # from django.db.models.signals import pre_save, post_save
 # from .custom_fields import CommaSepField
 
 
-wk_days = (('Mon','Monday'),('Tue', 'Tuesday'), ('Wed','Wednesday'), ('Thur', 'Thursday'),('Fri','Friday'))
+wk_days = WEEKDAY_CHOICES
 # ('stored in DB', "shown on screen" )
 
 class Locations(models.Model):
@@ -102,7 +110,8 @@ class Schools(models.Model):
     depart = CharField(max_length=50, choices=wk_days)
     total_students = IntegerField()
     ag_num = IntegerField(default=1)
-    attending_year = DateField(auto_created=True) # this is to distinguish between the same school coming back yr after yr.Need to add blank=true and auto_now of year
+    # Distinguishes repeat visits; value is supplied through the existing forms.
+    attending_year = DateField()
 
     sorted_subject_lst = TextField(blank=True)
     # this needs to be a textfield -- 
@@ -226,39 +235,11 @@ class TheSched(models.Model):
         for school in self.schools.all():
             count+= school.ag_num
         global sched
-        sched = {
-            "mon_pm1": ['g_box']* count,
-            "mon_pm2": ['g_box']* count,
-            'mon_night':['g_box'] *count,
-
-            "tue_am1": ['g_box']* count,
-            "tue_am2": ['g_box']* count,
-            "tue_pm1": ['g_box']* count,
-            "tue_pm2": ['g_box']* count,
-            'tue_night':['g_box'] *count,
-            
-            "wed_am1": ['g_box']* count,
-            "wed_am2": ['g_box']* count,
-            "wed_pm1": ['g_box']* count,
-            "wed_pm2": ['g_box']* count,
-            'wed_night':['g_box'] *count,
-            
-            "thur_am1":['g_box']* count,
-            "thur_am2":['g_box']* count,
-            "thur_pm1":['g_box']* count,
-            "thur_pm2":['g_box']* count,
-            "thur_night":['g_box'] *count,
-            
-            "fri_am1": ['g_box']* count,
-            "fri_am2": ['g_box']* count,
-            'ags':[],
-            'classes_needed':[],
-            # WARNING: you may feel the urge to move ags to the start... this will SCREW up the day offsets :0
-        }
+        sched = {slot_key: [UNAVAILABLE_SLOT_VALUE] * count for slot_key in SCHEDULE_SLOT_KEYS}
+        sched['ags'] = []
+        sched['classes_needed'] = []
           
         group_count=0
-        day_offset = {'Mon':0, "Tue":5, "Wed":10, "Thur":15, "Fri":19}
-        #  day_end_offsett = {'Mon':, 'Tues':, 'Wed':,'Fri':}
         for school in self.schools.all():
             school.update_sorted_subject_lst()
             sorted_subjects = [subject for subject in school.sorted_subject_lst.split(',') if subject]
@@ -266,14 +247,14 @@ class TheSched(models.Model):
                 sched['ags'].append(school.school_name + ' ' + str(i))
                 # ------------------
                 sched['classes_needed'].append(sorted_subjects[::-1])
-            for key in list(sched.keys())[day_offset[school.arrive]:day_offset[school.depart]]:    
+            for key in SCHEDULE_SLOT_KEYS[DAY_OFFSETS[school.arrive]:DAY_OFFSETS[school.depart]]:
                 for i in range(group_count,group_count+school.ag_num):
-                            sched[key][i]='empty'
+                            sched[key][i] = UNASSIGNED_SLOT_VALUE
                             # gray box means school is gone
             group_count += school.ag_num
         
         self.sched = sched
-        time_slots = list(self.sched.keys())[:20]
+        time_slots = list(SCHEDULE_SLOT_KEYS)
         locs_open = {
             loc:{slot: 3 if loc in class_locs['Ropes'] else 1 for slot in time_slots} for loc in master_locs
         }  

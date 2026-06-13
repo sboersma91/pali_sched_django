@@ -8,7 +8,7 @@
             "name": "Python: Django",
             "type": "python",
             "request": "launch",
-            "program": "/Users/CodeSMA/Coding/ind_projs/pali_sched_django/scheduler_project/manage.py",
+            "program": "${workspaceFolder}/scheduler_project/manage.py",
             "args": [
                 "runserver"
             ],
