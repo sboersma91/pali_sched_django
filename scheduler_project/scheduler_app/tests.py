@@ -523,7 +523,15 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.assertEqual(self.schedule.sched_data['mode'], 'persisted')
         self.assertIn('schedule', self.schedule.sched_data)
         self.assertIn('generation_complete', self.schedule.sched_data)
+        persisted_cells = [
+            cell
+            for values in self.schedule.sched_data['schedule'].values()
+            if isinstance(values, list)
+            for cell in values
+        ]
+        self.assertTrue(any(isinstance(cell, dict) for cell in persisted_cells))
 
+        # Legacy persisted string cells remain readable alongside structured cells.
         self.schedule.sched_data['schedule']['thur_am1'][0] = 'Persisted Activity'
         self.schedule.save(update_fields=['sched_data'])
 
@@ -537,6 +545,7 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.assertContains(detail_response, 'Use Live Generation')
         self.assertNotContains(detail_response, 'Save Generated Output')
         self.assertIn('Persisted Activity', export_response.content.decode())
+        self.assertIn('Schedule Regression Location', export_response.content.decode())
 
     def test_returning_to_generated_mode_clears_persisted_output(self):
         self.schedule.sched_data = {
@@ -572,6 +581,29 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.assertEqual(first_output["ags"], ["Balanced Regression School 0"])
         self.assertEqual(second_output["ags"], ["Second Scoped School 0"])
         self.assertNotEqual(first_output["ags"], second_output["ags"])
+
+    def test_generated_activity_cells_include_stable_activity_and_location_metadata(self):
+        generated_schedule = self.schedule.create_sched
+        activity_cells = [
+            cell
+            for values in generated_schedule.values()
+            if isinstance(values, list)
+            for cell in values
+            if isinstance(cell, dict)
+        ]
+
+        self.assertTrue(activity_cells)
+        for cell in activity_cells:
+            self.assertEqual(
+                set(cell),
+                {'activity_name', 'activity_id', 'location_name', 'location_id', 'source'},
+            )
+            self.assertIsInstance(cell['activity_id'], int)
+            self.assertEqual(cell['location_name'], 'Schedule Regression Location')
+            self.assertIsInstance(cell['location_id'], int)
+            self.assertEqual(cell['source'], 'generated')
+        all_cells = [cell for values in generated_schedule.values() if isinstance(values, list) for cell in values]
+        self.assertIn('g_box', all_cells)
 
     def test_diagnostics_ignore_unattached_schools(self):
         unattached_school = Schools.schools_list.create(
@@ -763,7 +795,7 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.assertIn("Regression Two Block", {row["Activity"] for row in rows})
         self.assertIn("Regression One Block", {row["Activity"] for row in rows})
         self.assertIn("Regression Night", {row["Activity"] for row in rows})
-        self.assertEqual({row["Location"] for row in rows}, {""})
+        self.assertEqual({row["Location"] for row in rows}, {"", "Schedule Regression Location"})
 
     def test_schedule_csv_export_uses_only_attached_schools(self):
         other_school = self.create_second_valid_school()

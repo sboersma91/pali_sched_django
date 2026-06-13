@@ -7,6 +7,7 @@ from django.db import connection
 from django.db.models import JSONField
 
 from .schedule_blocks import SCHEDULE_BLOCK_KEYS, SCHEDULE_DAY_OFFSETS
+from .schedule_cells import generated_schedule_cell
 
 # from django.db.models.signals import pre_save, post_save
 # from .custom_fields import CommaSepField
@@ -286,6 +287,17 @@ class TheSched(models.Model):
             group_count += school.ag_num
         
         self.sched = sched
+        activity_ids = dict(Course.objects.values_list('course_name', 'id'))
+        location_ids = dict(Locations.objects.values_list('loc_name', 'id'))
+
+        def generated_cell(activity_name, location_name):
+            return generated_schedule_cell(
+                activity_name,
+                activity_ids.get(activity_name),
+                location_name,
+                location_ids.get(location_name),
+            )
+
         time_slots = SCHEDULE_BLOCK_KEYS
         locs_open = {
             loc:{slot: 3 if loc in class_locs['Ropes'] else 1 for slot in time_slots} for loc in master_locs
@@ -313,7 +325,7 @@ class TheSched(models.Model):
                             
                         if locs_open[current_loc][slot]>0 and schedule[slot][n]=='empty':
                             locs_open[current_loc][slot]-=1
-                            schedule[slot][n]= current_class
+                            schedule[slot][n]= generated_cell(current_class, current_loc)
                             if search_open_slot(locs_open, n, schedule=self.sched,):
                                 return True
                             schedule[slot][n]='empty'
@@ -328,9 +340,9 @@ class TheSched(models.Model):
                         if locs_open[current_loc][slot]>0 and schedule[slot][n]=='empty': 
                             if locs_open[current_loc][slot2]>0 and schedule[slot2][n]=='empty':
                                 locs_open[current_loc][slot]-=1
-                                schedule[slot][n]= current_class
+                                schedule[slot][n]= generated_cell(current_class, current_loc)
                                 locs_open[current_loc][slot2]-=1
-                                schedule[slot2][n]= current_class
+                                schedule[slot2][n]= generated_cell(current_class, current_loc)
                                 if search_open_slot(locs_open, n,schedule=self.sched,):
                                     return True
                                 schedule[slot][n]='empty'
@@ -345,7 +357,7 @@ class TheSched(models.Model):
                             continue
                         if locs_open[current_loc][slot]>0 and schedule[slot][n]=='empty':
                             locs_open[current_loc][slot]-=1
-                            schedule[slot][n]= current_class
+                            schedule[slot][n]= generated_cell(current_class, current_loc)
                             if search_open_slot(locs_open, n,schedule=self.sched,):
                                 return True
                             schedule[slot][n]='empty'

@@ -13,6 +13,7 @@ from .schedule_blocks import (
     SCHEDULE_DAY_OFFSETS,
     SCHEDULE_SLOT_BLOCKS,
 )
+from .schedule_cells import schedule_cell_activity_name, schedule_cell_location_name
 from .school_accounting import school_slot_accounting_summary
 
 
@@ -215,14 +216,15 @@ def schedule_csv_export(request, pk):
             for slot in day['slots']:
                 slot_values = generated_schedule.get(slot['key'], [])
                 value = slot_values[group_index] if group_index < len(slot_values) else 'empty'
+                activity_name = schedule_cell_activity_name(value)
                 writer.writerow([
                     schedule_record.sched_name,
                     generation_status,
                     day['name'],
                     slot['label'],
                     activity_group,
-                    CSV_ACTIVITY_VALUES.get(value, value),
-                    '',
+                    CSV_ACTIVITY_VALUES.get(activity_name, activity_name),
+                    schedule_cell_location_name(value),
                 ])
     return response
 
@@ -264,7 +266,8 @@ class SchedDetail(DetailView):
                 for slot in day['slots']:
                     slot_values = schedule.get(slot['key'], [])
                     value = slot_values[ag_index] if ag_index < len(slot_values) else ''
-                    cells.append(display_values.get(value, value))
+                    activity_name = schedule_cell_activity_name(value)
+                    cells.append(display_values.get(activity_name, activity_name))
             schedule_rows.append({'ag': ag, 'cells': cells})
 
         context['schedule_mode'] = self.object.schedule_mode
