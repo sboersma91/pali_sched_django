@@ -1,37 +1,23 @@
 import csv
 
-from django.shortcuts import get_object_or_404, render
+from django.contrib import messages
+from django.shortcuts import get_object_or_404, redirect, render
 from .models import Locations, Course, Schools, TheSched
 from .forms import CourseForm, InstructorForm, LocationsForm, SchedForm, SchoolsForm
 from django.http import HttpResponse, HttpResponseRedirect
 from django.urls import reverse_lazy
+from django.views.decorators.http import require_POST
 from django.utils.text import slugify
 
+from .schedule_blocks import (
+    SCHEDULE_DAYS,
+    SCHEDULE_DAY_OFFSETS,
+    SCHEDULE_SLOT_BLOCKS,
+)
+from .schedule_cells import schedule_cell_activity_name, schedule_cell_location_name
+from .schedule_move_application import apply_schedule_move
 from .school_accounting import school_slot_accounting_summary
 
-SCHEDULE_SLOT_BLOCKS = [
-    ('mon_pm1', 'daytime'),
-    ('mon_pm2', 'daytime'),
-    ('mon_night', 'night'),
-    ('tue_am1', 'daytime'),
-    ('tue_am2', 'daytime'),
-    ('tue_pm1', 'daytime'),
-    ('tue_pm2', 'daytime'),
-    ('tue_night', 'night'),
-    ('wed_am1', 'daytime'),
-    ('wed_am2', 'daytime'),
-    ('wed_pm1', 'daytime'),
-    ('wed_pm2', 'daytime'),
-    ('wed_night', 'night'),
-    ('thur_am1', 'daytime'),
-    ('thur_am2', 'daytime'),
-    ('thur_pm1', 'daytime'),
-    ('thur_pm2', 'daytime'),
-    ('thur_night', 'night'),
-    ('fri_am1', 'daytime'),
-    ('fri_am2', 'daytime'),
-]
-DAY_OFFSETS = {'Mon': 0, 'Tue': 5, 'Tues': 5, 'Wed': 10, 'Thur': 15, 'Thurs': 15, 'Fri': 19}
 
 
 def _form_values(form, field_name):
@@ -60,8 +46,8 @@ def school_slot_accounting_summary(form):
     arrive = _form_value(form, 'arrive')
     depart = _form_value(form, 'depart')
     required_slots = []
-    if arrive in DAY_OFFSETS and depart in DAY_OFFSETS:
-        required_slots = SCHEDULE_SLOT_BLOCKS[DAY_OFFSETS[arrive]:DAY_OFFSETS[depart]]
+    if arrive in SCHEDULE_DAY_OFFSETS and depart in SCHEDULE_DAY_OFFSETS:
+        required_slots = SCHEDULE_SLOT_BLOCKS[SCHEDULE_DAY_OFFSETS[arrive]:SCHEDULE_DAY_OFFSETS[depart]]
 
     selected_courses = Course.objects.filter(pk__in=_form_values(form, 'subject'))
     selected_daytime = sum(course.course_len for course in selected_courses if course.course_len > 0)
@@ -201,33 +187,13 @@ class SchoolDelete(DeleteView):
     success_url = reverse_lazy('school-list')
     context_object_name = "school"
 
-SCHEDULE_DAYS = [
-    {'name': 'Monday', 'slots': [
-        {'label': 'PM1', 'key': 'mon_pm1'}, {'label': 'PM2', 'key': 'mon_pm2'}, {'label': 'Night', 'key': 'mon_night'},
-    ]},
-    {'name': 'Tuesday', 'slots': [
-        {'label': 'AM1', 'key': 'tue_am1'}, {'label': 'AM2', 'key': 'tue_am2'},
-        {'label': 'PM1', 'key': 'tue_pm1'}, {'label': 'PM2', 'key': 'tue_pm2'}, {'label': 'Night', 'key': 'tue_night'},
-    ]},
-    {'name': 'Wednesday', 'slots': [
-        {'label': 'AM1', 'key': 'wed_am1'}, {'label': 'AM2', 'key': 'wed_am2'},
-        {'label': 'PM1', 'key': 'wed_pm1'}, {'label': 'PM2', 'key': 'wed_pm2'}, {'label': 'Night', 'key': 'wed_night'},
-    ]},
-    {'name': 'Thursday', 'slots': [
-        {'label': 'AM1', 'key': 'thur_am1'}, {'label': 'AM2', 'key': 'thur_am2'},
-        {'label': 'PM1', 'key': 'thur_pm1'}, {'label': 'PM2', 'key': 'thur_pm2'}, {'label': 'Night', 'key': 'thur_night'},
-    ]},
-    {'name': 'Friday', 'slots': [
-        {'label': 'AM1', 'key': 'fri_am1'}, {'label': 'AM2', 'key': 'fri_am2'},
-    ]},
-]
 SCHEDULE_DISPLAY_VALUES = {'g_box': '/////', 'empty': '****'}
 CSV_ACTIVITY_VALUES = {'g_box': 'Unavailable / Not present', 'empty': 'Unassigned'}
 
 
 def schedule_csv_export(request, pk):
     schedule_record = get_object_or_404(TheSched, pk=pk)
-    generated_schedule = schedule_record.create_sched
+    generated_schedule = schedule_record.get_schedule_output()
     diagnostics = getattr(schedule_record, 'generation_diagnostics', [])
     if diagnostics:
         diagnostic_text = '; '.join(
@@ -252,16 +218,69 @@ def schedule_csv_export(request, pk):
             for slot in day['slots']:
                 slot_values = generated_schedule.get(slot['key'], [])
                 value = slot_values[group_index] if group_index < len(slot_values) else 'empty'
+                activity_name = schedule_cell_activity_name(value)
                 writer.writerow([
                     schedule_record.sched_name,
                     generation_status,
                     day['name'],
                     slot['label'],
                     activity_group,
-                    CSV_ACTIVITY_VALUES.get(value, value),
-                    '',
+                    CSV_ACTIVITY_VALUES.get(activity_name, activity_name),
+                    schedule_cell_location_name(value),
                 ])
     return response
+
+
+@require_POST
+def schedule_move(request, pk):
+    schedule_record = get_object_or_404(TheSched, pk=pk)
+    required_fields = (
+        'source_block_key',
+        'source_row_index',
+        'destination_block_key',
+        'destination_row_index',
+    )
+    if any(request.POST.get(field) in (None, '') for field in required_fields):
+        messages.error(request, 'Schedule move requires source and destination block and row values.')
+        return redirect('sched-detail', pk=pk)
+
+    try:
+        source_row_index = int(request.POST['source_row_index'])
+        destination_row_index = int(request.POST['destination_row_index'])
+    except (TypeError, ValueError):
+        messages.error(request, 'Schedule move row values must be integers.')
+        return redirect('sched-detail', pk=pk)
+
+    schedule = schedule_record.get_schedule_output()
+    result = apply_schedule_move(
+        schedule,
+        request.POST['source_block_key'],
+        source_row_index,
+        request.POST['destination_block_key'],
+        destination_row_index,
+    )
+    if not result['applied']:
+        messages.error(request, 'Schedule move was not applied: ' + ' '.join(result['errors']))
+        return redirect('sched-detail', pk=pk)
+
+    schedule_record.sched_data = {
+        'mode': 'persisted',
+        'schedule': result['schedule'],
+        'generation_complete': getattr(schedule_record, 'generation_complete', True),
+    }
+    schedule_record.save(update_fields=['sched_data'])
+    messages.success(request, 'Schedule move saved.')
+    return redirect('sched-detail', pk=pk)
+
+
+@require_POST
+def schedule_persistence(request, pk):
+    schedule_record = get_object_or_404(TheSched, pk=pk)
+    if request.POST.get('mode') == 'persisted':
+        schedule_record.persist_generated_schedule()
+    elif request.POST.get('mode') == 'generated':
+        schedule_record.use_generated_schedule()
+    return redirect('sched-detail', pk=pk)
 
 
 '''Starting of function based views'''
@@ -281,7 +300,7 @@ class SchedDetail(DetailView):
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
-        schedule = self.object.create_sched
+        schedule = self.object.get_schedule_output()
         schedule_days = SCHEDULE_DAYS
         display_values = SCHEDULE_DISPLAY_VALUES
         schedule_rows = []
@@ -291,9 +310,11 @@ class SchedDetail(DetailView):
                 for slot in day['slots']:
                     slot_values = schedule.get(slot['key'], [])
                     value = slot_values[ag_index] if ag_index < len(slot_values) else ''
-                    cells.append(display_values.get(value, value))
+                    activity_name = schedule_cell_activity_name(value)
+                    cells.append(display_values.get(activity_name, activity_name))
             schedule_rows.append({'ag': ag, 'cells': cells})
 
+        context['schedule_mode'] = self.object.schedule_mode
         context['selected_schools'] = self.object.schools.order_by('school_name')
         context['schedule_days'] = schedule_days
         context['schedule_rows'] = schedule_rows
