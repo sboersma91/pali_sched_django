@@ -104,7 +104,7 @@ class Schools(models.Model):
     depart = CharField(max_length=50, choices=wk_days)
     total_students = IntegerField()
     ag_num = IntegerField(default=1)
-    attending_year = DateField(auto_created=True) # this is to distinguish between the same school coming back yr after yr.Need to add blank=true and auto_now of year
+    attending_year = DateField() # this is to distinguish between the same school coming back yr after yr.Need to add blank=true and auto_now of year
 
     sorted_subject_lst = TextField(blank=True)
     # this needs to be a textfield -- 
