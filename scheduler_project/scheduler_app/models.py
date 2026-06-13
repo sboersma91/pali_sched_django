@@ -6,6 +6,8 @@ from django.db.models.fields.related import ManyToManyField, ForeignKey
 from django.db import connection
 from django.db.models import JSONField
 
+from .schedule_blocks import SCHEDULE_BLOCK_KEYS, SCHEDULE_DAY_OFFSETS
+
 # from django.db.models.signals import pre_save, post_save
 # from .custom_fields import CommaSepField
 
@@ -102,7 +104,7 @@ class Schools(models.Model):
     depart = CharField(max_length=50, choices=wk_days)
     total_students = IntegerField()
     ag_num = IntegerField(default=1)
-    attending_year = DateField(auto_created=True) # this is to distinguish between the same school coming back yr after yr.Need to add blank=true and auto_now of year
+    attending_year = DateField() # this is to distinguish between the same school coming back yr after yr.Need to add blank=true and auto_now of year
 
     sorted_subject_lst = TextField(blank=True)
     # this needs to be a textfield -- 
@@ -194,6 +196,40 @@ class TheSched(models.Model):
     def __str__(self):
         return self.sched_name
 
+    @property
+    def schedule_mode(self):
+        """Treat only the explicit persisted sched_data contract as saved output."""
+        if (
+            isinstance(self.sched_data, dict)
+            and self.sched_data.get('mode') == 'persisted'
+            and isinstance(self.sched_data.get('schedule'), dict)
+        ):
+            return 'persisted'
+        return 'generated'
+
+    def get_schedule_output(self):
+        if self.schedule_mode == 'persisted':
+            self.generation_diagnostics = []
+            self.generation_complete = self.sched_data.get('generation_complete', True)
+            return self.sched_data['schedule']
+        return self.create_sched
+
+    def persist_generated_schedule(self):
+        schedule = self.create_sched
+        if getattr(self, 'generation_diagnostics', []):
+            return False
+        self.sched_data = {
+            'mode': 'persisted',
+            'schedule': schedule,
+            'generation_complete': getattr(self, 'generation_complete', True),
+        }
+        self.save(update_fields=['sched_data'])
+        return True
+
+    def use_generated_schedule(self):
+        self.sched_data = {}
+        self.save(update_fields=['sched_data'])
+
     def get_scheduling_diagnostics(self):
         diagnostics = []
         for school in self.schools.all():
@@ -226,38 +262,12 @@ class TheSched(models.Model):
         for school in self.schools.all():
             count+= school.ag_num
         global sched
-        sched = {
-            "mon_pm1": ['g_box']* count,
-            "mon_pm2": ['g_box']* count,
-            'mon_night':['g_box'] *count,
-
-            "tue_am1": ['g_box']* count,
-            "tue_am2": ['g_box']* count,
-            "tue_pm1": ['g_box']* count,
-            "tue_pm2": ['g_box']* count,
-            'tue_night':['g_box'] *count,
-            
-            "wed_am1": ['g_box']* count,
-            "wed_am2": ['g_box']* count,
-            "wed_pm1": ['g_box']* count,
-            "wed_pm2": ['g_box']* count,
-            'wed_night':['g_box'] *count,
-            
-            "thur_am1":['g_box']* count,
-            "thur_am2":['g_box']* count,
-            "thur_pm1":['g_box']* count,
-            "thur_pm2":['g_box']* count,
-            "thur_night":['g_box'] *count,
-            
-            "fri_am1": ['g_box']* count,
-            "fri_am2": ['g_box']* count,
-            'ags':[],
-            'classes_needed':[],
-            # WARNING: you may feel the urge to move ags to the start... this will SCREW up the day offsets :0
-        }
+        sched = {key: ['g_box'] * count for key in SCHEDULE_BLOCK_KEYS}
+        sched['ags'] = []
+        sched['classes_needed'] = []
+        # Keep metadata after the blocks because scheduling relies on block order.
           
         group_count=0
-        day_offset = {'Mon':0, "Tue":5, "Wed":10, "Thur":15, "Fri":19}
         #  day_end_offsett = {'Mon':, 'Tues':, 'Wed':,'Fri':}
         for school in self.schools.all():
             school.update_sorted_subject_lst()
@@ -266,14 +276,17 @@ class TheSched(models.Model):
                 sched['ags'].append(school.school_name + ' ' + str(i))
                 # ------------------
                 sched['classes_needed'].append(sorted_subjects[::-1])
-            for key in list(sched.keys())[day_offset[school.arrive]:day_offset[school.depart]]:    
+            school_blocks = SCHEDULE_BLOCK_KEYS[
+                SCHEDULE_DAY_OFFSETS[school.arrive]:SCHEDULE_DAY_OFFSETS[school.depart]
+            ]
+            for key in school_blocks:
                 for i in range(group_count,group_count+school.ag_num):
                             sched[key][i]='empty'
                             # gray box means school is gone
             group_count += school.ag_num
         
         self.sched = sched
-        time_slots = list(self.sched.keys())[:20]
+        time_slots = SCHEDULE_BLOCK_KEYS
         locs_open = {
             loc:{slot: 3 if loc in class_locs['Ropes'] else 1 for slot in time_slots} for loc in master_locs
         }  
