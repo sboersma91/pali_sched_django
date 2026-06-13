@@ -1,10 +1,11 @@
 import csv
 
-from django.shortcuts import get_object_or_404, render
+from django.shortcuts import get_object_or_404, redirect, render
 from .models import Locations, Course, Schools, TheSched
 from .forms import CourseForm, InstructorForm, LocationsForm, SchedForm, SchoolsForm
 from django.http import HttpResponse, HttpResponseRedirect
 from django.urls import reverse_lazy
+from django.views.decorators.http import require_POST
 from django.utils.text import slugify
 
 from .schedule_blocks import (
@@ -189,7 +190,7 @@ CSV_ACTIVITY_VALUES = {'g_box': 'Unavailable / Not present', 'empty': 'Unassigne
 
 def schedule_csv_export(request, pk):
     schedule_record = get_object_or_404(TheSched, pk=pk)
-    generated_schedule = schedule_record.create_sched
+    generated_schedule = schedule_record.get_schedule_output()
     diagnostics = getattr(schedule_record, 'generation_diagnostics', [])
     if diagnostics:
         diagnostic_text = '; '.join(
@@ -226,6 +227,16 @@ def schedule_csv_export(request, pk):
     return response
 
 
+@require_POST
+def schedule_persistence(request, pk):
+    schedule_record = get_object_or_404(TheSched, pk=pk)
+    if request.POST.get('mode') == 'persisted':
+        schedule_record.persist_generated_schedule()
+    elif request.POST.get('mode') == 'generated':
+        schedule_record.use_generated_schedule()
+    return redirect('sched-detail', pk=pk)
+
+
 '''Starting of function based views'''
 class SchedList(ListView):
     model = TheSched
@@ -243,7 +254,7 @@ class SchedDetail(DetailView):
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
-        schedule = self.object.create_sched
+        schedule = self.object.get_schedule_output()
         schedule_days = SCHEDULE_DAYS
         display_values = SCHEDULE_DISPLAY_VALUES
         schedule_rows = []
@@ -256,6 +267,7 @@ class SchedDetail(DetailView):
                     cells.append(display_values.get(value, value))
             schedule_rows.append({'ag': ag, 'cells': cells})
 
+        context['schedule_mode'] = self.object.schedule_mode
         context['selected_schools'] = self.object.schools.order_by('school_name')
         context['schedule_days'] = schedule_days
         context['schedule_rows'] = schedule_rows

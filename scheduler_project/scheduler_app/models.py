@@ -196,6 +196,40 @@ class TheSched(models.Model):
     def __str__(self):
         return self.sched_name
 
+    @property
+    def schedule_mode(self):
+        """Treat only the explicit persisted sched_data contract as saved output."""
+        if (
+            isinstance(self.sched_data, dict)
+            and self.sched_data.get('mode') == 'persisted'
+            and isinstance(self.sched_data.get('schedule'), dict)
+        ):
+            return 'persisted'
+        return 'generated'
+
+    def get_schedule_output(self):
+        if self.schedule_mode == 'persisted':
+            self.generation_diagnostics = []
+            self.generation_complete = self.sched_data.get('generation_complete', True)
+            return self.sched_data['schedule']
+        return self.create_sched
+
+    def persist_generated_schedule(self):
+        schedule = self.create_sched
+        if getattr(self, 'generation_diagnostics', []):
+            return False
+        self.sched_data = {
+            'mode': 'persisted',
+            'schedule': schedule,
+            'generation_complete': getattr(self, 'generation_complete', True),
+        }
+        self.save(update_fields=['sched_data'])
+        return True
+
+    def use_generated_schedule(self):
+        self.sched_data = {}
+        self.save(update_fields=['sched_data'])
+
     def get_scheduling_diagnostics(self):
         diagnostics = []
         for school in self.schools.all():
