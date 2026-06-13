@@ -1,5 +1,6 @@
 import csv
 
+from django.contrib import messages
 from django.shortcuts import get_object_or_404, redirect, render
 from .models import Locations, Course, Schools, TheSched
 from .forms import CourseForm, InstructorForm, LocationsForm, SchedForm, SchoolsForm
@@ -14,6 +15,7 @@ from .schedule_blocks import (
     SCHEDULE_SLOT_BLOCKS,
 )
 from .schedule_cells import schedule_cell_activity_name, schedule_cell_location_name
+from .schedule_move_application import apply_schedule_move
 from .school_accounting import school_slot_accounting_summary
 
 
@@ -227,6 +229,48 @@ def schedule_csv_export(request, pk):
                     schedule_cell_location_name(value),
                 ])
     return response
+
+
+@require_POST
+def schedule_move(request, pk):
+    schedule_record = get_object_or_404(TheSched, pk=pk)
+    required_fields = (
+        'source_block_key',
+        'source_row_index',
+        'destination_block_key',
+        'destination_row_index',
+    )
+    if any(request.POST.get(field) in (None, '') for field in required_fields):
+        messages.error(request, 'Schedule move requires source and destination block and row values.')
+        return redirect('sched-detail', pk=pk)
+
+    try:
+        source_row_index = int(request.POST['source_row_index'])
+        destination_row_index = int(request.POST['destination_row_index'])
+    except (TypeError, ValueError):
+        messages.error(request, 'Schedule move row values must be integers.')
+        return redirect('sched-detail', pk=pk)
+
+    schedule = schedule_record.get_schedule_output()
+    result = apply_schedule_move(
+        schedule,
+        request.POST['source_block_key'],
+        source_row_index,
+        request.POST['destination_block_key'],
+        destination_row_index,
+    )
+    if not result['applied']:
+        messages.error(request, 'Schedule move was not applied: ' + ' '.join(result['errors']))
+        return redirect('sched-detail', pk=pk)
+
+    schedule_record.sched_data = {
+        'mode': 'persisted',
+        'schedule': result['schedule'],
+        'generation_complete': getattr(schedule_record, 'generation_complete', True),
+    }
+    schedule_record.save(update_fields=['sched_data'])
+    messages.success(request, 'Schedule move saved.')
+    return redirect('sched-detail', pk=pk)
 
 
 @require_POST

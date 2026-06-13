@@ -56,6 +56,7 @@ urlpatterns = [
     path("schedule_detail/<int:pk>/", SchedDetail.as_view(), name="sched-detail"),
     path("schedule_export/<int:pk>/", views.schedule_csv_export, name="sched-export"),
     path("schedule_persistence/<int:pk>/", views.schedule_persistence, name="sched-persistence"),
+    path("schedule_move/<int:pk>/", views.schedule_move, name="sched-move"),
     path("schedule_create", SchedCreate.as_view(), name="sched-create"),
     path("schedule_update/<int:pk>/", SchedUpdate.as_view(), name="sched-update"),
     path("schedule_delete/<int:pk>/", SchedDelete.as_view(), name="sched-delete"),
