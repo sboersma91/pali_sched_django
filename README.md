@@ -97,6 +97,18 @@ git diff --check
 Django's test runner creates and destroys a separate test database. Test results therefore do not
 depend on the contents or migration state of a developer's ignored `db.sqlite3`.
 
+## Canonical Schedule block definitions
+
+`scheduler_app/schedule_blocks.py` is the authoritative source for operational weekday choices,
+the 20 stored Schedule slot keys and rendering order, block display labels, daytime/night kinds,
+trip-window offsets, and special unavailable/unassigned values. Schedule generation initialization,
+detail rendering, CSV export, and School block accounting consume these shared definitions.
+
+The trip-window offsets are established operational boundaries rather than simple indexes of each
+day's first displayed block. Keep them synchronized with current School accounting behavior. The
+scheduling search algorithm still relies on existing slot-key naming conventions such as `night`
+and paired `1`/`2` suffixes; changing those conventions requires separately scoped engine work.
+
 ## Compatibility and known limitations
 
 - Both legacy function-based CRUD routes and newer class-based operational routes remain in use.

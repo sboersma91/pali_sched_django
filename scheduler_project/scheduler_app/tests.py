@@ -7,9 +7,18 @@ from django.template.loader import render_to_string
 from django.test import Client, RequestFactory, TestCase, override_settings
 from django.urls import reverse
 
+from . import models, school_accounting, views
 from .forms import SchoolsForm, SchedForm, suggest_activity_group_count
 from .views import SchedDetail, SchedList, schedule_csv_export
-from .school_accounting import school_slot_accounting_summary
+from .school_accounting import calculate_school_slot_accounting, school_slot_accounting_summary
+from .schedule_blocks import (
+    DAY_OFFSETS,
+    SCHEDULE_DAYS,
+    SCHEDULE_LEGEND,
+    SCHEDULE_SLOT_BLOCKS,
+    SCHEDULE_SLOT_KEYS,
+    WEEKDAY_CHOICES,
+)
 from .models import (
     Course,
     Locations,
@@ -20,6 +29,40 @@ from .models import (
     initialize_scheduling_data,
     master_locs,
 )
+
+
+class CanonicalScheduleBlockDefinitionTests(TestCase):
+    def test_canonical_schedule_order_and_labels_remain_unchanged(self):
+        self.assertEqual(
+            [(day["name"], [(slot["label"], slot["key"]) for slot in day["slots"]]) for day in SCHEDULE_DAYS],
+            [
+                ("Monday", [("PM1", "mon_pm1"), ("PM2", "mon_pm2"), ("Night", "mon_night")]),
+                ("Tuesday", [("AM1", "tue_am1"), ("AM2", "tue_am2"), ("PM1", "tue_pm1"), ("PM2", "tue_pm2"), ("Night", "tue_night")]),
+                ("Wednesday", [("AM1", "wed_am1"), ("AM2", "wed_am2"), ("PM1", "wed_pm1"), ("PM2", "wed_pm2"), ("Night", "wed_night")]),
+                ("Thursday", [("AM1", "thur_am1"), ("AM2", "thur_am2"), ("PM1", "thur_pm1"), ("PM2", "thur_pm2"), ("Night", "thur_night")]),
+                ("Friday", [("AM1", "fri_am1"), ("AM2", "fri_am2")]),
+            ],
+        )
+        self.assertEqual(DAY_OFFSETS, {"Mon": 0, "Tue": 5, "Wed": 10, "Thur": 15, "Fri": 19, "Tues": 5, "Thurs": 15})
+
+    def test_active_workflows_consume_canonical_definitions(self):
+        self.assertIs(views.SCHEDULE_DAYS, SCHEDULE_DAYS)
+        self.assertIs(views.SCHEDULE_LEGEND, SCHEDULE_LEGEND)
+        self.assertIs(school_accounting.SCHEDULE_SLOT_BLOCKS, SCHEDULE_SLOT_BLOCKS)
+        self.assertIs(models.SCHEDULE_SLOT_KEYS, SCHEDULE_SLOT_KEYS)
+        self.assertIs(models.WEEKDAY_CHOICES, WEEKDAY_CHOICES)
+
+    def test_school_accounting_keeps_established_trip_window_semantics(self):
+        daytime = Course(course_name="Daytime", course_len=2)
+        one_block = Course(course_name="One Block", course_len=1)
+        night = Course(course_name="Night", course_len=0)
+
+        summary = calculate_school_slot_accounting("Thur", "Fri", [daytime, one_block, night])
+
+        self.assertEqual(summary["required_daytime"], 3)
+        self.assertEqual(summary["required_night"], 1)
+        self.assertEqual(summary["selected_total"], summary["required_total"])
+        self.assertEqual(summary["total_status"], "balanced")
 
 
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
@@ -528,6 +571,7 @@ class ScheduleGenerationRegressionTests(TestCase):
 
         generated_schedule = self.schedule.create_sched
 
+        self.assertEqual(list(generated_schedule)[:len(SCHEDULE_SLOT_KEYS)], list(SCHEDULE_SLOT_KEYS))
         self.assertEqual(self.schedule.generation_diagnostics, [])
         self.assertTrue(self.schedule.generation_complete)
         self.assertEqual(generated_schedule["ags"], ["Balanced Regression School 0"])
@@ -669,6 +713,8 @@ class ScheduleGenerationRegressionTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.context_data["generation_complete"])
+        self.assertIs(response.context_data["schedule_days"], SCHEDULE_DAYS)
+        self.assertIs(response.context_data["schedule_legend"], SCHEDULE_LEGEND)
         self.assertIn("Schedule generated successfully", rendered_content)
         self.assertIn("Selected Schools", rendered_content)
         self.assertIn("Balanced Regression School", rendered_content)
@@ -701,6 +747,10 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.assertEqual({row["Schedule Name"] for row in rows}, {"Regression Schedule"})
         self.assertEqual({row["Generation Status"] for row in rows}, {"Complete"})
         self.assertEqual({row["Activity Group"] for row in rows}, {"Balanced Regression School 0"})
+        self.assertEqual(
+            [(row["Day"], row["Time Block"]) for row in rows],
+            [(day["name"], slot["label"]) for day in SCHEDULE_DAYS for slot in day["slots"]],
+        )
         self.assertIn("Regression Two Block", {row["Activity"] for row in rows})
         self.assertIn("Regression One Block", {row["Activity"] for row in rows})
         self.assertIn("Regression Night", {row["Activity"] for row in rows})
