@@ -133,6 +133,38 @@ class ScheduleMoveEndpointTests(TestCase):
         self.assertContains(response, 'name="source_row_index" value="0"', html=False)
         self.assertContains(response, 'name="destination_row_index" value="0"', html=False)
 
+    def test_detail_exposes_schedule_cell_and_move_destination_hooks(self):
+        self.persist_payload()
+
+        response = self.client.get(self.detail_url)
+
+        self.assertContains(response, f'data-schedule-move-url="{self.move_url}"', html=False)
+        self.assertContains(response, 'data-schedule-cell', count=len(SCHEDULE_BLOCK_KEYS), html=False)
+        self.assertContains(response, 'data-block-key="mon_pm1"', html=False)
+        self.assertContains(response, 'data-row-index="0"', count=len(SCHEDULE_BLOCK_KEYS), html=False)
+        self.assertContains(response, 'data-cell-state="assignment"', count=1, html=False)
+        self.assertContains(response, 'data-assignment-id="assignment-1"', count=1, html=False)
+        self.assertContains(response, 'data-assignment-span="1"', count=1, html=False)
+        self.assertContains(response, 'data-assignment-part="1"', count=1, html=False)
+        self.assertContains(response, 'data-cell-state="empty"', count=1, html=False)
+        self.assertContains(response, 'data-cell-state="unavailable"', count=len(SCHEDULE_BLOCK_KEYS) - 2, html=False)
+        self.assertContains(response, 'data-schedule-move-form', count=1, html=False)
+        self.assertContains(response, 'data-move-source-block="mon_pm1"', html=False)
+        self.assertContains(response, 'data-move-source-row="0"', html=False)
+        self.assertContains(response, 'data-valid-destination-block="tue_am1"', html=False)
+        self.assertContains(response, 'data-valid-destination-row="0"', html=False)
+
+    def test_legacy_assignment_cell_exposes_legacy_state_hook(self):
+        payload = self.payload()
+        payload['wed_am1'][0] = 'Legacy Activity'
+        self.persist_payload(payload)
+
+        response = self.client.get(self.detail_url)
+
+        self.assertContains(response, 'data-block-key="wed_am1"', html=False)
+        self.assertContains(response, 'data-cell-state="legacy"', count=1, html=False)
+        self.assertContains(response, 'Legacy Activity')
+
     def test_linked_assignment_renders_grouped_indicators_and_one_move_control(self):
         self.persist_payload(self.two_block_payload())
 
@@ -140,10 +172,14 @@ class ScheduleMoveEndpointTests(TestCase):
 
         self.assertContains(response, 'class="table-primary linked-assignment-cell"', count=2, html=False)
         self.assertContains(response, 'data-assignment-id="assignment-2"', count=2, html=False)
+        self.assertContains(response, 'data-assignment-span="2"', count=2, html=False)
+        self.assertContains(response, 'data-assignment-part="1"', count=1, html=False)
+        self.assertContains(response, 'data-assignment-part="2"', count=1, html=False)
         self.assertContains(response, 'Linked assignment · part 1 of 2')
         self.assertContains(response, 'Linked assignment · part 2 of 2')
         self.assertContains(response, 'Move linked assignment', count=1)
         self.assertContains(response, 'class="schedule-move-form', count=1, html=False)
+        self.assertContains(response, 'data-schedule-move-form', count=1, html=False)
         self.assertContains(response, 'name="source_block_key" value="mon_pm1"', html=False)
         self.assertNotContains(response, 'name="source_block_key" value="mon_pm2"', html=False)
 

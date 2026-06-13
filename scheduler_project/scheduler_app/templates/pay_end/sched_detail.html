@@ -85,7 +85,7 @@
   </div>
 
   {% if not generation_blocked %}
-  <section class="mb-4" aria-labelledby="generated-schedule-heading">
+  <section class="mb-4" aria-labelledby="generated-schedule-heading" data-schedule-container data-schedule-move-url="{% url 'sched-move' sched.id %}">
     <div class="mb-3">
       <h2 id="generated-schedule-heading" class="h3 mb-1">{% if generation_incomplete %}Incomplete Schedule Output{% elif schedule_mode == 'persisted' %}Persisted Schedule Output{% else %}Generated Schedule{% endif %}</h2>
       <p class="text-muted mb-2">{% if generation_incomplete %}This output is incomplete and must not be treated as a fully generated Schedule.{% else %}Activity groups are shown across the available daytime and night schedule blocks.{% endif %}</p>
@@ -116,7 +116,12 @@
             <tr>
               <th scope="row">{{ row.ag }}</th>
               {% for cell in row.cells %}
-                <td{% if cell.is_linked %} class="table-primary linked-assignment-cell" data-assignment-id="{{ cell.assignment_id }}"{% endif %}>
+                <td{% if cell.is_linked %} class="table-primary linked-assignment-cell"{% endif %}
+                    data-schedule-cell
+                    data-block-key="{{ cell.block_key }}"
+                    data-row-index="{{ cell.row_index }}"
+                    data-cell-state="{{ cell.state }}"
+                    {% if cell.assignment_id %}data-assignment-id="{{ cell.assignment_id }}" data-assignment-span="{{ cell.assignment_span }}" data-assignment-part="{{ cell.assignment_part }}"{% endif %}>
                   <div>{{ cell.display }}</div>
                   {% if cell.is_linked %}
                     <span class="badge bg-primary-subtle text-primary-emphasis linked-assignment-indicator">
@@ -126,7 +131,8 @@
                   {% if cell.destinations %}
                     <details class="mt-1">
                       <summary class="btn btn-sm btn-outline-secondary">{% if cell.is_linked %}Move linked assignment{% else %}Move{% endif %}</summary>
-                      <form method="post" action="{% url 'sched-move' sched.id %}" class="schedule-move-form mt-2 text-start">
+                      <form method="post" action="{% url 'sched-move' sched.id %}" class="schedule-move-form mt-2 text-start"
+                            data-schedule-move-form data-move-source-block="{{ cell.block_key }}" data-move-source-row="{{ cell.row_index }}">
                         {% csrf_token %}
                         <input type="hidden" name="source_block_key" value="{{ cell.block_key }}">
                         <input type="hidden" name="source_row_index" value="{{ cell.row_index }}">
@@ -134,7 +140,7 @@
                         <label class="form-label small" for="move-{{ cell.block_key }}-{{ cell.row_index }}">Destination</label>
                         <select class="form-select form-select-sm mb-2" id="move-{{ cell.block_key }}-{{ cell.row_index }}" name="destination_block_key" required>
                           {% for destination in cell.destinations %}
-                            <option value="{{ destination.key }}">{{ destination.label }}</option>
+                            <option value="{{ destination.key }}" data-valid-destination-block="{{ destination.key }}" data-valid-destination-row="{{ cell.row_index }}">{{ destination.label }}</option>
                           {% endfor %}
                         </select>
                         <button type="submit" class="btn btn-sm btn-primary">Move assignment</button>

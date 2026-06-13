@@ -313,6 +313,14 @@ class SchedDetail(DetailView):
                     slot_values = schedule.get(slot['key'], [])
                     value = slot_values[ag_index] if ag_index < len(slot_values) else ''
                     activity_name = schedule_cell_activity_name(value)
+                    if isinstance(value, dict):
+                        cell_state = 'assignment'
+                    elif value == 'empty':
+                        cell_state = 'empty'
+                    elif value == 'g_box':
+                        cell_state = 'unavailable'
+                    else:
+                        cell_state = 'legacy'
                     assignment_span = value.get('assignment_span', 1) if isinstance(value, dict) else 1
                     assignment_part = value.get('assignment_part') if isinstance(value, dict) else None
                     is_linked = assignment_span > 1
@@ -331,6 +339,7 @@ class SchedDetail(DetailView):
                         'display': display_values.get(activity_name, activity_name),
                         'block_key': slot['key'],
                         'row_index': ag_index,
+                        'state': cell_state,
                         'destinations': destinations,
                         'is_linked': is_linked,
                         'assignment_id': value.get('assignment_id') if isinstance(value, dict) else '',
