@@ -90,6 +90,22 @@ class ScheduleMoveEndpointTests(TestCase):
         self.assertEqual(moved_schedule['tue_am1'][0]['assignment_id'], 'assignment-1')
         self.assertIn('Schedule move saved.', self.message_text(response))
 
+    def test_success_message_is_visible_after_redirect(self):
+        self.persist_payload()
+
+        response = self.client.post(self.move_url, self.move_data(), follow=True)
+
+        self.assertContains(response, 'Schedule move saved.')
+        self.assertContains(response, 'class="alert alert-success"', html=False)
+
+    def test_error_message_is_visible_after_redirect(self):
+        self.persist_payload(self.payload(destination='g_box'))
+
+        response = self.client.post(self.move_url, self.move_data(), follow=True)
+
+        self.assertContains(response, 'Schedule move was not applied:')
+        self.assertContains(response, 'class="alert alert-danger"', html=False)
+
     def test_valid_move_from_live_output_creates_persisted_manual_contract(self):
         live_payload = self.payload()
         self.assertEqual(self.schedule.schedule_mode, 'generated')
