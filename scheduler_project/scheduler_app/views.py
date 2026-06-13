@@ -313,8 +313,11 @@ class SchedDetail(DetailView):
                     slot_values = schedule.get(slot['key'], [])
                     value = slot_values[ag_index] if ag_index < len(slot_values) else ''
                     activity_name = schedule_cell_activity_name(value)
+                    assignment_span = value.get('assignment_span', 1) if isinstance(value, dict) else 1
+                    assignment_part = value.get('assignment_part') if isinstance(value, dict) else None
+                    is_linked = assignment_span > 1
                     destinations = []
-                    if isinstance(value, dict):
+                    if isinstance(value, dict) and (not is_linked or assignment_part == 1):
                         for destination in SCHEDULE_BLOCKS:
                             validation = validate_schedule_move(
                                 schedule, slot['key'], ag_index, destination['key'], ag_index,
@@ -329,6 +332,10 @@ class SchedDetail(DetailView):
                         'block_key': slot['key'],
                         'row_index': ag_index,
                         'destinations': destinations,
+                        'is_linked': is_linked,
+                        'assignment_id': value.get('assignment_id') if isinstance(value, dict) else '',
+                        'assignment_part': assignment_part,
+                        'assignment_span': assignment_span,
                     })
             schedule_rows.append({'ag': ag, 'cells': cells})
 

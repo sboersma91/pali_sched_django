@@ -116,11 +116,16 @@
             <tr>
               <th scope="row">{{ row.ag }}</th>
               {% for cell in row.cells %}
-                <td>
+                <td{% if cell.is_linked %} class="table-primary linked-assignment-cell" data-assignment-id="{{ cell.assignment_id }}"{% endif %}>
                   <div>{{ cell.display }}</div>
+                  {% if cell.is_linked %}
+                    <span class="badge bg-primary-subtle text-primary-emphasis linked-assignment-indicator">
+                      Linked assignment · part {{ cell.assignment_part }} of {{ cell.assignment_span }}
+                    </span>
+                  {% endif %}
                   {% if cell.destinations %}
                     <details class="mt-1">
-                      <summary class="btn btn-sm btn-outline-secondary">Move</summary>
+                      <summary class="btn btn-sm btn-outline-secondary">{% if cell.is_linked %}Move linked assignment{% else %}Move{% endif %}</summary>
                       <form method="post" action="{% url 'sched-move' sched.id %}" class="schedule-move-form mt-2 text-start">
                         {% csrf_token %}
                         <input type="hidden" name="source_block_key" value="{{ cell.block_key }}">

@@ -29,6 +29,19 @@ class ScheduleMoveEndpointTests(TestCase):
         payload['tue_am1'][0] = destination
         return payload
 
+    def two_block_payload(self):
+        payload = self.payload()
+        payload['mon_pm1'][0] = generated_schedule_cell(
+            activity_name='Ropes', activity_id=13, location_name='Course', location_id=5,
+            assignment_id='assignment-2', assignment_part=1, assignment_span=2,
+        )
+        payload['mon_pm2'][0] = generated_schedule_cell(
+            activity_name='Ropes', activity_id=13, location_name='Course', location_id=5,
+            assignment_id='assignment-2', assignment_part=2, assignment_span=2,
+        )
+        payload['tue_am2'][0] = 'empty'
+        return payload
+
     def persist_payload(self, payload=None, generation_complete=True):
         self.schedule.sched_data = {
             'mode': 'persisted', 'schedule': payload or self.payload(),
@@ -119,6 +132,30 @@ class ScheduleMoveEndpointTests(TestCase):
         self.assertEqual(movable_cell['destinations'], [{'key': 'tue_am1', 'label': 'Tuesday AM1'}])
         self.assertContains(response, 'name="source_row_index" value="0"', html=False)
         self.assertContains(response, 'name="destination_row_index" value="0"', html=False)
+
+    def test_linked_assignment_renders_grouped_indicators_and_one_move_control(self):
+        self.persist_payload(self.two_block_payload())
+
+        response = self.client.get(self.detail_url)
+
+        self.assertContains(response, 'class="table-primary linked-assignment-cell"', count=2, html=False)
+        self.assertContains(response, 'data-assignment-id="assignment-2"', count=2, html=False)
+        self.assertContains(response, 'Linked assignment · part 1 of 2')
+        self.assertContains(response, 'Linked assignment · part 2 of 2')
+        self.assertContains(response, 'Move linked assignment', count=1)
+        self.assertContains(response, 'class="schedule-move-form', count=1, html=False)
+        self.assertContains(response, 'name="source_block_key" value="mon_pm1"', html=False)
+        self.assertNotContains(response, 'name="source_block_key" value="mon_pm2"', html=False)
+
+    def test_one_block_assignment_and_placeholders_keep_existing_rendering(self):
+        self.persist_payload()
+
+        response = self.client.get(self.detail_url)
+
+        self.assertContains(response, '>Move</summary>', count=1, html=False)
+        self.assertNotContains(response, 'linked-assignment-indicator', html=False)
+        self.assertContains(response, '/////')
+        self.assertContains(response, '****')
 
     def test_valid_move_persists_manual_payload_and_preserves_completion(self):
         self.persist_payload(generation_complete=False)
