@@ -10,12 +10,14 @@ from django.views.decorators.http import require_POST
 from django.utils.text import slugify
 
 from .schedule_blocks import (
+    SCHEDULE_BLOCKS,
     SCHEDULE_DAYS,
     SCHEDULE_DAY_OFFSETS,
     SCHEDULE_SLOT_BLOCKS,
 )
 from .schedule_cells import schedule_cell_activity_name, schedule_cell_location_name
 from .schedule_move_application import apply_schedule_move
+from .schedule_move_validation import validate_schedule_move
 from .school_accounting import school_slot_accounting_summary
 
 
@@ -311,7 +313,23 @@ class SchedDetail(DetailView):
                     slot_values = schedule.get(slot['key'], [])
                     value = slot_values[ag_index] if ag_index < len(slot_values) else ''
                     activity_name = schedule_cell_activity_name(value)
-                    cells.append(display_values.get(activity_name, activity_name))
+                    destinations = []
+                    if isinstance(value, dict):
+                        for destination in SCHEDULE_BLOCKS:
+                            validation = validate_schedule_move(
+                                schedule, slot['key'], ag_index, destination['key'], ag_index,
+                            )
+                            if validation['valid']:
+                                destinations.append({
+                                    'key': destination['key'],
+                                    'label': f"{destination['day']} {destination['label']}",
+                                })
+                    cells.append({
+                        'display': display_values.get(activity_name, activity_name),
+                        'block_key': slot['key'],
+                        'row_index': ag_index,
+                        'destinations': destinations,
+                    })
             schedule_rows.append({'ag': ag, 'cells': cells})
 
         context['schedule_mode'] = self.object.schedule_mode

@@ -94,6 +94,32 @@ class ScheduleMoveEndpointTests(TestCase):
         self.assertContains(response, 'Assignments must remain within their activity-group row.')
         self.assertContains(response, 'class="alert alert-danger"', html=False)
 
+    def test_detail_renders_move_controls_only_for_structured_assignments(self):
+        self.persist_payload()
+
+        response = self.client.get(self.detail_url)
+
+        self.assertContains(response, 'class="schedule-move-form', count=1, html=False)
+        self.assertContains(response, 'name="source_block_key" value="mon_pm1"', html=False)
+        self.assertContains(response, 'name="destination_block_key"', count=1, html=False)
+        self.assertNotContains(response, 'name="source_block_key" value="tue_am1"', html=False)
+
+    def test_detail_move_destinations_keep_the_assignment_row(self):
+        self.persist_payload()
+
+        response = self.client.get(self.detail_url)
+        movable_cell = next(
+            cell
+            for row in response.context['schedule_rows']
+            for cell in row['cells']
+            if cell['destinations']
+        )
+
+        self.assertEqual(movable_cell['row_index'], 0)
+        self.assertEqual(movable_cell['destinations'], [{'key': 'tue_am1', 'label': 'Tuesday AM1'}])
+        self.assertContains(response, 'name="source_row_index" value="0"', html=False)
+        self.assertContains(response, 'name="destination_row_index" value="0"', html=False)
+
     def test_valid_move_persists_manual_payload_and_preserves_completion(self):
         self.persist_payload(generation_complete=False)
         response = self.client.post(self.move_url, self.move_data())
