@@ -76,6 +76,24 @@ class ScheduleMoveEndpointTests(TestCase):
         self.assertEqual(self.schedule.sched_data, original)
         self.assertIn('Schedule move was not applied:', self.message_text(response))
 
+    def test_cross_row_move_does_not_mutate_schedule_and_displays_error(self):
+        payload = self.payload()
+        payload['ags'].append('Move Group 1')
+        for block_key in SCHEDULE_BLOCK_KEYS:
+            payload[block_key].append('g_box')
+        payload['tue_am1'][1] = 'empty'
+        self.persist_payload(payload)
+        original = deepcopy(self.schedule.sched_data)
+        data = self.move_data()
+        data['destination_row_index'] = '1'
+
+        response = self.client.post(self.move_url, data, follow=True)
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(self.schedule.sched_data, original)
+        self.assertContains(response, 'Assignments must remain within their activity-group row.')
+        self.assertContains(response, 'class="alert alert-danger"', html=False)
+
     def test_valid_move_persists_manual_payload_and_preserves_completion(self):
         self.persist_payload(generation_complete=False)
         response = self.client.post(self.move_url, self.move_data())

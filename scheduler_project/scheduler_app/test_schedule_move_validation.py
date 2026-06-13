@@ -35,6 +35,15 @@ class ScheduleMoveValidationTests(SimpleTestCase):
         self.assertEqual(result['destination_cells'], [{'block_key': 'tue_am1', 'row_index': 0}])
         self.assertEqual(schedule, original)
 
+    def test_cross_row_move_is_rejected(self):
+        schedule = {key: ['empty', 'empty'] for key in SCHEDULE_BLOCK_KEYS}
+        schedule['mon_pm1'][0] = self.assignment_cell()
+
+        result = validate_schedule_move(schedule, 'mon_pm1', 0, 'tue_am1', 1)
+
+        self.assertFalse(result['valid'])
+        self.assertEqual(result['errors'], ['Assignments must remain within their activity-group row.'])
+
     def test_valid_two_block_move_links_both_parts(self):
         schedule = self.schedule()
         schedule['mon_pm1'][0] = self.assignment_cell(part=1, span=2)

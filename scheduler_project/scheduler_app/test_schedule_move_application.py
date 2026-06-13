@@ -77,6 +77,18 @@ class ScheduleMoveApplicationTests(SimpleTestCase):
         self.assertEqual(schedule, original)
         self.assertIn('Destination cell tue_am1 is unavailable for this group.', result['errors'])
 
+    def test_cross_row_move_is_rejected_without_mutation(self):
+        schedule = {key: ['empty', 'empty'] for key in SCHEDULE_BLOCK_KEYS}
+        schedule['mon_pm1'][0] = self.assignment_cell()
+        original = deepcopy(schedule)
+
+        result = apply_schedule_move(schedule, 'mon_pm1', 0, 'tue_am1', 1)
+
+        self.assertFalse(result['applied'])
+        self.assertIs(result['schedule'], schedule)
+        self.assertEqual(schedule, original)
+        self.assertEqual(result['errors'], ['Assignments must remain within their activity-group row.'])
+
     def test_legacy_string_assignment_move_is_rejected_without_mutation(self):
         schedule = self.schedule()
         schedule['mon_pm1'][0] = 'Archery'

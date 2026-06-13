@@ -47,6 +47,7 @@ def validate_schedule_move(
 
     The destination block is treated as the destination for assignment part 1.
     Linked assignment parts are derived from the source cell's assignment metadata.
+    Assignments must remain within their source activity-group row.
     """
     errors = []
     if not isinstance(schedule_payload, dict):
@@ -59,6 +60,8 @@ def validate_schedule_move(
         if source_cell in {'empty', 'g_box'}:
             return _result(['Placeholder cells cannot be moved as assignments.'])
         return _result(['Legacy string assignment cells cannot be moved.'])
+    if destination_row_index != source_row_index:
+        return _result(['Assignments must remain within their activity-group row.'])
 
     assignment_id = source_cell.get('assignment_id')
     assignment_span = source_cell.get('assignment_span')
