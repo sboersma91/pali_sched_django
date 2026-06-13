@@ -529,7 +529,11 @@ class ScheduleGenerationRegressionTests(TestCase):
             if isinstance(values, list)
             for cell in values
         ]
-        self.assertTrue(any(isinstance(cell, dict) for cell in persisted_cells))
+        structured_persisted_cells = [cell for cell in persisted_cells if isinstance(cell, dict)]
+        self.assertTrue(structured_persisted_cells)
+        self.assertTrue(all(cell['assignment_id'] for cell in structured_persisted_cells))
+        self.assertTrue(all(cell['assignment_part'] for cell in structured_persisted_cells))
+        self.assertTrue(all(cell['assignment_span'] for cell in structured_persisted_cells))
 
         # Legacy persisted string cells remain readable alongside structured cells.
         self.schedule.sched_data['schedule']['thur_am1'][0] = 'Persisted Activity'
@@ -596,14 +600,70 @@ class ScheduleGenerationRegressionTests(TestCase):
         for cell in activity_cells:
             self.assertEqual(
                 set(cell),
-                {'activity_name', 'activity_id', 'location_name', 'location_id', 'source'},
+                {
+                    'activity_name', 'activity_id', 'location_name', 'location_id', 'source',
+                    'assignment_id', 'assignment_part', 'assignment_span',
+                },
             )
             self.assertIsInstance(cell['activity_id'], int)
             self.assertEqual(cell['location_name'], 'Schedule Regression Location')
             self.assertIsInstance(cell['location_id'], int)
             self.assertEqual(cell['source'], 'generated')
+            self.assertTrue(cell['assignment_id'].startswith('generated-'))
+            self.assertIsInstance(cell['assignment_part'], int)
+            self.assertIsInstance(cell['assignment_span'], int)
         all_cells = [cell for values in generated_schedule.values() if isinstance(values, list) for cell in values]
         self.assertIn('g_box', all_cells)
+
+    def test_one_block_assignment_has_single_part_identity(self):
+        generated_schedule = self.schedule.create_sched
+        cells = [
+            cell
+            for values in generated_schedule.values()
+            if isinstance(values, list)
+            for cell in values
+            if isinstance(cell, dict) and cell['activity_name'] == self.one_block.course_name
+        ]
+
+        self.assertEqual(len(cells), 1)
+        self.assertEqual(cells[0]['assignment_part'], 1)
+        self.assertEqual(cells[0]['assignment_span'], 1)
+
+    def test_two_block_assignment_cells_share_identity_and_have_ordered_parts(self):
+        generated_schedule = self.schedule.create_sched
+        cells = [
+            cell
+            for values in generated_schedule.values()
+            if isinstance(values, list)
+            for cell in values
+            if isinstance(cell, dict) and cell['activity_name'] == self.two_block.course_name
+        ]
+
+        self.assertEqual(len(cells), 2)
+        self.assertEqual(len({cell['assignment_id'] for cell in cells}), 1)
+        self.assertEqual({cell['assignment_part'] for cell in cells}, {1, 2})
+        self.assertEqual({cell['assignment_span'] for cell in cells}, {2})
+
+    def test_generated_assignment_ids_are_deterministic_for_same_inputs(self):
+        first_schedule = self.schedule.create_sched
+        first_ids = {
+            cell['activity_name']: cell['assignment_id']
+            for values in first_schedule.values()
+            if isinstance(values, list)
+            for cell in values
+            if isinstance(cell, dict)
+        }
+
+        second_schedule = self.schedule.create_sched
+        second_ids = {
+            cell['activity_name']: cell['assignment_id']
+            for values in second_schedule.values()
+            if isinstance(values, list)
+            for cell in values
+            if isinstance(cell, dict)
+        }
+
+        self.assertEqual(first_ids, second_ids)
 
     def test_diagnostics_ignore_unattached_schools(self):
         unattached_school = Schools.schools_list.create(
