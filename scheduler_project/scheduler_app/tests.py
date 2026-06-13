@@ -306,7 +306,10 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, "Selected Schools")
         self.assertContains(response, "Existing Operational Schedule")
         self.assertContains(response, "1 School")
-        self.assertContains(response, "Opening a Schedule regenerates its current output")
+        self.assertContains(
+            response,
+            "Opening a Schedule regenerates output for its selected Schools using their latest Activities and Locations.",
+        )
         self.assertContains(response, "Create Schedule")
         self.assertContains(response, "Generate / View")
         self.assertContains(response, "Edit Record")
@@ -499,6 +502,78 @@ class ScheduleGenerationRegressionTests(TestCase):
         school.subject.set([self.two_block, self.one_block, self.night])
         return school
 
+    def test_schedule_mode_requires_explicit_persisted_contract(self):
+        self.assertEqual(self.schedule.schedule_mode, 'generated')
+
+        self.schedule.sched_data = {'source': 'legacy'}
+        self.assertEqual(self.schedule.schedule_mode, 'generated')
+
+        self.schedule.sched_data = {'mode': 'persisted', 'schedule': {}}
+        self.assertEqual(self.schedule.schedule_mode, 'persisted')
+
+    def test_persisted_schedule_is_used_by_detail_and_csv_export(self):
+        response = self.client.post(
+            reverse('sched-persistence', args=[self.schedule.id]),
+            {'mode': 'persisted'},
+        )
+        self.assertRedirects(response, reverse('sched-detail', args=[self.schedule.id]))
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(self.schedule.schedule_mode, 'persisted')
+        self.assertEqual(self.schedule.sched_data['mode'], 'persisted')
+        self.assertIn('schedule', self.schedule.sched_data)
+        self.assertIn('generation_complete', self.schedule.sched_data)
+        persisted_cells = [
+            cell
+            for values in self.schedule.sched_data['schedule'].values()
+            if isinstance(values, list)
+            for cell in values
+        ]
+        structured_persisted_cells = [cell for cell in persisted_cells if isinstance(cell, dict)]
+        self.assertTrue(structured_persisted_cells)
+        self.assertTrue(all(cell['assignment_id'] for cell in structured_persisted_cells))
+        self.assertTrue(all(cell['assignment_part'] for cell in structured_persisted_cells))
+        self.assertTrue(all(cell['assignment_span'] for cell in structured_persisted_cells))
+
+        # Legacy persisted string cells remain readable alongside structured cells.
+        self.schedule.sched_data['schedule']['thur_am1'][0] = 'Persisted Activity'
+        self.schedule.save(update_fields=['sched_data'])
+
+        with patch.object(TheSched, 'create_sched', new_callable=PropertyMock) as create_sched:
+            create_sched.side_effect = AssertionError('Persisted schedules must not regenerate')
+            detail_response = self.client.get(reverse('sched-detail', args=[self.schedule.id]))
+            export_response = self.client.get(reverse('sched-export', args=[self.schedule.id]))
+
+        self.assertContains(detail_response, 'Persisted Schedule')
+        self.assertContains(detail_response, 'Persisted Activity')
+        self.assertContains(detail_response, 'Use Live Generation')
+        self.assertNotContains(detail_response, 'Save Generated Output')
+        self.assertIn('Persisted Activity', export_response.content.decode())
+        self.assertIn('Schedule Regression Location', export_response.content.decode())
+
+    def test_returning_to_generated_mode_clears_persisted_output(self):
+        self.schedule.sched_data = {
+            'mode': 'persisted',
+            'schedule': {'ags': ['Saved Group']},
+            'generation_complete': True,
+        }
+        self.schedule.save(update_fields=['sched_data'])
+
+        response = self.client.post(
+            reverse('sched-persistence', args=[self.schedule.id]),
+            {'mode': 'generated'},
+        )
+
+        self.assertRedirects(response, reverse('sched-detail', args=[self.schedule.id]))
+        self.schedule.refresh_from_db()
+        self.assertEqual(self.schedule.sched_data, {})
+        self.assertEqual(self.schedule.schedule_mode, 'generated')
+
+    def test_schedule_persistence_action_requires_post(self):
+        response = self.client.get(reverse('sched-persistence', args=[self.schedule.id]))
+
+        self.assertEqual(response.status_code, 405)
+
     def test_schedules_generate_only_their_attached_schools(self):
         second_school = self.create_second_valid_school()
         second_schedule = TheSched.objects.create(sched_name="Second Scoped Schedule")
@@ -510,6 +585,85 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.assertEqual(first_output["ags"], ["Balanced Regression School 0"])
         self.assertEqual(second_output["ags"], ["Second Scoped School 0"])
         self.assertNotEqual(first_output["ags"], second_output["ags"])
+
+    def test_generated_activity_cells_include_stable_activity_and_location_metadata(self):
+        generated_schedule = self.schedule.create_sched
+        activity_cells = [
+            cell
+            for values in generated_schedule.values()
+            if isinstance(values, list)
+            for cell in values
+            if isinstance(cell, dict)
+        ]
+
+        self.assertTrue(activity_cells)
+        for cell in activity_cells:
+            self.assertEqual(
+                set(cell),
+                {
+                    'activity_name', 'activity_id', 'location_name', 'location_id', 'source',
+                    'assignment_id', 'assignment_part', 'assignment_span',
+                },
+            )
+            self.assertIsInstance(cell['activity_id'], int)
+            self.assertEqual(cell['location_name'], 'Schedule Regression Location')
+            self.assertIsInstance(cell['location_id'], int)
+            self.assertEqual(cell['source'], 'generated')
+            self.assertTrue(cell['assignment_id'].startswith('generated-'))
+            self.assertIsInstance(cell['assignment_part'], int)
+            self.assertIsInstance(cell['assignment_span'], int)
+        all_cells = [cell for values in generated_schedule.values() if isinstance(values, list) for cell in values]
+        self.assertIn('g_box', all_cells)
+
+    def test_one_block_assignment_has_single_part_identity(self):
+        generated_schedule = self.schedule.create_sched
+        cells = [
+            cell
+            for values in generated_schedule.values()
+            if isinstance(values, list)
+            for cell in values
+            if isinstance(cell, dict) and cell['activity_name'] == self.one_block.course_name
+        ]
+
+        self.assertEqual(len(cells), 1)
+        self.assertEqual(cells[0]['assignment_part'], 1)
+        self.assertEqual(cells[0]['assignment_span'], 1)
+
+    def test_two_block_assignment_cells_share_identity_and_have_ordered_parts(self):
+        generated_schedule = self.schedule.create_sched
+        cells = [
+            cell
+            for values in generated_schedule.values()
+            if isinstance(values, list)
+            for cell in values
+            if isinstance(cell, dict) and cell['activity_name'] == self.two_block.course_name
+        ]
+
+        self.assertEqual(len(cells), 2)
+        self.assertEqual(len({cell['assignment_id'] for cell in cells}), 1)
+        self.assertEqual({cell['assignment_part'] for cell in cells}, {1, 2})
+        self.assertEqual({cell['assignment_span'] for cell in cells}, {2})
+
+    def test_generated_assignment_ids_are_deterministic_for_same_inputs(self):
+        first_schedule = self.schedule.create_sched
+        first_ids = {
+            cell['activity_name']: cell['assignment_id']
+            for values in first_schedule.values()
+            if isinstance(values, list)
+            for cell in values
+            if isinstance(cell, dict)
+        }
+
+        second_schedule = self.schedule.create_sched
+        second_ids = {
+            cell['activity_name']: cell['assignment_id']
+            for values in second_schedule.values()
+            if isinstance(values, list)
+            for cell in values
+            if isinstance(cell, dict)
+        }
+
+        self.assertEqual(first_ids, second_ids)
 
     def test_diagnostics_ignore_unattached_schools(self):
         unattached_school = Schools.schools_list.create(
@@ -701,7 +855,7 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.assertIn("Regression Two Block", {row["Activity"] for row in rows})
         self.assertIn("Regression One Block", {row["Activity"] for row in rows})
         self.assertIn("Regression Night", {row["Activity"] for row in rows})
-        self.assertEqual({row["Location"] for row in rows}, {""})
+        self.assertEqual({row["Location"] for row in rows}, {"", "Schedule Regression Location"})
 
     def test_schedule_csv_export_uses_only_attached_schools(self):
         other_school = self.create_second_valid_school()
@@ -980,7 +1134,8 @@ class SchoolFormWorkflowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         selected_values = {str(value) for value in response.context["form"]["subject"].value()}
         self.assertEqual(selected_values, {str(self.wm.id), str(self.night_hike.id)})
-        self.assertContains(response, "checked", count=2)
+        rendered_subjects = str(response.context["form"]["subject"])
+        self.assertEqual(rendered_subjects.count("checked"), 2)
 
     def test_school_create_saves_subjects_after_instance_has_id(self):
         response = self.client.post(
