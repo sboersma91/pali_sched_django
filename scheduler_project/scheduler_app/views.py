@@ -7,31 +7,13 @@ from django.http import HttpResponse, HttpResponseRedirect
 from django.urls import reverse_lazy
 from django.utils.text import slugify
 
+from .schedule_blocks import (
+    SCHEDULE_DAYS,
+    SCHEDULE_DAY_OFFSETS,
+    SCHEDULE_SLOT_BLOCKS,
+)
 from .school_accounting import school_slot_accounting_summary
 
-SCHEDULE_SLOT_BLOCKS = [
-    ('mon_pm1', 'daytime'),
-    ('mon_pm2', 'daytime'),
-    ('mon_night', 'night'),
-    ('tue_am1', 'daytime'),
-    ('tue_am2', 'daytime'),
-    ('tue_pm1', 'daytime'),
-    ('tue_pm2', 'daytime'),
-    ('tue_night', 'night'),
-    ('wed_am1', 'daytime'),
-    ('wed_am2', 'daytime'),
-    ('wed_pm1', 'daytime'),
-    ('wed_pm2', 'daytime'),
-    ('wed_night', 'night'),
-    ('thur_am1', 'daytime'),
-    ('thur_am2', 'daytime'),
-    ('thur_pm1', 'daytime'),
-    ('thur_pm2', 'daytime'),
-    ('thur_night', 'night'),
-    ('fri_am1', 'daytime'),
-    ('fri_am2', 'daytime'),
-]
-DAY_OFFSETS = {'Mon': 0, 'Tue': 5, 'Tues': 5, 'Wed': 10, 'Thur': 15, 'Thurs': 15, 'Fri': 19}
 
 
 def _form_values(form, field_name):
@@ -60,8 +42,8 @@ def school_slot_accounting_summary(form):
     arrive = _form_value(form, 'arrive')
     depart = _form_value(form, 'depart')
     required_slots = []
-    if arrive in DAY_OFFSETS and depart in DAY_OFFSETS:
-        required_slots = SCHEDULE_SLOT_BLOCKS[DAY_OFFSETS[arrive]:DAY_OFFSETS[depart]]
+    if arrive in SCHEDULE_DAY_OFFSETS and depart in SCHEDULE_DAY_OFFSETS:
+        required_slots = SCHEDULE_SLOT_BLOCKS[SCHEDULE_DAY_OFFSETS[arrive]:SCHEDULE_DAY_OFFSETS[depart]]
 
     selected_courses = Course.objects.filter(pk__in=_form_values(form, 'subject'))
     selected_daytime = sum(course.course_len for course in selected_courses if course.course_len > 0)
@@ -201,26 +183,6 @@ class SchoolDelete(DeleteView):
     success_url = reverse_lazy('school-list')
     context_object_name = "school"
 
-SCHEDULE_DAYS = [
-    {'name': 'Monday', 'slots': [
-        {'label': 'PM1', 'key': 'mon_pm1'}, {'label': 'PM2', 'key': 'mon_pm2'}, {'label': 'Night', 'key': 'mon_night'},
-    ]},
-    {'name': 'Tuesday', 'slots': [
-        {'label': 'AM1', 'key': 'tue_am1'}, {'label': 'AM2', 'key': 'tue_am2'},
-        {'label': 'PM1', 'key': 'tue_pm1'}, {'label': 'PM2', 'key': 'tue_pm2'}, {'label': 'Night', 'key': 'tue_night'},
-    ]},
-    {'name': 'Wednesday', 'slots': [
-        {'label': 'AM1', 'key': 'wed_am1'}, {'label': 'AM2', 'key': 'wed_am2'},
-        {'label': 'PM1', 'key': 'wed_pm1'}, {'label': 'PM2', 'key': 'wed_pm2'}, {'label': 'Night', 'key': 'wed_night'},
-    ]},
-    {'name': 'Thursday', 'slots': [
-        {'label': 'AM1', 'key': 'thur_am1'}, {'label': 'AM2', 'key': 'thur_am2'},
-        {'label': 'PM1', 'key': 'thur_pm1'}, {'label': 'PM2', 'key': 'thur_pm2'}, {'label': 'Night', 'key': 'thur_night'},
-    ]},
-    {'name': 'Friday', 'slots': [
-        {'label': 'AM1', 'key': 'fri_am1'}, {'label': 'AM2', 'key': 'fri_am2'},
-    ]},
-]
 SCHEDULE_DISPLAY_VALUES = {'g_box': '/////', 'empty': '****'}
 CSV_ACTIVITY_VALUES = {'g_box': 'Unavailable / Not present', 'empty': 'Unassigned'}
 
