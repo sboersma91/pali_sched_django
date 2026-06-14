@@ -78,6 +78,175 @@
         <span><code>****</code> = unassigned available block</span>
       </div>
     </div>
+    {% if proposal_result %}
+      <div class="alert {% if proposal_result.applied %}alert-info{% else %}alert-warning{% endif %} mb-3" role="status" aria-labelledby="move-proposal-heading">
+        <h3 id="move-proposal-heading" class="h5 alert-heading">Temporary Move Proposal</h3>
+        {% if proposal_recomputed_server_side %}
+          <p class="fw-bold">Proposal recomputed server-side.</p>
+        {% endif %}
+        <p class="mb-2">{{ proposal_result.message }}</p>
+        {% if proposal_result.applied %}
+          <dl class="row mb-0">
+            <dt class="col-sm-3">Activity</dt>
+            <dd class="col-sm-9">{{ proposal_result.activity }}</dd>
+            <dt class="col-sm-3">From</dt>
+            <dd class="col-sm-9">{{ proposal_result.source_group_label }} — {{ proposal_result.source_slot_label }} (<code>{{ proposal_result.source_block_id }}</code>)</dd>
+            <dt class="col-sm-3">To</dt>
+            <dd class="col-sm-9">{{ proposal_result.target_group_label }} — {{ proposal_result.target_slot_label }} (<code>{{ proposal_result.target_block_id }}</code>)</dd>
+            {% if proposal_result.target_was_occupied %}
+              <dt class="col-sm-3">Overlap Warning</dt>
+              <dd class="col-sm-9">The target already contains {{ proposal_result.target_activity }}. Both activities remain visible and the overlap is not automatically resolved.</dd>
+            {% endif %}
+            <dt class="col-sm-3">Persistence</dt>
+            <dd class="col-sm-9">
+              {% if proposal_save_succeeded %}
+                Saved as a manual override. The override is not yet applied to rendered schedule output.
+              {% else %}
+                Not saved. Reload without proposal parameters to restore generated output.
+              {% endif %}
+            </dd>
+          </dl>
+          {% if not proposal_recomputed_server_side %}
+            <form method="post" action="{% url 'sched-move-confirm' sched.id %}" class="mt-3">
+              {% csrf_token %}
+              <input type="hidden" name="source_block" value="{{ proposal_result.source_block_id }}">
+              <input type="hidden" name="source_activity_id" value="{{ proposal_result.source_activity_id }}">
+              <input type="hidden" name="source_activity_name" value="{{ proposal_result.source_activity_name }}">
+              <input type="hidden" name="source_occurrence_id" value="{{ proposal_result.source_occurrence_id }}">
+              <input type="hidden" name="target_slot" value="{{ proposal_result.target_slot_key }}">
+              <input type="hidden" name="target_group" value="{{ proposal_result.target_group_index }}">
+              <button type="submit" class="btn btn-outline-primary">Confirm Proposal Server-Side</button>
+            </form>
+          {% elif save_readiness.can_save %}
+            <form method="post" action="{% url 'sched-move-save' sched.id %}" class="mt-3">
+              {% csrf_token %}
+              <input type="hidden" name="source_block" value="{{ proposal_result.source_block_id }}">
+              <input type="hidden" name="source_activity_id" value="{{ proposal_result.source_activity_id }}">
+              <input type="hidden" name="source_activity_name" value="{{ proposal_result.source_activity_name }}">
+              <input type="hidden" name="source_occurrence_id" value="{{ proposal_result.source_occurrence_id }}">
+              <input type="hidden" name="target_slot" value="{{ proposal_result.target_slot_key }}">
+              <input type="hidden" name="target_group" value="{{ proposal_result.target_group_index }}">
+              <button type="submit" class="btn btn-primary">Save Move</button>
+            </form>
+          {% endif %}
+        {% else %}
+          <p class="mb-0"><strong>{{ proposal_result.error }}</strong></p>
+        {% endif %}
+        {% if save_readiness %}
+          <div class="mt-3 pt-3 border-top">
+            <h4 class="h6">Future Save Readiness</h4>
+            <p class="fw-bold mb-2">{{ save_readiness.operator_message }}</p>
+            {% if save_readiness.blocking_conflicts %}
+              <p class="mb-1"><strong>Blocking conflicts:</strong> {{ save_readiness.blocking_conflicts|length }}</p>
+            {% endif %}
+            {% if save_readiness.warning_conflicts %}
+              <p class="mb-1"><strong>Warning conflicts:</strong> {{ save_readiness.warning_conflicts|length }}</p>
+            {% endif %}
+            {% if save_readiness.informational_conflicts %}
+              <p class="mb-1"><strong>Informational conflicts:</strong> {{ save_readiness.informational_conflicts|length }}</p>
+            {% endif %}
+            {% if proposal_recomputed_server_side %}
+              <p class="small mb-0">Save eligibility was recomputed server-side.</p>
+            {% else %}
+              <p class="small mb-0">Preview only. Confirm the proposal server-side before saving.</p>
+            {% endif %}
+          </div>
+        {% endif %}
+      </div>
+    {% endif %}
+    {% if selected_block %}
+      <div class="card mb-3" aria-labelledby="selected-block-heading">
+        <div class="card-body">
+          <h3 id="selected-block-heading" class="h5 card-title">Selected Activity Block</h3>
+          <dl class="row mb-0">
+            <dt class="col-sm-3">Activity Group</dt>
+            <dd class="col-sm-9">{{ selected_block.group_label }}</dd>
+            <dt class="col-sm-3">Time Block</dt>
+            <dd class="col-sm-9">{{ selected_block.slot_label }} <code>{{ selected_block.slot_key }}</code></dd>
+            <dt class="col-sm-3">Activity</dt>
+            <dd class="col-sm-9">{{ selected_block.display_value }}</dd>
+            {% if selected_block.activity_id %}
+              <dt class="col-sm-3">Activity ID</dt>
+              <dd class="col-sm-9">{{ selected_block.activity_id }}</dd>
+            {% endif %}
+            {% if selected_block.is_multi_block %}
+              <dt class="col-sm-3">Occurrence</dt>
+              <dd class="col-sm-9">Multi-block activity occurrence</dd>
+              <dt class="col-sm-3">Occurrence Length</dt>
+              <dd class="col-sm-9">{{ selected_block.occurrence_length }} blocks</dd>
+              <dt class="col-sm-3">Selected Position</dt>
+              <dd class="col-sm-9">Block {{ selected_block.occurrence_position }} of {{ selected_block.occurrence_length }}</dd>
+            {% endif %}
+            {% if selected_block.conflicts %}
+              <dt class="col-sm-3">Conflicts</dt>
+              <dd class="col-sm-9">
+                <ul class="mb-0">
+                  {% for conflict in selected_block.conflicts %}
+                    <li><strong>{{ conflict.type }}</strong>: {{ conflict.message }}</li>
+                  {% endfor %}
+                </ul>
+              </dd>
+            {% endif %}
+          </dl>
+          {% if not selected_block.is_multi_block %}
+            <form method="get" class="row g-2 align-items-end mt-3">
+              <input type="hidden" name="selected_block" value="{{ selected_block.block_id }}">
+              <input type="hidden" name="source_activity_id" value="{{ selected_block.activity_id }}">
+              <input type="hidden" name="source_activity_name" value="{{ selected_block.raw_value }}">
+              <input type="hidden" name="source_occurrence_id" value="{{ selected_block.occurrence_id }}">
+              <div class="col-md-5">
+                <label for="target-group" class="form-label">Proposed Activity Group</label>
+                <select id="target-group" name="target_group" class="form-select" required>
+                  {% for row in schedule_rows %}
+                    <option value="{{ row.group_index }}">{{ row.ag }}</option>
+                  {% endfor %}
+                </select>
+              </div>
+              <div class="col-md-5">
+                <label for="target-slot" class="form-label">Proposed Time Block</label>
+                <select id="target-slot" name="target_slot" class="form-select" required>
+                  {% for day in schedule_days %}
+                    <optgroup label="{{ day.name }}">
+                      {% for slot in day.slots %}
+                        <option value="{{ slot.key }}">{{ slot.label }} — {{ slot.key }}</option>
+                      {% endfor %}
+                    </optgroup>
+                  {% endfor %}
+                </select>
+              </div>
+              <div class="col-md-2">
+                <button type="submit" class="btn btn-outline-primary w-100">Preview Move</button>
+              </div>
+            </form>
+          {% else %}
+            <p class="text-muted mb-0 mt-3">Multi-block activity move proposals are not supported yet.</p>
+          {% endif %}
+        </div>
+      </div>
+    {% endif %}
+    {% if conflict_summary_groups %}
+      <div class="alert {% if has_blocking_conflicts %}alert-danger{% else %}alert-warning{% endif %} mb-3" role="alert" aria-labelledby="operational-conflict-summary-heading">
+        <h3 id="operational-conflict-summary-heading" class="h5 alert-heading">Operational Conflict Summary</h3>
+        {% for group in conflict_summary_groups %}
+          <h4 class="h6 mt-3">{{ group.severity|title }}: <code>{{ group.type }}</code></h4>
+          <ul class="mb-0">
+            {% for conflict in group.conflicts %}
+              <li>
+                {{ conflict.message }}
+                {% if conflict.related_blocks %}
+                  <span class="d-block small">
+                    Related:
+                    {% for block in conflict.related_blocks %}
+                      {{ block.group_label }} — {{ block.slot_label }} (<code>{{ block.slot_key }}</code>, <code>{{ block.block_id }}</code>){% if not forloop.last %}; {% endif %}
+                    {% endfor %}
+                  </span>
+                {% endif %}
+              </li>
+            {% endfor %}
+          </ul>
+        {% endfor %}
+      </div>
+    {% endif %}
     <div class="table-responsive">
       <table class="table table-bordered table-sm align-middle text-center schedule-table">
         <thead class="table-light">
@@ -99,8 +268,19 @@
           {% for row in schedule_rows %}
             <tr>
               <th scope="row">{{ row.ag }}</th>
-              {% for value in row.cells %}
-                <td>{{ value }}</td>
+              {% for cell in row.cells %}
+                <td{% if cell.conflicts %} class="{% if has_blocking_conflicts %}table-danger{% else %}table-warning{% endif %}{% if selected_occurrence_id and selected_occurrence_id == cell.occurrence_id %} border border-primary border-2{% endif %}"{% elif cell.is_proposed_target %} class="table-success border border-primary border-2"{% elif cell.is_proposed_source %} class="table-warning"{% elif selected_occurrence_id and selected_occurrence_id == cell.occurrence_id %} class="table-primary"{% endif %}>
+                  {% if cell.is_activity %}
+                    <a href="?selected_block={{ cell.block_id|urlencode }}" class="text-reset text-decoration-none d-block">{{ cell.display_value }}{% if cell.is_proposed_target %} <span class="small">(proposed)</span>{% endif %}</a>
+                    {% for overlap in cell.overlapping_blocks %}
+                      <span class="d-block border-top mt-1 pt-1 fw-bold">
+                        {{ overlap.display_value }} <span class="small">(proposed overlap)</span>
+                      </span>
+                    {% endfor %}
+                  {% else %}
+                    {{ cell.display_value }}{% if cell.is_proposed_source %} <span class="small">(moved)</span>{% endif %}
+                  {% endif %}
+                </td>
               {% endfor %}
             </tr>
           {% empty %}

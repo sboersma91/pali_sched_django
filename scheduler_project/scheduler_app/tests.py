@@ -1,4 +1,5 @@
 import csv
+from copy import deepcopy
 from io import StringIO
 from unittest.mock import PropertyMock, patch
 
@@ -10,6 +11,17 @@ from django.urls import reverse
 from .forms import SchoolsForm, SchedForm, suggest_activity_group_count
 from .views import SchedDetail, SchedList, schedule_csv_export
 from .school_accounting import school_slot_accounting_summary
+from .schedule_operations import (
+    apply_move_proposal,
+    build_schedule_blocks,
+    diagnose_sched_data_structure,
+    evaluate_move_proposal_for_save,
+    normalize_sched_data_structure,
+    persist_manual_move,
+    repair_sched_data_structure,
+    validate_schedule_blocks,
+    verify_move_proposal_source,
+)
 from .models import (
     Course,
     Locations,
@@ -278,6 +290,767 @@ class OperationalDashboardTests(TestCase):
 
 
 
+class ScheduleOperationsTests(TestCase):
+    def test_build_schedule_blocks_creates_metadata_for_resolvable_activity(self):
+        activity = Course.objects.create(course_name="Adapter Activity", abriviation="AA", course_len=1)
+
+        rows = build_schedule_blocks({
+            "ags": ["Adapter School 0"],
+            "mon_pm1": [activity.course_name],
+        })
+
+        block = rows[0]["cells"][0]
+        self.assertEqual(block, {
+            "block_id": "0:mon_pm1",
+            "group_index": 0,
+            "group_label": "Adapter School 0",
+            "slot_key": "mon_pm1",
+            "slot_label": "PM1",
+            "raw_value": "Adapter Activity",
+            "display_value": "Adapter Activity",
+            "activity_id": activity.id,
+            "activity_length": 1,
+            "is_activity": True,
+            "is_empty": False,
+            "is_unavailable": False,
+            "occurrence_id": "occurrence:0:mon_pm1",
+            "occurrence_length": 1,
+            "occurrence_position": 1,
+            "is_multi_block": False,
+            "is_proposed_source": False,
+            "is_proposed_target": False,
+            "proposed_from_block_id": None,
+            "proposed_to_block_id": None,
+            "has_overlap": False,
+            "overlapping_blocks": [],
+            "conflicts": [],
+        })
+        self.assertEqual(rows[0]["ag"], "Adapter School 0")
+        self.assertEqual(len(rows[0]["cells"]), 20)
+
+    def test_build_schedule_blocks_preserves_empty_and_unavailable_display_values(self):
+        rows = build_schedule_blocks({
+            "ags": ["Adapter School 0"],
+            "mon_pm1": ["empty"],
+            "mon_pm2": ["g_box"],
+        })
+
+        empty_block, unavailable_block = rows[0]["cells"][:2]
+        self.assertEqual(empty_block["raw_value"], "empty")
+        self.assertEqual(empty_block["display_value"], "****")
+        self.assertTrue(empty_block["is_empty"])
+        self.assertFalse(empty_block["is_activity"])
+        self.assertIsNone(empty_block["activity_id"])
+        self.assertIsNone(empty_block["activity_length"])
+        self.assertEqual(unavailable_block["raw_value"], "g_box")
+        self.assertEqual(unavailable_block["display_value"], "/////")
+        self.assertTrue(unavailable_block["is_unavailable"])
+        self.assertFalse(unavailable_block["is_activity"])
+        self.assertIsNone(unavailable_block["activity_id"])
+        self.assertIsNone(empty_block["occurrence_id"])
+        self.assertIsNone(empty_block["occurrence_length"])
+        self.assertIsNone(empty_block["occurrence_position"])
+        self.assertFalse(empty_block["is_multi_block"])
+
+    def test_one_block_activities_remain_independent_occurrences(self):
+        activity = Course.objects.create(course_name="Repeated One Block", abriviation="R1B", course_len=1)
+
+        rows = build_schedule_blocks({
+            "ags": ["Adapter School 0"],
+            "mon_pm1": [activity.course_name],
+            "mon_pm2": [activity.course_name],
+        })
+
+        first_block, second_block = rows[0]["cells"][:2]
+        self.assertEqual(first_block["occurrence_id"], "occurrence:0:mon_pm1")
+        self.assertEqual(second_block["occurrence_id"], "occurrence:0:mon_pm2")
+        self.assertNotEqual(first_block["occurrence_id"], second_block["occurrence_id"])
+        self.assertFalse(first_block["is_multi_block"])
+        self.assertFalse(second_block["is_multi_block"])
+
+    def test_two_block_activity_pair_shares_occurrence_identity(self):
+        activity = Course.objects.create(course_name="Grouped Two Block", abriviation="G2B", course_len=2)
+
+        rows = build_schedule_blocks({
+            "ags": ["Adapter School 0"],
+            "tue_am1": [activity.course_name],
+            "tue_am2": [activity.course_name],
+        })
+
+        first_block, second_block = rows[0]["cells"][3:5]
+        self.assertEqual(first_block["occurrence_id"], "occurrence:0:tue_am1")
+        self.assertEqual(second_block["occurrence_id"], first_block["occurrence_id"])
+        self.assertEqual(first_block["occurrence_length"], 2)
+        self.assertEqual(second_block["occurrence_length"], 2)
+        self.assertEqual(first_block["occurrence_position"], 1)
+        self.assertEqual(second_block["occurrence_position"], 2)
+        self.assertTrue(first_block["is_multi_block"])
+        self.assertTrue(second_block["is_multi_block"])
+
+    def test_unrelated_adjacent_activities_are_not_grouped(self):
+        first_activity = Course.objects.create(course_name="First Two Block", abriviation="F2B", course_len=2)
+        second_activity = Course.objects.create(course_name="Second Two Block", abriviation="S2B", course_len=2)
+
+        rows = build_schedule_blocks({
+            "ags": ["Adapter School 0"],
+            "tue_am1": [first_activity.course_name],
+            "tue_am2": [second_activity.course_name],
+        })
+
+        first_block, second_block = rows[0]["cells"][3:5]
+        self.assertNotEqual(first_block["occurrence_id"], second_block["occurrence_id"])
+        self.assertFalse(first_block["is_multi_block"])
+        self.assertFalse(second_block["is_multi_block"])
+
+
+class ScheduleValidationTests(TestCase):
+    def conflict_types(self, block):
+        return {conflict["type"] for conflict in block["conflicts"]}
+
+    def test_valid_schedule_blocks_remain_conflict_free(self):
+        daytime = Course.objects.create(course_name="Valid Daytime", abriviation="VD", course_len=1)
+        night = Course.objects.create(course_name="Valid Night", abriviation="VN", course_len=0)
+        two_block = Course.objects.create(course_name="Valid Two Block", abriviation="V2", course_len=2)
+        blocks = build_schedule_blocks({
+            "ags": ["Validation School 0"],
+            "mon_pm1": [daytime.course_name],
+            "mon_night": [night.course_name],
+            "tue_am1": [two_block.course_name],
+            "tue_am2": [two_block.course_name],
+        })
+
+        conflict_summaries = validate_schedule_blocks(blocks)
+
+        self.assertEqual(conflict_summaries, [])
+        self.assertTrue(all(not block["conflicts"] for block in blocks[0]["cells"]))
+
+    def test_invalid_daytime_and_night_placements_attach_structured_conflicts(self):
+        daytime = Course.objects.create(course_name="Misplaced Daytime", abriviation="MD", course_len=1)
+        night = Course.objects.create(course_name="Misplaced Night", abriviation="MN", course_len=0)
+        blocks = build_schedule_blocks({
+            "ags": ["Validation School 0"],
+            "mon_pm1": [night.course_name],
+            "mon_night": [daytime.course_name],
+        })
+
+        conflict_summaries = validate_schedule_blocks(blocks)
+        daytime_slot, night_slot = blocks[0]["cells"][0], blocks[0]["cells"][2]
+
+        self.assertEqual([conflict["type"] for conflict in conflict_summaries], [
+            "invalid_time_slot",
+            "invalid_time_slot",
+        ])
+        self.assertEqual(self.conflict_types(daytime_slot), {"invalid_time_slot"})
+        self.assertEqual(self.conflict_types(night_slot), {"invalid_time_slot"})
+        for conflict in conflict_summaries:
+            self.assertEqual(conflict["severity"], "error")
+            self.assertTrue(conflict["message"])
+            self.assertEqual(len(conflict["related_block_ids"]), 1)
+
+    def test_missing_two_block_pair_attaches_broken_multi_block_conflict(self):
+        activity = Course.objects.create(course_name="Broken Two Block", abriviation="B2", course_len=2)
+        blocks = build_schedule_blocks({
+            "ags": ["Validation School 0"],
+            "tue_am1": [activity.course_name],
+        })
+
+        conflict_summaries = validate_schedule_blocks(blocks)
+        block = blocks[0]["cells"][3]
+
+        self.assertEqual(self.conflict_types(block), {"broken_multi_block"})
+        self.assertEqual(conflict_summaries[0]["type"], "broken_multi_block")
+        self.assertEqual(conflict_summaries[0]["related_block_ids"], [block["block_id"]])
+
+    def test_mismatched_multi_block_metadata_attaches_conflict_to_both_blocks(self):
+        activity = Course.objects.create(course_name="Mismatched Two Block", abriviation="M2", course_len=2)
+        blocks = build_schedule_blocks({
+            "ags": ["Validation School 0"],
+            "tue_am1": [activity.course_name],
+            "tue_am2": [activity.course_name],
+        })
+        first_block, second_block = blocks[0]["cells"][3:5]
+        second_block["occurrence_position"] = 1
+
+        conflict_summaries = validate_schedule_blocks(blocks)
+
+        self.assertEqual(len(conflict_summaries), 1)
+        self.assertEqual(conflict_summaries[0]["type"], "broken_multi_block")
+        self.assertEqual(self.conflict_types(first_block), {"broken_multi_block"})
+        self.assertEqual(self.conflict_types(second_block), {"broken_multi_block"})
+
+    def test_non_adjacent_multi_block_occurrence_attaches_conflict_to_both_blocks(self):
+        activity = Course.objects.create(course_name="Nonadjacent Two Block", abriviation="N2", course_len=2)
+        blocks = build_schedule_blocks({
+            "ags": ["Validation School 0"],
+            "tue_am1": [activity.course_name],
+            "tue_pm2": [activity.course_name],
+        })
+        first_block, second_block = blocks[0]["cells"][3], blocks[0]["cells"][6]
+        second_block.update({
+            "occurrence_id": first_block["occurrence_id"],
+            "occurrence_length": 2,
+            "occurrence_position": 2,
+            "is_multi_block": True,
+        })
+        first_block.update({
+            "occurrence_length": 2,
+            "occurrence_position": 1,
+            "is_multi_block": True,
+        })
+
+        conflict_summaries = validate_schedule_blocks(blocks)
+
+        self.assertEqual(len(conflict_summaries), 1)
+        self.assertEqual(conflict_summaries[0]["type"], "broken_multi_block")
+        self.assertEqual(self.conflict_types(first_block), {"broken_multi_block"})
+        self.assertEqual(self.conflict_types(second_block), {"broken_multi_block"})
+
+    def test_duplicate_group_slot_detected_when_normalized_blocks_contain_duplicate(self):
+        activity = Course.objects.create(course_name="Duplicate Activity", abriviation="DA", course_len=1)
+        blocks = build_schedule_blocks({
+            "ags": ["Validation School 0"],
+            "mon_pm1": [activity.course_name],
+        })
+        original_block = blocks[0]["cells"][0]
+        duplicate_block = original_block.copy()
+        duplicate_block["block_id"] = "duplicate:0:mon_pm1"
+        duplicate_block["conflicts"] = []
+        blocks[0]["cells"].append(duplicate_block)
+
+        conflict_summaries = validate_schedule_blocks(blocks)
+
+        duplicate_conflict = next(
+            conflict for conflict in conflict_summaries if conflict["type"] == "duplicate_group_slot"
+        )
+        self.assertEqual(
+            duplicate_conflict["related_block_ids"],
+            [original_block["block_id"], duplicate_block["block_id"]],
+        )
+        self.assertIn("duplicate_group_slot", self.conflict_types(original_block))
+        self.assertIn("duplicate_group_slot", self.conflict_types(duplicate_block))
+
+
+class ScheduleMoveProposalTests(TestCase):
+    def test_valid_one_block_proposal_moves_activity_in_memory(self):
+        activity = Course.objects.create(course_name="Proposal Activity", abriviation="PA", course_len=1)
+        blocks = build_schedule_blocks({
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        })
+
+        result = apply_move_proposal(blocks, {
+            "source_block_id": "0:mon_pm1",
+            "source_activity_id": activity.id,
+            "source_activity_name": activity.course_name,
+            "source_occurrence_id": "occurrence:0:mon_pm1",
+            "target_slot_key": "tue_am1",
+            "target_group_index": 0,
+        })
+        source, target = blocks[0]["cells"][0], blocks[0]["cells"][3]
+
+        self.assertTrue(result["applied"])
+        self.assertEqual(source["raw_value"], "empty")
+        self.assertTrue(source["is_empty"])
+        self.assertTrue(source["is_proposed_source"])
+        self.assertEqual(source["proposed_to_block_id"], target["block_id"])
+        self.assertEqual(target["raw_value"], activity.course_name)
+        self.assertTrue(target["is_activity"])
+        self.assertTrue(target["is_proposed_target"])
+        self.assertEqual(target["proposed_from_block_id"], source["block_id"])
+
+    def test_invalid_target_slot_rejects_proposal_without_mutating_blocks(self):
+        activity = Course.objects.create(course_name="Invalid Target Activity", abriviation="ITA", course_len=1)
+        blocks = build_schedule_blocks({
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [activity.course_name],
+        })
+        source_before = blocks[0]["cells"][0].copy()
+
+        result = apply_move_proposal(blocks, {
+            "source_block_id": "0:mon_pm1",
+            "source_activity_id": activity.id,
+            "source_activity_name": activity.course_name,
+            "source_occurrence_id": "occurrence:0:mon_pm1",
+            "target_slot_key": "invalid_slot",
+            "target_group_index": 0,
+        })
+
+        self.assertFalse(result["applied"])
+        self.assertEqual(result["error"], "invalid_target_slot")
+        self.assertEqual(blocks[0]["cells"][0], source_before)
+
+    def test_multi_block_proposal_is_rejected(self):
+        activity = Course.objects.create(course_name="Proposal Two Block", abriviation="P2", course_len=2)
+        blocks = build_schedule_blocks({
+            "ags": ["Proposal School 0"],
+            "tue_am1": [activity.course_name],
+            "tue_am2": [activity.course_name],
+            "wed_am1": ["empty"],
+        })
+
+        result = apply_move_proposal(blocks, {
+            "source_block_id": "0:tue_am1",
+            "source_activity_id": activity.id,
+            "source_activity_name": activity.course_name,
+            "source_occurrence_id": "occurrence:0:tue_am1",
+            "target_slot_key": "wed_am1",
+            "target_group_index": 0,
+        })
+
+        self.assertFalse(result["applied"])
+        self.assertEqual(result["error"], "multi_block_not_supported")
+        self.assertEqual(blocks[0]["cells"][3]["raw_value"], activity.course_name)
+        self.assertEqual(blocks[0]["cells"][4]["raw_value"], activity.course_name)
+
+    def test_occupied_target_proposal_keeps_both_activities_and_creates_duplicate_conflict(self):
+        source_activity = Course.objects.create(course_name="Overlap Source", abriviation="OS", course_len=1)
+        target_activity = Course.objects.create(course_name="Overlap Target", abriviation="OT", course_len=1)
+        blocks = build_schedule_blocks({
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [source_activity.course_name],
+            "mon_pm2": [target_activity.course_name],
+        })
+
+        result = apply_move_proposal(blocks, {
+            "source_block_id": "0:mon_pm1",
+            "source_activity_id": source_activity.id,
+            "source_activity_name": source_activity.course_name,
+            "source_occurrence_id": "occurrence:0:mon_pm1",
+            "target_slot_key": "mon_pm2",
+            "target_group_index": 0,
+        })
+        conflicts = validate_schedule_blocks(blocks)
+        target = blocks[0]["cells"][1]
+        overlap = target["overlapping_blocks"][0]
+
+        self.assertTrue(result["applied"])
+        self.assertTrue(result["target_was_occupied"])
+        self.assertEqual(target["raw_value"], target_activity.course_name)
+        self.assertEqual(overlap["raw_value"], source_activity.course_name)
+        self.assertEqual(overlap["group_index"], target["group_index"])
+        self.assertEqual(overlap["slot_key"], target["slot_key"])
+        duplicate = next(conflict for conflict in conflicts if conflict["type"] == "duplicate_group_slot")
+        self.assertEqual(duplicate["severity"], "warning")
+        self.assertEqual(duplicate["related_block_ids"], [target["block_id"], overlap["block_id"]])
+        self.assertIn(source_activity.course_name, duplicate["message"])
+        self.assertIn(target_activity.course_name, duplicate["message"])
+        self.assertIn(target["group_label"], duplicate["message"])
+        self.assertIn(target["slot_key"], duplicate["message"])
+
+
+class MoveProposalSourceIdentityTests(TestCase):
+    def setUp(self):
+        self.activity = Course.objects.create(
+            course_name="Identity Activity",
+            abriviation="IA",
+            course_len=1,
+        )
+        self.blocks = build_schedule_blocks({
+            "ags": ["Identity School 0"],
+            "mon_pm1": [self.activity.course_name],
+            "tue_am1": ["empty"],
+        })
+        self.proposal = {
+            "source_block_id": "0:mon_pm1",
+            "source_activity_id": self.activity.id,
+            "source_activity_name": self.activity.course_name,
+            "source_occurrence_id": "occurrence:0:mon_pm1",
+            "target_slot_key": "tue_am1",
+            "target_group_index": 0,
+        }
+
+    def test_matching_source_identity_passes_verification_and_save_readiness(self):
+        verification = verify_move_proposal_source(self.blocks, self.proposal)
+        proposal_result = apply_move_proposal(self.blocks, self.proposal)
+        proposal_result["conflicts"] = validate_schedule_blocks(self.blocks)
+        save_readiness = evaluate_move_proposal_for_save(proposal_result)
+
+        self.assertTrue(verification["verified"])
+        self.assertTrue(proposal_result["source_identity_verified"])
+        self.assertTrue(save_readiness["can_save"])
+
+    def test_mismatched_activity_id_blocks_save_readiness(self):
+        self.proposal["source_activity_id"] = self.activity.id + 1
+
+        self.assert_identity_mismatch_blocks_save()
+
+    def test_mismatched_activity_name_blocks_save_readiness(self):
+        self.proposal["source_activity_name"] = "Changed Activity"
+
+        self.assert_identity_mismatch_blocks_save()
+
+    def test_mismatched_occurrence_id_blocks_save_readiness(self):
+        self.proposal["source_occurrence_id"] = "occurrence:changed"
+
+        self.assert_identity_mismatch_blocks_save()
+
+    def test_missing_source_block_blocks_save_readiness(self):
+        self.proposal["source_block_id"] = "missing"
+
+        proposal_result = apply_move_proposal(self.blocks, self.proposal)
+        save_readiness = evaluate_move_proposal_for_save(proposal_result)
+
+        self.assertFalse(proposal_result["applied"])
+        self.assertEqual(proposal_result["error"], "invalid_source")
+        self.assertFalse(save_readiness["can_save"])
+
+    def test_multi_block_source_remains_blocked(self):
+        multi_block = Course.objects.create(
+            course_name="Identity Multi Block",
+            abriviation="IMB",
+            course_len=2,
+        )
+        blocks = build_schedule_blocks({
+            "ags": ["Identity School 0"],
+            "tue_am1": [multi_block.course_name],
+            "tue_am2": [multi_block.course_name],
+            "wed_am1": ["empty"],
+        })
+        proposal = {
+            "source_block_id": "0:tue_am1",
+            "source_activity_id": multi_block.id,
+            "source_activity_name": multi_block.course_name,
+            "source_occurrence_id": "occurrence:0:tue_am1",
+            "target_slot_key": "wed_am1",
+            "target_group_index": 0,
+        }
+
+        proposal_result = apply_move_proposal(blocks, proposal)
+        save_readiness = evaluate_move_proposal_for_save(proposal_result)
+
+        self.assertFalse(proposal_result["applied"])
+        self.assertEqual(proposal_result["error"], "multi_block_not_supported")
+        self.assertFalse(save_readiness["can_save"])
+
+    def assert_identity_mismatch_blocks_save(self):
+        proposal_result = apply_move_proposal(self.blocks, self.proposal)
+        save_readiness = evaluate_move_proposal_for_save(proposal_result)
+
+        self.assertFalse(proposal_result["applied"])
+        self.assertEqual(proposal_result["error"], "source_identity_mismatch")
+        self.assertFalse(save_readiness["can_save"])
+        self.assertEqual(
+            save_readiness["operator_message"],
+            "This proposal cannot be saved because the generated schedule changed since selection.",
+        )
+
+
+class ManualMovePersistenceTests(TestCase):
+    def setUp(self):
+        self.activity = Course.objects.create(
+            course_name="Persisted Move Activity",
+            abriviation="PMA",
+            course_len=1,
+        )
+        self.schedule = TheSched.objects.create(
+            sched_name="Manual Move Persistence Schedule",
+            sched_data=None,
+        )
+
+    def build_saveable_result(self, target_slot_key="tue_am1"):
+        blocks = build_schedule_blocks({
+            "ags": ["Persistence School 0"],
+            "mon_pm1": [self.activity.course_name],
+            "tue_am1": ["empty"],
+            "wed_am1": ["empty"],
+        })
+        proposal_result = apply_move_proposal(blocks, {
+            "source_block_id": "0:mon_pm1",
+            "source_activity_id": self.activity.id,
+            "source_activity_name": self.activity.course_name,
+            "source_occurrence_id": "occurrence:0:mon_pm1",
+            "target_slot_key": target_slot_key,
+            "target_group_index": 0,
+        })
+        proposal_result["conflicts"] = validate_schedule_blocks(blocks)
+        return proposal_result
+
+    def test_persists_one_verified_saveable_move(self):
+        proposal_result = self.build_saveable_result()
+
+        move_record = persist_manual_move(self.schedule, proposal_result)
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(self.schedule.sched_data["version"], 1)
+        self.assertEqual(self.schedule.sched_data["manual_moves"], [move_record])
+        self.assertEqual(move_record["source_block_id"], "0:mon_pm1")
+        self.assertEqual(move_record["source_activity_id"], self.activity.id)
+        self.assertEqual(move_record["source_activity_name"], self.activity.course_name)
+        self.assertEqual(move_record["source_occurrence_id"], "occurrence:0:mon_pm1")
+        self.assertEqual(move_record["source_group_index"], 0)
+        self.assertEqual(move_record["source_slot_key"], "mon_pm1")
+        self.assertEqual(move_record["target_group_index"], 0)
+        self.assertEqual(move_record["target_slot_key"], "tue_am1")
+        self.assertEqual(move_record["move_type"], "single_block")
+        self.assertEqual(move_record["status"], "active")
+        self.assertTrue(move_record["created_at"].endswith("Z"))
+
+    def test_normalizes_none_sched_data(self):
+        self.assertEqual(
+            normalize_sched_data_structure(None),
+            {"version": 1, "manual_moves": []},
+        )
+
+    def test_normalizes_empty_sched_data(self):
+        self.assertEqual(
+            normalize_sched_data_structure({}),
+            {"version": 1, "manual_moves": []},
+        )
+
+    def test_normalizes_missing_manual_moves_and_preserves_unrelated_keys(self):
+        source = {"version": 7, "source": "existing", "nested": {"keep": True}}
+
+        normalized = normalize_sched_data_structure(source)
+
+        self.assertEqual(normalized, {
+            "version": 7,
+            "source": "existing",
+            "nested": {"keep": True},
+            "manual_moves": [],
+        })
+        self.assertEqual(source, {"version": 7, "source": "existing", "nested": {"keep": True}})
+
+    def test_rejects_malformed_non_dict_sched_data_without_mutation(self):
+        for malformed in (["existing"], "existing"):
+            with self.subTest(malformed=malformed):
+                original = deepcopy(malformed)
+                with self.assertRaisesMessage(ValueError, "not a JSON object"):
+                    normalize_sched_data_structure(malformed)
+                self.assertEqual(malformed, original)
+
+    def test_rejects_malformed_manual_moves_without_mutation(self):
+        malformed = {"source": "existing", "manual_moves": "invalid"}
+        original = deepcopy(malformed)
+
+        with self.assertRaisesMessage(ValueError, "manual move data is not a list"):
+            normalize_sched_data_structure(malformed)
+
+        self.assertEqual(malformed, original)
+
+    def test_diagnoses_recoverable_and_malformed_sched_data(self):
+        self.assertEqual(diagnose_sched_data_structure(None)["status"], "uninitialized")
+        self.assertTrue(diagnose_sched_data_structure({})["recoverable"])
+        malformed = diagnose_sched_data_structure(["legacy"])
+        self.assertEqual(malformed["status"], "malformed")
+        self.assertFalse(malformed["recoverable"])
+        self.assertEqual(malformed["value_type"], "list")
+        self.assertIn("administrator review", malformed["message"])
+
+    def test_admin_safe_repair_normalizes_recoverable_sched_data(self):
+        repaired = repair_sched_data_structure(self.schedule)
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(repaired, {"version": 1, "manual_moves": []})
+        self.assertEqual(self.schedule.sched_data, repaired)
+
+    def test_admin_safe_repair_rejects_malformed_sched_data(self):
+        self.schedule.sched_data = ["legacy"]
+        self.schedule.save(update_fields=["sched_data"])
+
+        with self.assertRaisesMessage(ValueError, "not a JSON object"):
+            repair_sched_data_structure(self.schedule)
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(self.schedule.sched_data, ["legacy"])
+
+    def test_first_save_initializes_empty_sched_data_cleanly(self):
+        self.schedule.sched_data = {}
+        self.schedule.save(update_fields=["sched_data"])
+
+        move_record = persist_manual_move(self.schedule, self.build_saveable_result())
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(self.schedule.sched_data, {
+            "version": 1,
+            "manual_moves": [move_record],
+        })
+
+    def test_missing_manual_moves_initializes_during_persistence(self):
+        self.schedule.sched_data = {"version": 1, "source": "existing"}
+        self.schedule.save(update_fields=["sched_data"])
+
+        move_record = persist_manual_move(self.schedule, self.build_saveable_result())
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(self.schedule.sched_data["source"], "existing")
+        self.assertEqual(self.schedule.sched_data["manual_moves"], [move_record])
+
+    def test_appends_multiple_moves_without_destroying_old_ones(self):
+        first_move = persist_manual_move(self.schedule, self.build_saveable_result("tue_am1"))
+        second_move = persist_manual_move(self.schedule, self.build_saveable_result("wed_am1"))
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(self.schedule.sched_data["manual_moves"], [first_move, second_move])
+
+    def test_preserves_unrelated_sched_data_keys(self):
+        self.schedule.sched_data = {
+            "source": "existing",
+            "nested": {"keep": True},
+        }
+        self.schedule.save(update_fields=["sched_data"])
+
+        persist_manual_move(self.schedule, self.build_saveable_result())
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(self.schedule.sched_data["source"], "existing")
+        self.assertEqual(self.schedule.sched_data["nested"], {"keep": True})
+        self.assertEqual(self.schedule.sched_data["version"], 1)
+        self.assertEqual(len(self.schedule.sched_data["manual_moves"]), 1)
+
+    def test_rejects_unverified_proposal_result(self):
+        proposal_result = self.build_saveable_result()
+        proposal_result["source_identity_verified"] = False
+
+        with self.assertRaisesMessage(ValueError, "verified source identity"):
+            persist_manual_move(self.schedule, proposal_result)
+
+        self.schedule.refresh_from_db()
+        self.assertIsNone(self.schedule.sched_data)
+
+    def test_rejects_unsaveable_proposal_result(self):
+        proposal_result = self.build_saveable_result()
+        proposal_result["conflicts"] = [{
+            "type": "broken_multi_block",
+            "severity": "error",
+            "message": "Broken occurrence.",
+            "related_block_ids": ["0:tue_am1"],
+        }]
+
+        with self.assertRaisesMessage(ValueError, "saveable proposal result"):
+            persist_manual_move(self.schedule, proposal_result)
+
+        self.schedule.refresh_from_db()
+        self.assertIsNone(self.schedule.sched_data)
+
+    def test_rejects_proposal_result_without_validation_payload(self):
+        proposal_result = self.build_saveable_result()
+        proposal_result.pop("conflicts")
+
+        with self.assertRaisesMessage(ValueError, "validated proposal result"):
+            persist_manual_move(self.schedule, proposal_result)
+
+        self.schedule.refresh_from_db()
+        self.assertIsNone(self.schedule.sched_data)
+
+    def test_rejects_malformed_sched_data_without_overwrite(self):
+        for malformed in (["existing"], "existing"):
+            with self.subTest(malformed=malformed):
+                self.schedule.sched_data = malformed
+                self.schedule.save(update_fields=["sched_data"])
+
+                with self.assertRaisesMessage(ValueError, "Existing schedule data was left unchanged"):
+                    persist_manual_move(self.schedule, self.build_saveable_result())
+
+                self.schedule.refresh_from_db()
+                self.assertEqual(self.schedule.sched_data, malformed)
+
+    def test_persistence_does_not_modify_generated_schedule_output(self):
+        generated_schedule = {
+            "ags": ["Persistence School 0"],
+            "mon_pm1": [self.activity.course_name],
+            "tue_am1": ["empty"],
+        }
+        generated_schedule_before = deepcopy(generated_schedule)
+        blocks = build_schedule_blocks(generated_schedule)
+        proposal_result = apply_move_proposal(blocks, {
+            "source_block_id": "0:mon_pm1",
+            "source_activity_id": self.activity.id,
+            "source_activity_name": self.activity.course_name,
+            "source_occurrence_id": "occurrence:0:mon_pm1",
+            "target_slot_key": "tue_am1",
+            "target_group_index": 0,
+        })
+        proposal_result["conflicts"] = validate_schedule_blocks(blocks)
+
+        persist_manual_move(self.schedule, proposal_result)
+
+        self.assertEqual(generated_schedule, generated_schedule_before)
+
+
+class MoveProposalSavePolicyTests(TestCase):
+    def conflict(self, conflict_type, severity="error"):
+        return {
+            "type": conflict_type,
+            "severity": severity,
+            "message": f"{conflict_type} message",
+            "related_block_ids": ["0:mon_pm1"],
+        }
+
+    def test_valid_proposal_is_saveable(self):
+        result = evaluate_move_proposal_for_save({
+            "applied": True,
+            "conflicts": [],
+        })
+
+        self.assertTrue(result["can_save"])
+        self.assertEqual(result["blocking_conflicts"], [])
+        self.assertEqual(result["warning_conflicts"], [])
+        self.assertEqual(result["informational_conflicts"], [])
+        self.assertEqual(result["operator_message"], "This proposed move would be saveable.")
+
+    def test_blocking_conflict_prevents_save(self):
+        result = evaluate_move_proposal_for_save({
+            "applied": True,
+            "conflicts": [self.conflict("broken_multi_block")],
+        })
+
+        self.assertFalse(result["can_save"])
+        self.assertEqual([conflict["type"] for conflict in result["blocking_conflicts"]], ["broken_multi_block"])
+        self.assertEqual(result["warning_conflicts"], [])
+        self.assertEqual(result["operator_message"], "This proposed move cannot be saved.")
+
+    def test_duplicate_group_slot_allows_save_with_warning(self):
+        result = evaluate_move_proposal_for_save({
+            "applied": True,
+            "conflicts": [self.conflict("duplicate_group_slot")],
+        })
+
+        self.assertTrue(result["can_save"])
+        self.assertEqual(result["blocking_conflicts"], [])
+        self.assertEqual([conflict["type"] for conflict in result["warning_conflicts"]], ["duplicate_group_slot"])
+        self.assertEqual(result["operator_message"], "This proposed move would save with warnings.")
+
+    def test_warning_conflict_allows_save_with_warning(self):
+        result = evaluate_move_proposal_for_save({
+            "applied": True,
+            "conflicts": [self.conflict("invalid_time_slot")],
+        })
+
+        self.assertTrue(result["can_save"])
+        self.assertEqual(result["blocking_conflicts"], [])
+        self.assertEqual([conflict["type"] for conflict in result["warning_conflicts"]], ["invalid_time_slot"])
+        self.assertEqual(result["warning_conflicts"][0]["severity"], "warning")
+        self.assertEqual(result["operator_message"], "This proposed move would save with warnings.")
+
+    def test_conflicts_are_bucketed_by_save_policy_severity(self):
+        result = evaluate_move_proposal_for_save({
+            "applied": True,
+            "conflicts": [
+                self.conflict("broken_multi_block"),
+                self.conflict("invalid_time_slot"),
+                self.conflict("proposal_context", severity="info"),
+            ],
+        })
+
+        self.assertEqual([conflict["type"] for conflict in result["blocking_conflicts"]], ["broken_multi_block"])
+        self.assertEqual([conflict["type"] for conflict in result["warning_conflicts"]], ["invalid_time_slot"])
+        self.assertEqual([conflict["type"] for conflict in result["informational_conflicts"]], ["proposal_context"])
+
+    def test_rejected_proposal_is_not_saveable(self):
+        result = evaluate_move_proposal_for_save({
+            "applied": False,
+            "error": "invalid_target_slot",
+            "message": "The target is invalid.",
+            "source_block_id": "0:mon_pm1",
+            "target_block_id": None,
+        })
+
+        self.assertFalse(result["can_save"])
+        self.assertEqual(result["blocking_conflicts"][0]["type"], "invalid_target_slot")
+        self.assertEqual(result["operator_message"], "This proposed move cannot be saved.")
+
+
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
 class ScheduleWorkflowTests(TestCase):
     def setUp(self):
@@ -306,7 +1079,10 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, "Selected Schools")
         self.assertContains(response, "Existing Operational Schedule")
         self.assertContains(response, "1 School")
-        self.assertContains(response, "Opening a Schedule regenerates its current output")
+        self.assertContains(
+            response,
+            "Opening a Schedule regenerates output for its selected Schools using their latest Activities and Locations.",
+        )
         self.assertContains(response, "Create Schedule")
         self.assertContains(response, "Generate / View")
         self.assertContains(response, "Edit Record")
@@ -327,6 +1103,8 @@ class ScheduleWorkflowTests(TestCase):
         generated_schedule = {
             "ags": ["Example School 0"],
             "mon_pm1": ["Archery"],
+            "mon_pm2": ["empty"],
+            "mon_night": ["g_box"],
         }
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
@@ -346,10 +1124,932 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, "Monday")
         self.assertContains(response, "Example School 0")
         self.assertContains(response, "Archery")
+        self.assertContains(
+            response,
+            '<a href="?selected_block=0%3Amon_pm1" class="text-reset text-decoration-none d-block">Archery</a>',
+            html=True,
+        )
+        self.assertContains(response, "<td>****</td>", html=True)
+        self.assertContains(response, "<td>/////</td>", html=True)
         self.assertContains(response, "How this Schedule record works")
         self.assertContains(response, "Viewing this page regenerates the current output")
         self.assertContains(response, "/////</code> = unavailable or not present", html=False)
         self.assertContains(response, "****</code> = unassigned available block", html=False)
+        self.assertEqual(response.context["conflict_summary_groups"], [])
+        self.assertNotContains(response, "Operational Conflict Summary")
+        block = response.context["schedule_rows"][0]["cells"][0]
+        self.assertEqual(block["block_id"], "0:mon_pm1")
+        self.assertEqual(block["display_value"], "Archery")
+        self.assertTrue(block["is_activity"])
+
+    def test_schedule_detail_selects_valid_activity_block_and_renders_metadata(self):
+        activity = Course.objects.create(course_name="Selectable Activity", abriviation="SA", course_len=1)
+        generated_schedule = {
+            "ags": ["Selectable School 0"],
+            "mon_pm1": [activity.course_name],
+        }
+        url = f'{reverse("sched-detail", args=[self.schedule.id])}?selected_block=0:mon_pm1'
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["selected_block"]["block_id"], "0:mon_pm1")
+        self.assertEqual(response.context["selected_occurrence_id"], "occurrence:0:mon_pm1")
+        self.assertContains(response, "Selected Activity Block")
+        self.assertContains(response, "Selectable School 0")
+        self.assertContains(response, "mon_pm1")
+        self.assertContains(response, "Selectable Activity")
+        self.assertContains(response, str(activity.id))
+        self.assertContains(response, '<td class="table-primary">', count=1, html=False)
+        self.assertNotContains(response, "Multi-block activity occurrence")
+        self.assertContains(response, 'method="get"', html=False)
+        self.assertContains(response, f'name="source_activity_id" value="{activity.id}"', html=False)
+        self.assertContains(response, f'name="source_activity_name" value="{activity.course_name}"', html=False)
+        self.assertContains(response, 'name="source_occurrence_id" value="occurrence:0:mon_pm1"', html=False)
+        self.assertContains(response, 'name="target_group"', html=False)
+        self.assertContains(response, 'name="target_slot"', html=False)
+        self.assertContains(response, "Preview Move")
+
+    def test_schedule_detail_exposes_and_renders_selected_block_conflicts(self):
+        activity = Course.objects.create(course_name="Misplaced Selected Night", abriviation="MSN", course_len=0)
+        generated_schedule = {
+            "ags": ["Selectable School 0"],
+            "mon_pm1": [activity.course_name],
+        }
+        url = f'{reverse("sched-detail", args=[self.schedule.id])}?selected_block=0:mon_pm1'
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.get(url)
+
+        selected_block = response.context["selected_block"]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.context["conflict_summaries"]), 1)
+        self.assertEqual(response.context["conflict_summaries"][0]["type"], "invalid_time_slot")
+        self.assertEqual(selected_block["conflicts"][0]["type"], "invalid_time_slot")
+        self.assertContains(response, "Conflicts")
+        self.assertContains(response, "invalid_time_slot")
+        self.assertContains(response, "night activity placed in a daytime slot")
+        self.assertContains(response, 'class="table-danger border border-primary border-2"', html=False)
+        self.assertContains(response, "Operational Conflict Summary")
+
+    def test_schedule_detail_renders_grouped_operational_conflict_summary(self):
+        night = Course.objects.create(course_name="Summary Night", abriviation="SN", course_len=0)
+        daytime = Course.objects.create(course_name="Summary Daytime", abriviation="SD", course_len=1)
+        generated_schedule = {
+            "ags": ["Summary School 0"],
+            "mon_pm1": [night.course_name],
+            "mon_night": [daytime.course_name],
+        }
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
+
+        summary_groups = response.context["conflict_summary_groups"]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(summary_groups), 1)
+        self.assertEqual(summary_groups[0]["severity"], "error")
+        self.assertEqual(summary_groups[0]["type"], "invalid_time_slot")
+        self.assertEqual(len(summary_groups[0]["conflicts"]), 2)
+        self.assertEqual(
+            summary_groups[0]["conflicts"][0]["related_blocks"][0],
+            {
+                "block_id": "0:mon_pm1",
+                "group_label": "Summary School 0",
+                "slot_label": "PM1",
+                "slot_key": "mon_pm1",
+            },
+        )
+        self.assertContains(response, "Operational Conflict Summary")
+        self.assertContains(response, "Error:")
+        self.assertContains(response, "invalid_time_slot")
+        self.assertContains(response, "night activity placed in a daytime slot")
+        self.assertContains(response, "daytime activity placed in a night slot")
+        self.assertContains(response, "Summary School 0")
+        self.assertContains(response, "mon_pm1")
+        self.assertContains(response, "mon_night")
+
+    def test_schedule_detail_applies_valid_move_proposal_in_memory(self):
+        activity = Course.objects.create(course_name="Rendered Proposal", abriviation="RP", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+        url = (
+            f'{reverse("sched-detail", args=[self.schedule.id])}'
+            f'?selected_block=0:mon_pm1&source_activity_id={activity.id}'
+            f'&source_activity_name={activity.course_name}&source_occurrence_id=occurrence:0:mon_pm1'
+            '&target_slot=tue_am1&target_group=0'
+        )
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.get(url)
+
+        proposal_result = response.context["proposal_result"]
+        source, target = response.context["schedule_rows"][0]["cells"][0], response.context["schedule_rows"][0]["cells"][3]
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(proposal_result["applied"])
+        self.assertEqual(response.context["selected_block"]["block_id"], "0:tue_am1")
+        self.assertTrue(source["is_proposed_source"])
+        self.assertTrue(target["is_proposed_target"])
+        self.assertEqual(target["raw_value"], activity.course_name)
+        self.assertContains(response, "Temporary Move Proposal")
+        self.assertContains(response, "Not saved")
+        self.assertContains(response, "Rendered Proposal")
+        self.assertContains(response, "(moved)")
+        self.assertContains(response, "(proposed)")
+        self.assertContains(response, 'class="table-warning"', html=False)
+        self.assertContains(response, 'class="table-success border border-primary border-2"', html=False)
+        self.assertTrue(response.context["save_readiness"]["can_save"])
+        self.assertContains(response, "Future Save Readiness")
+        self.assertContains(response, "This proposed move would be saveable.")
+        self.assertContains(response, "Preview only. Confirm the proposal server-side before saving.")
+        self.assertNotContains(response, "Save Move")
+        self.assertContains(response, f'name="source_activity_id" value="{activity.id}"', html=False)
+        self.assertContains(response, f'name="source_activity_name" value="{activity.course_name}"', html=False)
+        self.assertContains(response, 'name="source_occurrence_id" value="occurrence:0:mon_pm1"', html=False)
+
+    def test_schedule_detail_rejects_invalid_target_slot_safely(self):
+        activity = Course.objects.create(course_name="Rejected Proposal", abriviation="RJP", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [activity.course_name],
+        }
+        url = (
+            f'{reverse("sched-detail", args=[self.schedule.id])}'
+            f'?selected_block=0:mon_pm1&source_activity_id={activity.id}'
+            f'&source_activity_name={activity.course_name}&source_occurrence_id=occurrence:0:mon_pm1'
+            '&target_slot=invalid_slot&target_group=0'
+        )
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context["proposal_result"]["applied"])
+        self.assertEqual(response.context["proposal_result"]["error"], "invalid_target_slot")
+        self.assertEqual(response.context["schedule_rows"][0]["cells"][0]["raw_value"], activity.course_name)
+        self.assertFalse(response.context["save_readiness"]["can_save"])
+        self.assertContains(response, "Temporary Move Proposal")
+        self.assertContains(response, "invalid_target_slot")
+        self.assertContains(response, "This proposed move cannot be saved.")
+
+    def test_schedule_detail_rejects_multi_block_move_proposal(self):
+        activity = Course.objects.create(course_name="Rejected Two Block", abriviation="RTB", course_len=2)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "tue_am1": [activity.course_name],
+            "tue_am2": [activity.course_name],
+            "wed_am1": ["empty"],
+        }
+        url = (
+            f'{reverse("sched-detail", args=[self.schedule.id])}'
+            f'?selected_block=0:tue_am1&source_activity_id={activity.id}'
+            f'&source_activity_name={activity.course_name}&source_occurrence_id=occurrence:0:tue_am1'
+            '&target_slot=wed_am1&target_group=0'
+        )
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context["proposal_result"]["applied"])
+        self.assertEqual(response.context["proposal_result"]["error"], "multi_block_not_supported")
+        self.assertContains(response, "Multi-block activity moves are not supported yet.")
+
+    def test_schedule_detail_reruns_validation_after_move_proposal(self):
+        activity = Course.objects.create(course_name="Proposal Daytime", abriviation="PD", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [activity.course_name],
+            "mon_night": ["empty"],
+        }
+        url = (
+            f'{reverse("sched-detail", args=[self.schedule.id])}'
+            f'?selected_block=0:mon_pm1&source_activity_id={activity.id}'
+            f'&source_activity_name={activity.course_name}&source_occurrence_id=occurrence:0:mon_pm1'
+            '&target_slot=mon_night&target_group=0'
+        )
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.get(url)
+
+        target = response.context["schedule_rows"][0]["cells"][2]
+        self.assertTrue(response.context["proposal_result"]["applied"])
+        self.assertEqual(target["conflicts"][0]["type"], "invalid_time_slot")
+        self.assertEqual(response.context["conflict_summaries"][0]["type"], "invalid_time_slot")
+        self.assertTrue(response.context["save_readiness"]["can_save"])
+        self.assertEqual(
+            response.context["save_readiness"]["warning_conflicts"][0]["type"],
+            "invalid_time_slot",
+        )
+        self.assertContains(response, "Operational Conflict Summary")
+        self.assertContains(response, "This proposed move would save with warnings.")
+        self.assertContains(response, "Warning conflicts:")
+
+    def test_move_proposal_does_not_mutate_generated_schedule_or_persist(self):
+        activity = Course.objects.create(course_name="Temporary Proposal", abriviation="TP", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+        proposal_url = (
+            f'{reverse("sched-detail", args=[self.schedule.id])}'
+            f'?selected_block=0:mon_pm1&source_activity_id={activity.id}'
+            f'&source_activity_name={activity.course_name}&source_occurrence_id=occurrence:0:mon_pm1'
+            '&target_slot=tue_am1&target_group=0'
+        )
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            proposal_response = self.client.get(proposal_url)
+            reload_response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
+
+        self.schedule.refresh_from_db()
+        self.assertTrue(proposal_response.context["proposal_result"]["applied"])
+        self.assertIsNone(reload_response.context["proposal_result"])
+        self.assertEqual(reload_response.context["schedule_rows"][0]["cells"][0]["raw_value"], activity.course_name)
+        self.assertEqual(reload_response.context["schedule_rows"][0]["cells"][3]["raw_value"], "empty")
+        self.assertEqual(generated_schedule["mon_pm1"], [activity.course_name])
+        self.assertEqual(generated_schedule["tue_am1"], ["empty"])
+        self.assertEqual(self.schedule.sched_data, {"source": "test"})
+
+    def test_post_move_confirmation_recomputes_without_prior_get_state(self):
+        activity = Course.objects.create(course_name="Confirmed Proposal", abriviation="CP", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.post(reverse("sched-move-confirm", args=[self.schedule.id]), {
+                "source_block": "0:mon_pm1",
+                "source_activity_id": activity.id,
+                "source_activity_name": activity.course_name,
+                "source_occurrence_id": "occurrence:0:mon_pm1",
+                "target_slot": "tue_am1",
+                "target_group": "0",
+            }, follow=True)
+
+        source, target = response.context["schedule_rows"][0]["cells"][0], response.context["schedule_rows"][0]["cells"][3]
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.context["proposal_result"]["applied"])
+        self.assertTrue(response.context["proposal_recomputed_server_side"])
+        self.assertTrue(source["is_proposed_source"])
+        self.assertTrue(target["is_proposed_target"])
+        self.assertEqual(target["raw_value"], activity.course_name)
+        self.assertContains(response, "Proposal recomputed server-side.")
+        self.assertContains(response, "This proposed move would be saveable.")
+        self.assertContains(response, "Save Move")
+
+    def test_move_confirmation_uses_prg_and_preserves_proposal_context(self):
+        activity = Course.objects.create(course_name="PRG Confirmed Proposal", abriviation="PCP", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            post_response = self.client.post(
+                reverse("sched-move-confirm", args=[self.schedule.id]),
+                self.move_post_data(activity),
+            )
+            redirected_response = self.client.get(post_response["Location"])
+
+        self.assertEqual(post_response.status_code, 302)
+        self.assertIn("proposal_confirmed=1", post_response["Location"])
+        self.assertEqual(redirected_response.status_code, 200)
+        self.assertTrue(redirected_response.context["proposal_result"]["applied"])
+        self.assertTrue(redirected_response.context["proposal_recomputed_server_side"])
+        self.assertContains(redirected_response, "Proposal confirmed server-side and is ready to save.")
+        self.assertContains(redirected_response, "Save Move")
+
+    def test_post_move_confirmation_ignores_manipulated_client_readiness(self):
+        activity = Course.objects.create(course_name="Authoritative Proposal", abriviation="AP", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.post(reverse("sched-move-confirm", args=[self.schedule.id]), {
+                "source_block": "0:mon_pm1",
+                "source_activity_id": activity.id,
+                "source_activity_name": activity.course_name,
+                "source_occurrence_id": "occurrence:0:mon_pm1",
+                "target_slot": "tue_am1",
+                "target_group": "0",
+                "can_save": "false",
+                "blocking_conflicts": "manipulated",
+                "operator_message": "Trust the client",
+            }, follow=True)
+
+        self.assertTrue(response.context["save_readiness"]["can_save"])
+        self.assertEqual(response.context["save_readiness"]["blocking_conflicts"], [])
+        self.assertContains(response, "This proposed move would be saveable.")
+        self.assertNotContains(response, "Trust the client")
+        self.assertNotContains(response, "manipulated")
+
+    def test_post_move_confirmation_rejects_mismatched_source_identity_without_persistence(self):
+        activity = Course.objects.create(course_name="Stale Identity Proposal", abriviation="SIP", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+        mismatch_cases = [
+            ("activity id", {"source_activity_id": activity.id + 1}),
+            ("activity name", {"source_activity_name": "Changed Activity"}),
+            ("occurrence id", {"source_occurrence_id": "occurrence:changed"}),
+        ]
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            for label, override in mismatch_cases:
+                with self.subTest(label):
+                    post_data = {
+                        "source_block": "0:mon_pm1",
+                        "source_activity_id": activity.id,
+                        "source_activity_name": activity.course_name,
+                        "source_occurrence_id": "occurrence:0:mon_pm1",
+                        "target_slot": "tue_am1",
+                        "target_group": "0",
+                        **override,
+                    }
+                    response = self.client.post(
+                        reverse("sched-move-confirm", args=[self.schedule.id]),
+                        post_data,
+                        follow=True,
+                    )
+                    self.assertFalse(response.context["proposal_result"]["applied"])
+                    self.assertEqual(response.context["proposal_result"]["error"], "source_identity_mismatch")
+                    self.assertFalse(response.context["save_readiness"]["can_save"])
+                    self.assertContains(
+                        response,
+                        "This proposal cannot be saved because the generated schedule changed since selection.",
+                    )
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(generated_schedule["mon_pm1"], [activity.course_name])
+        self.assertEqual(generated_schedule["tue_am1"], ["empty"])
+        self.assertEqual(self.schedule.sched_data, {"source": "test"})
+
+    def test_post_move_confirmation_safely_rejects_invalid_requests(self):
+        one_block = Course.objects.create(course_name="POST One Block", abriviation="POB", course_len=1)
+        occupied = Course.objects.create(course_name="POST Occupied", abriviation="PO", course_len=1)
+        multi_block = Course.objects.create(course_name="POST Multi Block", abriviation="PMB", course_len=2)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [one_block.course_name],
+            "mon_pm2": [occupied.course_name],
+            "tue_am1": [multi_block.course_name],
+            "tue_am2": [multi_block.course_name],
+            "wed_am1": ["empty"],
+        }
+        cases = [
+            (
+                "invalid block id",
+                {
+                    "source_block": "invalid",
+                    "source_activity_id": one_block.id,
+                    "source_activity_name": one_block.course_name,
+                    "target_slot": "wed_am1",
+                    "target_group": "0",
+                },
+                "invalid_source",
+            ),
+            (
+                "stale selection",
+                {
+                    "source_block": "0:wed_am1",
+                    "source_activity_id": one_block.id,
+                    "source_activity_name": one_block.course_name,
+                    "target_slot": "mon_pm1",
+                    "target_group": "0",
+                },
+                "stale_source",
+            ),
+            (
+                "multi-block source",
+                {
+                    "source_block": "0:tue_am1",
+                    "source_activity_id": multi_block.id,
+                    "source_activity_name": multi_block.course_name,
+                    "source_occurrence_id": "occurrence:0:tue_am1",
+                    "target_slot": "wed_am1",
+                    "target_group": "0",
+                },
+                "multi_block_not_supported",
+            ),
+            (
+                "invalid target slot",
+                {
+                    "source_block": "0:mon_pm1",
+                    "source_activity_id": one_block.id,
+                    "source_activity_name": one_block.course_name,
+                    "source_occurrence_id": "occurrence:0:mon_pm1",
+                    "target_slot": "invalid",
+                    "target_group": "0",
+                },
+                "invalid_target_slot",
+            ),
+            (
+                "invalid target group",
+                {
+                    "source_block": "0:mon_pm1",
+                    "source_activity_id": one_block.id,
+                    "source_activity_name": one_block.course_name,
+                    "source_occurrence_id": "occurrence:0:mon_pm1",
+                    "target_slot": "wed_am1",
+                    "target_group": "99",
+                },
+                "invalid_target_group",
+            ),
+        ]
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            for label, post_data, expected_error in cases:
+                with self.subTest(label):
+                    response = self.client.post(
+                        reverse("sched-move-confirm", args=[self.schedule.id]),
+                        post_data,
+                        follow=True,
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.redirect_chain[0][1], 302)
+                    self.assertFalse(response.context["proposal_result"]["applied"])
+                    self.assertEqual(response.context["proposal_result"]["error"], expected_error)
+                    self.assertFalse(response.context["save_readiness"]["can_save"])
+                    self.assertTrue(response.context["proposal_recomputed_server_side"])
+                    self.assertContains(response, "Proposal recomputed server-side.")
+
+    def test_post_move_confirmation_does_not_mutate_schedule_or_persist(self):
+        activity = Course.objects.create(course_name="POST Temporary", abriviation="PT", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            proposal_response = self.client.post(reverse("sched-move-confirm", args=[self.schedule.id]), {
+                "source_block": "0:mon_pm1",
+                "source_activity_id": activity.id,
+                "source_activity_name": activity.course_name,
+                "source_occurrence_id": "occurrence:0:mon_pm1",
+                "target_slot": "tue_am1",
+                "target_group": "0",
+            }, follow=True)
+            reload_response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
+
+        self.schedule.refresh_from_db()
+        self.assertTrue(proposal_response.context["proposal_result"]["applied"])
+        self.assertIsNone(reload_response.context["proposal_result"])
+        self.assertEqual(reload_response.context["schedule_rows"][0]["cells"][0]["raw_value"], activity.course_name)
+        self.assertEqual(reload_response.context["schedule_rows"][0]["cells"][3]["raw_value"], "empty")
+        self.assertEqual(generated_schedule["mon_pm1"], [activity.course_name])
+        self.assertEqual(generated_schedule["tue_am1"], ["empty"])
+        self.assertEqual(self.schedule.sched_data, {"source": "test"})
+
+    def test_post_confirmation_renders_same_proposal_state_as_get_preview(self):
+        activity = Course.objects.create(course_name="Matching Proposal", abriviation="MP", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+        get_url = (
+            f'{reverse("sched-detail", args=[self.schedule.id])}'
+            f'?selected_block=0:mon_pm1&source_activity_id={activity.id}'
+            f'&source_activity_name={activity.course_name}&source_occurrence_id=occurrence:0:mon_pm1'
+            '&target_slot=tue_am1&target_group=0'
+        )
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            get_response = self.client.get(get_url)
+            post_response = self.client.post(reverse("sched-move-confirm", args=[self.schedule.id]), {
+                "source_block": "0:mon_pm1",
+                "source_activity_id": activity.id,
+                "source_activity_name": activity.course_name,
+                "source_occurrence_id": "occurrence:0:mon_pm1",
+                "target_slot": "tue_am1",
+                "target_group": "0",
+            }, follow=True)
+
+        for field in ("applied", "activity", "source_block_id", "target_block_id", "target_slot_key", "target_group_index"):
+            self.assertEqual(
+                post_response.context["proposal_result"][field],
+                get_response.context["proposal_result"][field],
+            )
+        self.assertEqual(post_response.context["conflict_summaries"], get_response.context["conflict_summaries"])
+        self.assertEqual(post_response.context["save_readiness"], get_response.context["save_readiness"])
+        self.assertContains(post_response, "Temporary Move Proposal")
+        self.assertContains(post_response, "(moved)")
+        self.assertContains(post_response, "(proposed)")
+
+    def test_save_move_endpoint_persists_verified_proposal(self):
+        activity = Course.objects.create(course_name="Saved Endpoint Move", abriviation="SEM", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.post(
+                reverse("sched-move-save", args=[self.schedule.id]),
+                self.move_post_data(activity),
+                follow=True,
+            )
+
+        self.schedule.refresh_from_db()
+        saved_move = self.schedule.sched_data["manual_moves"][0]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.redirect_chain, [(reverse("sched-detail", args=[self.schedule.id]), 302)])
+        self.assertEqual(self.schedule.sched_data["source"], "test")
+        self.assertEqual(self.schedule.sched_data["version"], 1)
+        self.assertEqual(saved_move["source_block_id"], "0:mon_pm1")
+        self.assertEqual(saved_move["source_activity_id"], activity.id)
+        self.assertEqual(saved_move["source_activity_name"], activity.course_name)
+        self.assertEqual(saved_move["source_occurrence_id"], "occurrence:0:mon_pm1")
+        self.assertEqual(saved_move["source_group_index"], 0)
+        self.assertEqual(saved_move["source_slot_key"], "mon_pm1")
+        self.assertEqual(saved_move["target_group_index"], 0)
+        self.assertEqual(saved_move["target_slot_key"], "tue_am1")
+        self.assertEqual(saved_move["move_type"], "single_block")
+        self.assertEqual(saved_move["status"], "active")
+        self.assertContains(response, "Move saved as a manual override.")
+        self.assertContains(response, "Saved overrides are not yet applied to schedule rendering.")
+
+    def test_successful_save_uses_prg_and_refresh_does_not_resubmit(self):
+        activity = Course.objects.create(course_name="PRG Saved Move", abriviation="PSM", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            post_response = self.client.post(
+                reverse("sched-move-save", args=[self.schedule.id]),
+                self.move_post_data(activity),
+            )
+            first_get = self.client.get(post_response["Location"])
+            refreshed_get = self.client.get(post_response["Location"])
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(post_response.status_code, 302)
+        self.assertEqual(post_response["Location"], reverse("sched-detail", args=[self.schedule.id]))
+        self.assertContains(first_get, "Move saved as a manual override.")
+        self.assertNotContains(refreshed_get, "Move saved as a manual override.")
+        self.assertEqual(len(self.schedule.sched_data["manual_moves"]), 1)
+
+    def test_first_save_endpoint_initializes_none_sched_data_cleanly(self):
+        activity = Course.objects.create(course_name="First Saved Endpoint Move", abriviation="FSEM", course_len=1)
+        self.schedule.sched_data = None
+        self.schedule.save(update_fields=["sched_data"])
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.post(
+                reverse("sched-move-save", args=[self.schedule.id]),
+                self.move_post_data(activity),
+                follow=True,
+            )
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(self.schedule.sched_data["version"], 1)
+        self.assertEqual(len(self.schedule.sched_data["manual_moves"]), 1)
+        self.assertContains(response, "Move saved as a manual override.")
+
+    def test_save_endpoint_reports_malformed_sched_data_without_overwrite(self):
+        activity = Course.objects.create(course_name="Malformed Save Data", abriviation="MSD", course_len=1)
+        self.schedule.sched_data = ["existing"]
+        self.schedule.save(update_fields=["sched_data"])
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.post(
+                reverse("sched-move-save", args=[self.schedule.id]),
+                self.move_post_data(activity),
+                follow=True,
+            )
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(self.schedule.sched_data, ["existing"])
+        self.assertTrue(response.redirect_chain)
+        self.assertContains(response, "operational data is not a JSON object")
+        self.assertContains(response, "Existing schedule data was left unchanged")
+
+    def test_save_move_endpoint_rejects_stale_proposal(self):
+        selected_activity = Course.objects.create(course_name="Originally Selected", abriviation="OS", course_len=1)
+        regenerated_activity = Course.objects.create(course_name="Regenerated Activity", abriviation="RA", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [regenerated_activity.course_name],
+            "tue_am1": ["empty"],
+        }
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.post(
+                reverse("sched-move-save", args=[self.schedule.id]),
+                self.move_post_data(selected_activity),
+                follow=True,
+            )
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(response.context["proposal_result"]["error"], "source_identity_mismatch")
+        self.assertEqual(self.schedule.sched_data, {"source": "test"})
+        self.assertContains(response, "Move was not saved because the source proposal is invalid or stale.")
+
+    def test_save_move_endpoint_rejects_unsaveable_proposal(self):
+        activity = Course.objects.create(course_name="Unsaveable Endpoint Move", abriviation="UEM", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["g_box"],
+        }
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.post(
+                reverse("sched-move-save", args=[self.schedule.id]),
+                self.move_post_data(activity),
+                follow=True,
+            )
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(response.context["proposal_result"]["error"], "target_unavailable")
+        self.assertFalse(response.context["save_readiness"]["can_save"])
+        self.assertEqual(self.schedule.sched_data, {"source": "test"})
+
+    def test_occupied_target_warning_proposal_renders_and_persists(self):
+        source = Course.objects.create(course_name="Rendered Overlap Source", abriviation="ROS", course_len=1)
+        target = Course.objects.create(course_name="Rendered Overlap Target", abriviation="ROT", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [source.course_name],
+            "mon_pm2": [target.course_name],
+        }
+        post_data = self.move_post_data(source, target_slot="mon_pm2")
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            confirm_response = self.client.post(
+                reverse("sched-move-confirm", args=[self.schedule.id]),
+                post_data,
+                follow=True,
+            )
+            save_response = self.client.post(
+                reverse("sched-move-save", args=[self.schedule.id]),
+                post_data,
+                follow=True,
+            )
+
+        self.schedule.refresh_from_db()
+        duplicate = next(
+            conflict
+            for conflict in confirm_response.context["conflict_summaries"]
+            if conflict["type"] == "duplicate_group_slot"
+        )
+        self.assertTrue(confirm_response.context["proposal_result"]["applied"])
+        self.assertTrue(confirm_response.context["proposal_result"]["target_was_occupied"])
+        self.assertTrue(confirm_response.context["save_readiness"]["can_save"])
+        self.assertEqual(confirm_response.context["save_readiness"]["blocking_conflicts"], [])
+        self.assertEqual(confirm_response.context["save_readiness"]["warning_conflicts"][0]["type"], "duplicate_group_slot")
+        self.assertEqual(duplicate["severity"], "warning")
+        self.assertContains(confirm_response, source.course_name)
+        self.assertContains(confirm_response, target.course_name)
+        self.assertContains(confirm_response, "(proposed overlap)")
+        self.assertContains(confirm_response, "Overlap Warning")
+        self.assertContains(confirm_response, "This proposed move would save with warnings.")
+        self.assertContains(confirm_response, 'class="alert alert-warning mb-3"', html=False)
+        self.assertContains(save_response, "Move saved as a manual override.")
+        self.assertEqual(self.schedule.sched_data["manual_moves"][0]["target_slot_key"], "mon_pm2")
+
+    def test_save_move_endpoint_rejects_invalid_and_multi_block_proposals(self):
+        one_block = Course.objects.create(course_name="Save One Block", abriviation="SOB", course_len=1)
+        multi_block = Course.objects.create(course_name="Save Multi Block", abriviation="SMB", course_len=2)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [one_block.course_name],
+            "tue_am1": [multi_block.course_name],
+            "tue_am2": [multi_block.course_name],
+            "wed_am1": ["empty"],
+        }
+        cases = [
+            (
+                {
+                    **self.move_post_data(multi_block, source_block="invalid", target_slot="wed_am1"),
+                },
+                "invalid_source",
+            ),
+            (
+                self.move_post_data(multi_block, source_block="0:tue_am1", target_slot="wed_am1"),
+                "multi_block_not_supported",
+            ),
+            (
+                self.move_post_data(one_block, target_slot="invalid"),
+                "invalid_target_slot",
+            ),
+        ]
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            for post_data, expected_error in cases:
+                with self.subTest(expected_error):
+                    response = self.client.post(
+                        reverse("sched-move-save", args=[self.schedule.id]),
+                        post_data,
+                        follow=True,
+                    )
+                    self.assertEqual(response.context["proposal_result"]["error"], expected_error)
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(self.schedule.sched_data, {"source": "test"})
+
+    def test_save_move_endpoint_appends_multiple_moves(self):
+        activity = Course.objects.create(course_name="Multiple Saved Moves", abriviation="MSM", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+            "wed_am1": ["empty"],
+        }
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            first_response = self.client.post(
+                reverse("sched-move-save", args=[self.schedule.id]),
+                self.move_post_data(activity, target_slot="tue_am1"),
+                follow=True,
+            )
+            second_response = self.client.post(
+                reverse("sched-move-save", args=[self.schedule.id]),
+                self.move_post_data(activity, target_slot="wed_am1"),
+                follow=True,
+            )
+
+        self.schedule.refresh_from_db()
+        self.assertContains(first_response, "Move saved as a manual override.")
+        self.assertContains(second_response, "Move saved as a manual override.")
+        self.assertEqual(
+            [move["target_slot_key"] for move in self.schedule.sched_data["manual_moves"]],
+            ["tue_am1", "wed_am1"],
+        )
+
+    def test_saved_move_does_not_change_schedule_rendering_on_reload(self):
+        activity = Course.objects.create(course_name="Saved But Unapplied", abriviation="SBU", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            save_response = self.client.post(
+                reverse("sched-move-save", args=[self.schedule.id]),
+                self.move_post_data(activity),
+                follow=True,
+            )
+            reload_response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
+
+        self.assertContains(save_response, "Move saved as a manual override.")
+        self.assertEqual(reload_response.context["schedule_rows"][0]["cells"][0]["raw_value"], activity.course_name)
+        self.assertEqual(reload_response.context["schedule_rows"][0]["cells"][3]["raw_value"], "empty")
+        self.assertIsNone(reload_response.context["proposal_result"])
+        self.assertEqual(generated_schedule["mon_pm1"], [activity.course_name])
+        self.assertEqual(generated_schedule["tue_am1"], ["empty"])
+
+    def move_post_data(self, activity, source_block="0:mon_pm1", target_slot="tue_am1"):
+        return {
+            "source_block": source_block,
+            "source_activity_id": activity.id,
+            "source_activity_name": activity.course_name,
+            "source_occurrence_id": f"occurrence:{source_block}",
+            "target_slot": target_slot,
+            "target_group": "0",
+            "can_save": "manipulated-client-value",
+        }
+
+    def test_selecting_first_half_of_multi_block_occurrence_highlights_both_cells(self):
+        activity = Course.objects.create(course_name="Selectable Two Block", abriviation="S2B", course_len=2)
+        generated_schedule = {
+            "ags": ["Selectable School 0"],
+            "tue_am1": [activity.course_name],
+            "tue_am2": [activity.course_name],
+        }
+        url = f'{reverse("sched-detail", args=[self.schedule.id])}?selected_block=0:tue_am1'
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.get(url)
+
+        selected_block = response.context["selected_block"]
+        first_block, second_block = response.context["schedule_rows"][0]["cells"][3:5]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(selected_block["block_id"], "0:tue_am1")
+        self.assertEqual(selected_block["occurrence_id"], "occurrence:0:tue_am1")
+        self.assertEqual(response.context["selected_occurrence_id"], selected_block["occurrence_id"])
+        self.assertEqual(first_block["occurrence_id"], second_block["occurrence_id"])
+        self.assertEqual(selected_block["occurrence_length"], 2)
+        self.assertEqual(selected_block["occurrence_position"], 1)
+        self.assertTrue(selected_block["is_multi_block"])
+        self.assertContains(response, '<td class="table-primary">', count=2, html=False)
+
+    def test_selecting_second_half_of_multi_block_occurrence_highlights_both_cells_and_shows_metadata(self):
+        activity = Course.objects.create(course_name="Selectable Two Block", abriviation="S2B", course_len=2)
+        generated_schedule = {
+            "ags": ["Selectable School 0"],
+            "tue_am1": [activity.course_name],
+            "tue_am2": [activity.course_name],
+        }
+        url = f'{reverse("sched-detail", args=[self.schedule.id])}?selected_block=0:tue_am2'
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.get(url)
+
+        selected_block = response.context["selected_block"]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(selected_block["block_id"], "0:tue_am2")
+        self.assertEqual(response.context["selected_occurrence_id"], "occurrence:0:tue_am1")
+        self.assertContains(response, '<td class="table-primary">', count=2, html=False)
+        self.assertContains(response, "Multi-block activity occurrence")
+        self.assertContains(response, "Occurrence Length")
+        self.assertContains(response, "2 blocks")
+        self.assertContains(response, "Selected Position")
+        self.assertContains(response, "Block 2 of 2")
+        self.assertNotContains(response, "Preview Move")
+        self.assertContains(response, "Multi-block activity move proposals are not supported yet.")
+
+    def test_schedule_detail_does_not_make_empty_or_unavailable_cells_selectable(self):
+        generated_schedule = {
+            "ags": ["Selectable School 0"],
+            "mon_pm1": ["empty"],
+            "mon_pm2": ["g_box"],
+        }
+
+        for block_id in ("0:mon_pm1", "0:mon_pm2"):
+            with self.subTest(block_id=block_id):
+                url = f'{reverse("sched-detail", args=[self.schedule.id])}?selected_block={block_id}'
+                with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+                    create_sched.return_value = generated_schedule
+                    response = self.client.get(url)
+
+                self.assertEqual(response.status_code, 200)
+                self.assertIsNone(response.context["selected_block"])
+                self.assertIsNone(response.context["selected_occurrence_id"])
+                self.assertNotContains(response, "Selected Activity Block")
+                self.assertNotContains(response, f'?selected_block={block_id.replace(":", "%3A")}')
+
+    def test_schedule_detail_ignores_invalid_selected_block_id(self):
+        generated_schedule = {
+            "ags": ["Selectable School 0"],
+            "mon_pm1": ["Selectable Activity"],
+        }
+        url = f'{reverse("sched-detail", args=[self.schedule.id])}?selected_block=invalid'
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.context["selected_block"])
+        self.assertIsNone(response.context["selected_occurrence_id"])
+        self.assertNotContains(response, "Selected Activity Block")
 
     def test_schedule_create_and_update_render_dedicated_form_layout(self):
         for route, args, heading in (
@@ -980,7 +2680,21 @@ class SchoolFormWorkflowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         selected_values = {str(value) for value in response.context["form"]["subject"].value()}
         self.assertEqual(selected_values, {str(self.wm.id), str(self.night_hike.id)})
-        self.assertContains(response, "checked", count=2)
+        self.assertContains(
+            response,
+            f'name="subject" value="{self.wm.id}" id="id_subject_0_0" checked',
+            html=False,
+        )
+        self.assertContains(
+            response,
+            f'name="subject" value="{self.night_hike.id}" id="id_subject_2_0" checked',
+            html=False,
+        )
+        self.assertNotContains(
+            response,
+            f'name="subject" value="{self.archery.id}" id="id_subject_1_0" checked',
+            html=False,
+        )
 
     def test_school_create_saves_subjects_after_instance_has_id(self):
         response = self.client.post(

@@ -1,13 +1,25 @@
 import csv
+from urllib.parse import urlencode
 
+from django.contrib import messages
 from django.shortcuts import get_object_or_404, render
 from .models import Locations, Course, Schools, TheSched
 from .forms import CourseForm, InstructorForm, LocationsForm, SchedForm, SchoolsForm
 from django.http import HttpResponse, HttpResponseRedirect
-from django.urls import reverse_lazy
+from django.urls import reverse, reverse_lazy
 from django.utils.text import slugify
 
 from .school_accounting import school_slot_accounting_summary
+from .schedule_operations import (
+    MOVE_CONFLICT_SEVERITY,
+    SCHEDULE_DAYS,
+    apply_move_proposal,
+    build_schedule_blocks,
+    evaluate_move_proposal_for_save,
+    iter_schedule_blocks,
+    persist_manual_move,
+    validate_schedule_blocks,
+)
 
 def home(request):
     return render(request, 'sched_app_template/home.html', {})
@@ -123,27 +135,6 @@ class SchoolDelete(DeleteView):
     success_url = reverse_lazy('school-list')
     context_object_name = "school"
 
-SCHEDULE_DAYS = [
-    {'name': 'Monday', 'slots': [
-        {'label': 'PM1', 'key': 'mon_pm1'}, {'label': 'PM2', 'key': 'mon_pm2'}, {'label': 'Night', 'key': 'mon_night'},
-    ]},
-    {'name': 'Tuesday', 'slots': [
-        {'label': 'AM1', 'key': 'tue_am1'}, {'label': 'AM2', 'key': 'tue_am2'},
-        {'label': 'PM1', 'key': 'tue_pm1'}, {'label': 'PM2', 'key': 'tue_pm2'}, {'label': 'Night', 'key': 'tue_night'},
-    ]},
-    {'name': 'Wednesday', 'slots': [
-        {'label': 'AM1', 'key': 'wed_am1'}, {'label': 'AM2', 'key': 'wed_am2'},
-        {'label': 'PM1', 'key': 'wed_pm1'}, {'label': 'PM2', 'key': 'wed_pm2'}, {'label': 'Night', 'key': 'wed_night'},
-    ]},
-    {'name': 'Thursday', 'slots': [
-        {'label': 'AM1', 'key': 'thur_am1'}, {'label': 'AM2', 'key': 'thur_am2'},
-        {'label': 'PM1', 'key': 'thur_pm1'}, {'label': 'PM2', 'key': 'thur_pm2'}, {'label': 'Night', 'key': 'thur_night'},
-    ]},
-    {'name': 'Friday', 'slots': [
-        {'label': 'AM1', 'key': 'fri_am1'}, {'label': 'AM2', 'key': 'fri_am2'},
-    ]},
-]
-SCHEDULE_DISPLAY_VALUES = {'g_box': '/////', 'empty': '****'}
 CSV_ACTIVITY_VALUES = {'g_box': 'Unavailable / Not present', 'empty': 'Unassigned'}
 
 
@@ -201,30 +192,198 @@ class SchedDetail(DetailView):
     template_name = 'pay_end/sched_detail.html'
     context_object_name = 'sched'
 
+    def get_move_proposal_input(self):
+        target_slot_key = self.request.GET.get('target_slot')
+        target_group_value = self.request.GET.get('target_group')
+        return {
+            'requested': target_slot_key is not None or target_group_value is not None,
+            'source_block_id': self.request.GET.get('selected_block'),
+            'source_activity_id_value': self.request.GET.get('source_activity_id'),
+            'source_activity_name': self.request.GET.get('source_activity_name'),
+            'source_occurrence_id': self.request.GET.get('source_occurrence_id'),
+            'target_slot_key': target_slot_key,
+            'target_group_value': target_group_value,
+            'recomputed_server_side': self.request.GET.get('proposal_confirmed') == '1',
+        }
+
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         schedule = self.object.create_sched
         schedule_days = SCHEDULE_DAYS
-        display_values = SCHEDULE_DISPLAY_VALUES
-        schedule_rows = []
-        for ag_index, ag in enumerate(schedule.get('ags', [])):
-            cells = []
-            for day in schedule_days:
-                for slot in day['slots']:
-                    slot_values = schedule.get(slot['key'], [])
-                    value = slot_values[ag_index] if ag_index < len(slot_values) else ''
-                    cells.append(display_values.get(value, value))
-            schedule_rows.append({'ag': ag, 'cells': cells})
+        schedule_rows = build_schedule_blocks(schedule)
+        proposal_input = self.get_move_proposal_input()
+        selected_block_id = proposal_input['source_block_id']
+        proposal_result = None
+        if proposal_input['requested']:
+            try:
+                target_group_index = int(proposal_input['target_group_value'])
+            except (TypeError, ValueError):
+                target_group_index = None
+            try:
+                source_activity_id = int(proposal_input['source_activity_id_value'])
+            except (TypeError, ValueError):
+                source_activity_id = None
+            proposal_result = apply_move_proposal(schedule_rows, {
+                'source_block_id': selected_block_id,
+                'source_activity_id': source_activity_id,
+                'source_activity_name': proposal_input['source_activity_name'],
+                'source_occurrence_id': proposal_input['source_occurrence_id'],
+                'target_slot_key': proposal_input['target_slot_key'],
+                'target_group_index': target_group_index,
+            })
+            if proposal_result['applied']:
+                selected_block_id = proposal_result['target_block_id']
+
+        conflict_summaries = validate_schedule_blocks(schedule_rows)
+        save_readiness = None
+        if proposal_result:
+            proposal_result['conflicts'] = conflict_summaries
+            save_readiness = evaluate_move_proposal_for_save(proposal_result)
+        blocks_by_id = {
+            block['block_id']: block
+            for block in iter_schedule_blocks(schedule_rows)
+        }
+        grouped_conflicts = {}
+        for conflict in conflict_summaries:
+            summary_severity = (
+                MOVE_CONFLICT_SEVERITY.get(conflict['type'], conflict['severity'])
+                if proposal_result
+                else conflict['severity']
+            )
+            group_key = (summary_severity, conflict['type'])
+            grouped_conflicts.setdefault(group_key, []).append({
+                **conflict,
+                'related_blocks': [
+                    {
+                        'block_id': block['block_id'],
+                        'group_label': block['group_label'],
+                        'slot_label': block['slot_label'],
+                        'slot_key': block['slot_key'],
+                    }
+                    for block_id in conflict['related_block_ids']
+                    if (block := blocks_by_id.get(block_id))
+                ],
+            })
+        conflict_summary_groups = [
+            {
+                'severity': severity,
+                'type': conflict_type,
+                'conflicts': conflicts,
+            }
+            for (severity, conflict_type), conflicts in grouped_conflicts.items()
+        ]
+        selected_block = next(
+            (
+                block
+                for block in iter_schedule_blocks(schedule_rows)
+                if block['is_activity'] and block['block_id'] == selected_block_id
+            ),
+            None,
+        )
 
         context['selected_schools'] = self.object.schools.order_by('school_name')
         context['schedule_days'] = schedule_days
         context['schedule_rows'] = schedule_rows
+        context['selected_block'] = selected_block
+        context['selected_occurrence_id'] = selected_block['occurrence_id'] if selected_block else None
+        context['proposal_result'] = proposal_result
+        context['save_readiness'] = save_readiness
+        context['proposal_recomputed_server_side'] = proposal_input['recomputed_server_side']
+        context['conflict_summaries'] = conflict_summaries
+        context['conflict_summary_groups'] = conflict_summary_groups
+        context['has_blocking_conflicts'] = any(
+            group['severity'] == 'error'
+            for group in conflict_summary_groups
+        )
         context['generation_diagnostics'] = getattr(self.object, 'generation_diagnostics', [])
         context['generation_blocked'] = bool(context['generation_diagnostics'])
         context['generation_complete'] = getattr(self.object, 'generation_complete', True)
         context['generation_succeeded'] = not context['generation_blocked'] and context['generation_complete']
         context['generation_incomplete'] = not context['generation_blocked'] and not context['generation_complete']
         return context
+
+
+class SchedMoveConfirm(SchedDetail):
+    http_method_names = ['post']
+
+    def get_move_proposal_input(self):
+        return {
+            'requested': True,
+            'source_block_id': self.request.POST.get('source_block'),
+            'source_activity_id_value': self.request.POST.get('source_activity_id'),
+            'source_activity_name': self.request.POST.get('source_activity_name'),
+            'source_occurrence_id': self.request.POST.get('source_occurrence_id'),
+            'target_slot_key': self.request.POST.get('target_slot'),
+            'target_group_value': self.request.POST.get('target_group'),
+            'recomputed_server_side': True,
+        }
+
+    def post(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        context = self.get_context_data(object=self.object)
+        proposal_result = context['proposal_result']
+        save_readiness = context['save_readiness']
+        if proposal_result and proposal_result.get('applied'):
+            if save_readiness and save_readiness['warning_conflicts']:
+                messages.warning(
+                    request,
+                    'Proposal confirmed server-side with operational warnings. Review before saving.',
+                )
+            else:
+                messages.success(request, 'Proposal confirmed server-side and is ready to save.')
+        else:
+            messages.error(
+                request,
+                proposal_result['message'] if proposal_result else 'Move proposal could not be confirmed.',
+            )
+        return HttpResponseRedirect(self.get_proposal_redirect_url(confirmed=True))
+
+    def get_proposal_redirect_url(self, confirmed=False):
+        query = {
+            'selected_block': self.request.POST.get('source_block', ''),
+            'source_activity_id': self.request.POST.get('source_activity_id', ''),
+            'source_activity_name': self.request.POST.get('source_activity_name', ''),
+            'source_occurrence_id': self.request.POST.get('source_occurrence_id', ''),
+            'target_slot': self.request.POST.get('target_slot', ''),
+            'target_group': self.request.POST.get('target_group', ''),
+        }
+        if confirmed:
+            query['proposal_confirmed'] = '1'
+        return f'{reverse("sched-detail", args=[self.object.pk])}?{urlencode(query)}'
+
+
+class SchedMoveSave(SchedMoveConfirm):
+    def post(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        context = self.get_context_data(object=self.object)
+        proposal_result = context['proposal_result']
+        save_readiness = context['save_readiness']
+
+        if not proposal_result or not proposal_result.get('source_identity_verified'):
+            messages.error(
+                request,
+                'Move was not saved because the source proposal is invalid or stale.'
+            )
+        elif not save_readiness or not save_readiness['can_save']:
+            messages.error(
+                request,
+                'Move was not saved because the recomputed proposal is not saveable.'
+            )
+        else:
+            try:
+                persist_manual_move(self.object, proposal_result)
+            except ValueError as error:
+                messages.error(request, f'Move was not saved: {error}')
+            else:
+                messages.success(
+                    request,
+                    'Move saved as a manual override. Saved overrides are not yet applied '
+                    'to schedule rendering.',
+                )
+                return HttpResponseRedirect(reverse('sched-detail', args=[self.object.pk]))
+
+        return HttpResponseRedirect(self.get_proposal_redirect_url(confirmed=True))
+
 
 class SchedCreate(CreateView):
     model = TheSched
@@ -326,4 +485,3 @@ def search_results(request):
     
     else:    
         return render(request, 'pay_end/search_results.html',{})
-
