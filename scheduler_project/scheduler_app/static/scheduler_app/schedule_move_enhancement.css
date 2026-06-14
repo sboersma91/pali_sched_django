@@ -3,6 +3,17 @@
   box-shadow: inset 0 0 0 4px #0d6efd;
 }
 
+.schedule-drag-active .schedule-cell-selected {
+  cursor: grabbing;
+  opacity: 0.75;
+  transform: scale(0.98);
+  user-select: none;
+}
+
+.schedule-drag-active .schedule-cell-valid-destination {
+  user-select: none;
+}
+
 .schedule-cell-valid-destination {
   background-color: #d1e7dd !important;
   box-shadow: inset 0 0 0 3px #198754;

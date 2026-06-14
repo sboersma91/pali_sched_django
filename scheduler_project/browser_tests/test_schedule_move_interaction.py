@@ -1,15 +1,20 @@
-from unittest import SkipTest
+from importlib.util import find_spec
+from unittest import SkipTest, skipUnless
 
 from django.contrib.staticfiles.testing import StaticLiveServerTestCase
 from django.urls import reverse
-from playwright.sync_api import Error as PlaywrightError
-from playwright.sync_api import sync_playwright
+
+PLAYWRIGHT_AVAILABLE = find_spec("playwright") is not None
+if PLAYWRIGHT_AVAILABLE:
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import sync_playwright
 
 from scheduler_app.models import TheSched
 from scheduler_app.schedule_blocks import SCHEDULE_BLOCK_KEYS
 from scheduler_app.schedule_cells import generated_schedule_cell
 
 
+@skipUnless(PLAYWRIGHT_AVAILABLE, "Install requirements-dev.txt to run Playwright browser tests.")
 class ScheduleMoveInteractionTests(StaticLiveServerTestCase):
     @classmethod
     def setUpClass(cls):
@@ -78,6 +83,11 @@ class ScheduleMoveInteractionTests(StaticLiveServerTestCase):
     def select_assignment(self):
         self.cell("mon_pm2").locator("div").first.click()
 
+    def pointer_position(self, block_key, assignment_content=False):
+        locator = self.cell(block_key).locator("div").first if assignment_content else self.cell(block_key)
+        box = locator.bounding_box()
+        return box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+
     def test_selects_linked_assignment_and_only_approved_destinations(self):
         self.select_assignment()
 
@@ -129,3 +139,46 @@ class ScheduleMoveInteractionTests(StaticLiveServerTestCase):
 
         self.page.get_by_text("Schedule move saved.").wait_for()
         self.assertEqual(self.cell("tue_am1").get_attribute("data-assignment-id"), "assignment-1")
+
+    def test_pointer_drag_activates_only_after_threshold(self):
+        source_x, source_y = self.pointer_position("mon_pm2", assignment_content=True)
+        self.page.mouse.move(source_x, source_y)
+        self.page.mouse.down()
+        self.page.mouse.move(source_x + 4, source_y + 4)
+
+        self.assertEqual(self.page.locator(".schedule-drag-active").count(), 0)
+        self.assertEqual(self.page.locator(".schedule-cell-selected").count(), 0)
+
+        self.page.mouse.move(source_x + 12, source_y + 12)
+        self.assertEqual(self.page.locator(".schedule-drag-active").count(), 1)
+        self.assertEqual(self.page.locator(".schedule-cell-selected").count(), 2)
+        self.assertEqual(self.page.locator(".schedule-cell-valid-destination").count(), 2)
+        self.page.mouse.up()
+
+    def test_pointer_drag_to_valid_destination_submits_existing_move(self):
+        source_x, source_y = self.pointer_position("mon_pm2", assignment_content=True)
+        destination_x, destination_y = self.pointer_position("tue_am1")
+
+        self.page.mouse.move(source_x, source_y)
+        self.page.mouse.down()
+        self.page.mouse.move(destination_x, destination_y, steps=5)
+        self.page.mouse.up()
+
+        self.page.get_by_text("Schedule move saved.").wait_for()
+        self.assertEqual(self.cell("tue_am1").get_attribute("data-assignment-id"), "assignment-1")
+        self.assertEqual(self.cell("tue_am2").get_attribute("data-assignment-id"), "assignment-1")
+
+    def test_pointer_drag_to_invalid_destination_cancels(self):
+        source_x, source_y = self.pointer_position("mon_pm2", assignment_content=True)
+        invalid_x, invalid_y = self.pointer_position("tue_pm1")
+
+        self.page.mouse.move(source_x, source_y)
+        self.page.mouse.down()
+        self.page.mouse.move(invalid_x, invalid_y, steps=5)
+        self.assertEqual(self.page.locator(".schedule-drag-active").count(), 1)
+        self.page.mouse.up()
+
+        self.assertEqual(self.page.locator(".schedule-drag-active").count(), 0)
+        self.assertEqual(self.page.locator(".schedule-cell-selected").count(), 0)
+        self.assertEqual(self.page.locator(".schedule-cell-valid-destination").count(), 0)
+        self.assertIn("schedule_detail", self.page.url)

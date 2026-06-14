@@ -9,8 +9,12 @@
   const selectionStatus = schedule.querySelector("[data-schedule-move-selection-status]");
   const selectionMessage = schedule.querySelector("[data-schedule-move-selection-message]");
   const cancelButton = schedule.querySelector("[data-schedule-move-cancel]");
+  const dragThreshold = 8;
   let selectedForm = null;
   let selectedAssignmentId = null;
+  let pendingDrag = null;
+  let dragActive = false;
+  let suppressClick = false;
 
   function scheduleCells() {
     return schedule.querySelectorAll("[data-schedule-cell]");
@@ -24,6 +28,7 @@
       cell.removeAttribute("aria-label");
     });
     selectionStatus.hidden = true;
+    schedule.classList.remove("schedule-drag-active");
     selectedForm = null;
     selectedAssignmentId = null;
   }
@@ -34,6 +39,20 @@
     return Array.from(scheduleCells()).find(function (cell) {
       return cell.dataset.blockKey === block && cell.dataset.rowIndex === row;
     });
+  }
+
+  function moveFormForCell(cell) {
+    const assignmentId = cell.dataset.assignmentId;
+    const linkedCellWithForm = Array.from(scheduleCells()).find(function (candidate) {
+      return (
+        assignmentId &&
+        candidate.dataset.assignmentId === assignmentId &&
+        candidate.querySelector("[data-schedule-move-form]")
+      );
+    });
+    return cell.querySelector("[data-schedule-move-form]") || (
+      linkedCellWithForm && linkedCellWithForm.querySelector("[data-schedule-move-form]")
+    );
   }
 
   function selectAssignment(form) {
@@ -79,6 +98,13 @@
   }
 
   schedule.addEventListener("click", function (event) {
+    if (suppressClick) {
+      suppressClick = false;
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
     const clickedCell = event.target.closest("[data-schedule-cell]");
     if (!clickedCell || !schedule.contains(clickedCell)) {
       clearSelection();
@@ -99,19 +125,82 @@
       return;
     }
 
-    const linkedCellWithForm = Array.from(scheduleCells()).find(function (cell) {
-      return (
-        assignmentId &&
-        cell.dataset.assignmentId === assignmentId &&
-        cell.querySelector("[data-schedule-move-form]")
-      );
-    });
-    const form = clickedCell.querySelector("[data-schedule-move-form]") || (
-      linkedCellWithForm && linkedCellWithForm.querySelector("[data-schedule-move-form]")
-    );
+    const form = moveFormForCell(clickedCell);
     if (form) {
       selectAssignment(form);
     } else {
+      clearSelection();
+    }
+  });
+
+  schedule.addEventListener("pointerdown", function (event) {
+    const sourceCell = event.target.closest("[data-schedule-cell]");
+    if (
+      event.button !== 0 ||
+      !sourceCell ||
+      event.target.closest("form, details, summary, button, select, option, label, input")
+    ) {
+      return;
+    }
+
+    const form = moveFormForCell(sourceCell);
+    if (form) {
+      pendingDrag = {
+        form: form,
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+      };
+    }
+  });
+
+  document.addEventListener("pointermove", function (event) {
+    if (!pendingDrag || pendingDrag.pointerId !== event.pointerId) {
+      return;
+    }
+    if (dragActive) {
+      event.preventDefault();
+      return;
+    }
+
+    const distance = Math.hypot(
+      event.clientX - pendingDrag.startX,
+      event.clientY - pendingDrag.startY
+    );
+    if (distance >= dragThreshold) {
+      dragActive = true;
+      selectAssignment(pendingDrag.form);
+      schedule.classList.add("schedule-drag-active");
+      selectionMessage.textContent = "Drag active. Release over a highlighted destination.";
+      event.preventDefault();
+    }
+  });
+
+  function finishDrag(event) {
+    if (!pendingDrag || pendingDrag.pointerId !== event.pointerId) {
+      return;
+    }
+
+    if (dragActive) {
+      const target = document.elementFromPoint(event.clientX, event.clientY);
+      const destination = target && target.closest(".schedule-cell-valid-destination");
+      suppressClick = true;
+      window.setTimeout(function () {
+        suppressClick = false;
+      }, 0);
+      if (!destination || !submitDestination(destination)) {
+        clearSelection();
+      }
+    }
+    pendingDrag = null;
+    dragActive = false;
+  }
+
+  document.addEventListener("pointerup", finishDrag);
+  document.addEventListener("pointercancel", function (event) {
+    if (pendingDrag && pendingDrag.pointerId === event.pointerId) {
+      pendingDrag = null;
+      dragActive = false;
       clearSelection();
     }
   });
@@ -134,6 +223,8 @@
 
   document.addEventListener("keydown", function (event) {
     if (event.key === "Escape") {
+      pendingDrag = null;
+      dragActive = false;
       clearSelection();
     }
   });
