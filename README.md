@@ -108,7 +108,19 @@ python3 manage.py check
 python3 manage.py test
 ```
 
-Current automated coverage is intentionally minimal: a **5-test smoke suite** focused on URL config importability, URL reversing, and Django check command execution.
+### Browser interaction tests
+
+The focused Playwright suite exercises the progressive schedule-move interaction in a
+real browser while continuing to submit the existing server-rendered move form.
+
+```bash
+# from the repository root
+python3 -m pip install -r requirements-dev.txt
+python3 -m playwright install chromium
+
+# from scheduler_project/
+python3 manage.py test browser_tests
+```
 
 ---
 
