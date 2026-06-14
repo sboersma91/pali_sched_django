@@ -334,6 +334,10 @@ class SchedDetail(DetailView):
                                 destinations.append({
                                     'key': destination['key'],
                                     'label': f"{destination['day']} {destination['label']}",
+                                    'cell_keys': ','.join(
+                                        f"{cell['block_key']}:{cell['row_index']}"
+                                        for cell in validation['destination_cells']
+                                    ),
                                 })
                     cells.append({
                         'display': display_values.get(activity_name, activity_name),
@@ -341,6 +345,11 @@ class SchedDetail(DetailView):
                         'row_index': ag_index,
                         'state': cell_state,
                         'destinations': destinations,
+                        'show_no_destinations': (
+                            isinstance(value, dict)
+                            and (not is_linked or assignment_part == 1)
+                            and not destinations
+                        ),
                         'is_linked': is_linked,
                         'assignment_id': value.get('assignment_id') if isinstance(value, dict) else '',
                         'assignment_part': assignment_part,
@@ -459,4 +468,3 @@ def search_results(request):
     
     else:    
         return render(request, 'pay_end/search_results.html',{})
-
