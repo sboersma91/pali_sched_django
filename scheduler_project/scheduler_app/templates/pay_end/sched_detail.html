@@ -1,5 +1,9 @@
 {% extends 'pay_end/base_pay.html' %}
+{% load static %}
 {% block title %}{{ sched.sched_name }}{% endblock title %}
+{% block extra_head %}
+  <link rel="stylesheet" href="{% static 'scheduler_app/schedule_move_enhancement.css' %}">
+{% endblock extra_head %}
 {% block content %}
   <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-4 mb-3">
     <div>
@@ -93,6 +97,11 @@
         <span><code>/////</code> = unavailable or not present</span>
         <span><code>****</code> = unassigned available block</span>
       </div>
+      <div class="alert alert-primary mt-3 mb-0 schedule-move-selection-status" role="status"
+           data-schedule-move-selection-status hidden>
+        <span data-schedule-move-selection-message>Move selection active. Choose a highlighted destination.</span>
+        <button type="button" class="btn btn-sm btn-outline-primary ms-2" data-schedule-move-cancel>Cancel selection</button>
+      </div>
     </div>
     <div class="table-responsive">
       <table class="table table-bordered table-sm align-middle text-center schedule-table">
@@ -146,6 +155,8 @@
                         <button type="submit" class="btn btn-sm btn-primary">Move assignment</button>
                       </form>
                     </details>
+                  {% elif cell.show_no_destinations %}
+                    <small class="text-muted no-valid-destinations">No valid destinations</small>
                   {% endif %}
                 </td>
               {% endfor %}
@@ -161,3 +172,6 @@
   </section>
   {% endif %}
 {% endblock %}
+{% block extra_scripts %}
+  <script src="{% static 'scheduler_app/schedule_move_enhancement.js' %}" defer></script>
+{% endblock extra_scripts %}
