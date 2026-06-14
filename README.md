@@ -98,28 +98,58 @@ Then open:
 
 ## 5) Run checks/tests
 
-From `scheduler_project/`:
+### Test execution contract
+
+The backend and browser suites are intentionally separate:
+
+- **Backend tests are required.** They do not require Playwright or Chromium.
+- **Browser interaction tests are optional.** The runner clearly reports `SKIPPED`
+  and exits successfully when Playwright or Chromium is unavailable.
+- **All available tests** always run the backend suite, then run the browser suite
+  when the browser prerequisites are available.
+
+From the repository root:
 
 ```bash
-# framework/system checks
-python3 manage.py check
+# required backend-only suite
+./scripts/test_backend.sh
 
-# run test suite
-python3 manage.py test
+# optional Playwright interaction suite
+./scripts/test_browser.sh
+
+# required backend suite plus browser tests when available
+./scripts/test_all_available.sh
 ```
 
-### Browser interaction tests
+The focused Playwright suite exercises progressive schedule movement in a real
+browser while continuing to submit the existing server-rendered move form.
 
-The focused Playwright suite exercises the progressive schedule-move interaction in a
-real browser while continuing to submit the existing server-rendered move form.
+### Install browser-test prerequisites locally
 
 ```bash
-# from the repository root
 python3 -m pip install -r requirements-dev.txt
 python3 -m playwright install chromium
+./scripts/test_browser.sh
+```
 
-# from scheduler_project/
-python3 manage.py test browser_tests
+For Linux CI images that need Playwright system packages, use:
+
+```bash
+python3 -m pip install -r requirements-dev.txt
+python3 -m playwright install --with-deps chromium
+REQUIRE_BROWSER_TESTS=1 ./scripts/test_browser.sh
+```
+
+`REQUIRE_BROWSER_TESTS=1` turns an unavailable-browser skip into a clear failure
+for CI jobs where the browser suite is expected to execute.
+
+The underlying Django commands remain available when needed:
+
+```bash
+cd scheduler_project
+python3 manage.py check
+python3 manage.py test scheduler_app members  # backend only
+python3 manage.py test browser_tests           # browser suite
 ```
 
 ---
