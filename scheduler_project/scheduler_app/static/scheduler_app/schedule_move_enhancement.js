@@ -9,12 +9,14 @@
   const selectionStatus = schedule.querySelector("[data-schedule-move-selection-status]");
   const selectionMessage = schedule.querySelector("[data-schedule-move-selection-message]");
   const cancelButton = schedule.querySelector("[data-schedule-move-cancel]");
-  const dragThreshold = 8;
+  const mouseDragThreshold = 8;
+  const touchDragThreshold = 16;
+  const touchHoldDelay = 300;
   let selectedForm = null;
   let selectedAssignmentId = null;
   let pendingDrag = null;
   let dragActive = false;
-  let suppressClick = false;
+  let suppressClickUntil = 0;
 
   function scheduleCells() {
     return schedule.querySelectorAll("[data-schedule-cell]");
@@ -31,6 +33,24 @@
     schedule.classList.remove("schedule-drag-active");
     selectedForm = null;
     selectedAssignmentId = null;
+  }
+
+  function suppressClicksBriefly() {
+    suppressClickUntil = Date.now() + 500;
+  }
+
+  function cancelPointerInteraction(suppressClick) {
+    if (pendingDrag && pendingDrag.sourceCell.hasPointerCapture(pendingDrag.pointerId)) {
+      pendingDrag.sourceCell.releasePointerCapture(pendingDrag.pointerId);
+    }
+    pendingDrag = null;
+    if (dragActive) {
+      dragActive = false;
+      clearSelection();
+    }
+    if (suppressClick) {
+      suppressClicksBriefly();
+    }
   }
 
   function destinationCell(option) {
@@ -98,8 +118,7 @@
   }
 
   schedule.addEventListener("click", function (event) {
-    if (suppressClick) {
-      suppressClick = false;
+    if (Date.now() < suppressClickUntil) {
       event.preventDefault();
       event.stopPropagation();
       return;
@@ -148,8 +167,11 @@
       pendingDrag = {
         form: form,
         pointerId: event.pointerId,
+        pointerType: event.pointerType,
+        sourceCell: sourceCell,
         startX: event.clientX,
         startY: event.clientY,
+        readyAt: event.pointerType === "touch" ? performance.now() + touchHoldDelay : 0,
       };
     }
   });
@@ -167,9 +189,17 @@
       event.clientX - pendingDrag.startX,
       event.clientY - pendingDrag.startY
     );
-    if (distance >= dragThreshold) {
+    const threshold = pendingDrag.pointerType === "touch" ? touchDragThreshold : mouseDragThreshold;
+    if (pendingDrag.pointerType === "touch" && performance.now() < pendingDrag.readyAt) {
+      if (distance >= threshold) {
+        cancelPointerInteraction(true);
+      }
+      return;
+    }
+    if (distance >= threshold) {
       dragActive = true;
       selectAssignment(pendingDrag.form);
+      pendingDrag.sourceCell.setPointerCapture(pendingDrag.pointerId);
       schedule.classList.add("schedule-drag-active");
       selectionMessage.textContent = "Drag active. Release over a highlighted destination.";
       event.preventDefault();
@@ -184,13 +214,13 @@
     if (dragActive) {
       const target = document.elementFromPoint(event.clientX, event.clientY);
       const destination = target && target.closest(".schedule-cell-valid-destination");
-      suppressClick = true;
-      window.setTimeout(function () {
-        suppressClick = false;
-      }, 0);
+      suppressClicksBriefly();
       if (!destination || !submitDestination(destination)) {
         clearSelection();
       }
+    }
+    if (pendingDrag.sourceCell.hasPointerCapture(pendingDrag.pointerId)) {
+      pendingDrag.sourceCell.releasePointerCapture(pendingDrag.pointerId);
     }
     pendingDrag = null;
     dragActive = false;
@@ -199,11 +229,15 @@
   document.addEventListener("pointerup", finishDrag);
   document.addEventListener("pointercancel", function (event) {
     if (pendingDrag && pendingDrag.pointerId === event.pointerId) {
-      pendingDrag = null;
-      dragActive = false;
-      clearSelection();
+      cancelPointerInteraction(true);
     }
   });
+
+  document.addEventListener("scroll", function () {
+    if (pendingDrag) {
+      cancelPointerInteraction(true);
+    }
+  }, true);
 
   schedule.addEventListener("keydown", function (event) {
     const destination = event.target.closest(".schedule-cell-valid-destination");
@@ -223,8 +257,7 @@
 
   document.addEventListener("keydown", function (event) {
     if (event.key === "Escape") {
-      pendingDrag = null;
-      dragActive = false;
+      cancelPointerInteraction(true);
       clearSelection();
     }
   });

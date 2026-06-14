@@ -182,3 +182,50 @@ class ScheduleMoveInteractionTests(StaticLiveServerTestCase):
         self.assertEqual(self.page.locator(".schedule-cell-selected").count(), 0)
         self.assertEqual(self.page.locator(".schedule-cell-valid-destination").count(), 0)
         self.assertIn("schedule_detail", self.page.url)
+
+    def test_scroll_cancels_pending_drag_without_selecting(self):
+        source_x, source_y = self.pointer_position("mon_pm2", assignment_content=True)
+        self.page.mouse.move(source_x, source_y)
+        self.page.mouse.down()
+        self.page.evaluate("document.dispatchEvent(new Event('scroll'))")
+        self.page.mouse.up()
+
+        self.assertEqual(self.page.locator(".schedule-drag-active").count(), 0)
+        self.assertEqual(self.page.locator(".schedule-cell-selected").count(), 0)
+
+        self.page.wait_for_timeout(550)
+        self.select_assignment()
+        self.assertEqual(self.page.locator(".schedule-cell-selected").count(), 2)
+
+    def test_scroll_cancels_active_drag(self):
+        source_x, source_y = self.pointer_position("mon_pm2", assignment_content=True)
+        self.page.mouse.move(source_x, source_y)
+        self.page.mouse.down()
+        self.page.mouse.move(source_x + 12, source_y + 12)
+        self.assertEqual(self.page.locator(".schedule-drag-active").count(), 1)
+
+        self.page.evaluate("document.dispatchEvent(new Event('scroll'))")
+        self.page.mouse.up()
+
+        self.assertEqual(self.page.locator(".schedule-drag-active").count(), 0)
+        self.assertEqual(self.page.locator(".schedule-cell-selected").count(), 0)
+
+    def test_pointer_cancel_clears_active_drag(self):
+        source_x, source_y = self.pointer_position("mon_pm2", assignment_content=True)
+        self.page.evaluate(
+            "document.addEventListener('pointerdown', "
+            "(event) => window.__testPointerId = event.pointerId, {once: true})"
+        )
+        self.page.mouse.move(source_x, source_y)
+        self.page.mouse.down()
+        self.page.mouse.move(source_x + 12, source_y + 12)
+        self.assertEqual(self.page.locator(".schedule-drag-active").count(), 1)
+
+        self.page.evaluate(
+            "document.dispatchEvent(new PointerEvent('pointercancel', "
+            "{pointerId: window.__testPointerId, pointerType: 'mouse'}))"
+        )
+        self.page.mouse.up()
+
+        self.assertEqual(self.page.locator(".schedule-drag-active").count(), 0)
+        self.assertEqual(self.page.locator(".schedule-cell-selected").count(), 0)
