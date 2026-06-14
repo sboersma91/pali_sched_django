@@ -153,6 +153,27 @@ class ScheduleMoveEndpointTests(TestCase):
         self.assertContains(response, 'data-move-source-row="0"', html=False)
         self.assertContains(response, 'data-valid-destination-block="tue_am1"', html=False)
         self.assertContains(response, 'data-valid-destination-row="0"', html=False)
+        self.assertContains(response, 'data-schedule-move-selection-status', count=1, html=False)
+        self.assertContains(response, 'data-schedule-move-selection-message', count=1, html=False)
+        self.assertContains(response, 'data-schedule-move-cancel', count=1, html=False)
+        self.assertContains(response, 'Cancel selection')
+
+    def test_detail_loads_progressive_move_enhancement_assets(self):
+        self.persist_payload()
+
+        response = self.client.get(self.detail_url)
+
+        self.assertContains(response, 'scheduler_app/schedule_move_enhancement.css')
+        self.assertContains(response, 'scheduler_app/schedule_move_enhancement.js')
+        self.assertContains(response, 'class="schedule-move-form', count=1, html=False)
+
+    def test_structured_assignment_without_destinations_shows_explanation(self):
+        self.persist_payload(self.payload(destination='g_box'))
+
+        response = self.client.get(self.detail_url)
+
+        self.assertContains(response, 'No valid destinations', count=1)
+        self.assertNotContains(response, 'class="schedule-move-form', html=False)
 
     def test_legacy_assignment_cell_exposes_legacy_state_hook(self):
         payload = self.payload()
@@ -182,6 +203,7 @@ class ScheduleMoveEndpointTests(TestCase):
         self.assertContains(response, 'data-schedule-move-form', count=1, html=False)
         self.assertContains(response, 'name="source_block_key" value="mon_pm1"', html=False)
         self.assertNotContains(response, 'name="source_block_key" value="mon_pm2"', html=False)
+        self.assertNotContains(response, 'No valid destinations')
 
     def test_one_block_assignment_and_placeholders_keep_existing_rendering(self):
         self.persist_payload()
