@@ -129,7 +129,10 @@ class ScheduleMoveEndpointTests(TestCase):
         )
 
         self.assertEqual(movable_cell['row_index'], 0)
-        self.assertEqual(movable_cell['destinations'], [{'key': 'tue_am1', 'label': 'Tuesday AM1'}])
+        self.assertEqual(
+            movable_cell['destinations'],
+            [{'key': 'tue_am1', 'label': 'Tuesday AM1', 'cell_keys': 'tue_am1:0'}],
+        )
         self.assertContains(response, 'name="source_row_index" value="0"', html=False)
         self.assertContains(response, 'name="destination_row_index" value="0"', html=False)
 
@@ -153,6 +156,7 @@ class ScheduleMoveEndpointTests(TestCase):
         self.assertContains(response, 'data-move-source-row="0"', html=False)
         self.assertContains(response, 'data-valid-destination-block="tue_am1"', html=False)
         self.assertContains(response, 'data-valid-destination-row="0"', html=False)
+        self.assertContains(response, 'data-valid-destination-cells="tue_am1:0"', html=False)
         self.assertContains(response, 'data-schedule-move-selection-status', count=1, html=False)
         self.assertContains(response, 'data-schedule-move-selection-message', count=1, html=False)
         self.assertContains(response, 'data-schedule-move-cancel', count=1, html=False)
@@ -203,6 +207,7 @@ class ScheduleMoveEndpointTests(TestCase):
         self.assertContains(response, 'data-schedule-move-form', count=1, html=False)
         self.assertContains(response, 'name="source_block_key" value="mon_pm1"', html=False)
         self.assertNotContains(response, 'name="source_block_key" value="mon_pm2"', html=False)
+        self.assertContains(response, 'data-valid-destination-cells="tue_am1:0,tue_am2:0"', html=False)
         self.assertNotContains(response, 'No valid destinations')
 
     def test_one_block_assignment_and_placeholders_keep_existing_rendering(self):

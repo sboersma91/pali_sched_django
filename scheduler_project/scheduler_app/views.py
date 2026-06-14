@@ -334,6 +334,10 @@ class SchedDetail(DetailView):
                                 destinations.append({
                                     'key': destination['key'],
                                     'label': f"{destination['day']} {destination['label']}",
+                                    'cell_keys': ','.join(
+                                        f"{cell['block_key']}:{cell['row_index']}"
+                                        for cell in validation['destination_cells']
+                                    ),
                                 })
                     cells.append({
                         'display': display_values.get(activity_name, activity_name),

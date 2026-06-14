@@ -149,7 +149,7 @@
                         <label class="form-label small" for="move-{{ cell.block_key }}-{{ cell.row_index }}">Destination</label>
                         <select class="form-select form-select-sm mb-2" id="move-{{ cell.block_key }}-{{ cell.row_index }}" name="destination_block_key" required>
                           {% for destination in cell.destinations %}
-                            <option value="{{ destination.key }}" data-valid-destination-block="{{ destination.key }}" data-valid-destination-row="{{ cell.row_index }}">{{ destination.label }}</option>
+                            <option value="{{ destination.key }}" data-valid-destination-block="{{ destination.key }}" data-valid-destination-row="{{ cell.row_index }}" data-valid-destination-cells="{{ destination.cell_keys }}">{{ destination.label }}</option>
                           {% endfor %}
                         </select>
                         <button type="submit" class="btn btn-sm btn-primary">Move assignment</button>

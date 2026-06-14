@@ -17,12 +17,14 @@
   let pendingDrag = null;
   let dragActive = false;
   let suppressClickUntil = 0;
+  let previewedOption = null;
 
   function scheduleCells() {
     return schedule.querySelectorAll("[data-schedule-cell]");
   }
 
   function clearSelection() {
+    clearPreview();
     scheduleCells().forEach(function (cell) {
       cell.classList.remove("schedule-cell-selected", "schedule-cell-valid-destination");
       cell.removeAttribute("tabindex");
@@ -33,6 +35,13 @@
     schedule.classList.remove("schedule-drag-active");
     selectedForm = null;
     selectedAssignmentId = null;
+  }
+
+  function clearPreview() {
+    scheduleCells().forEach(function (cell) {
+      cell.classList.remove("schedule-cell-destination-preview", "schedule-cell-preview-target");
+    });
+    previewedOption = null;
   }
 
   function suppressClicksBriefly() {
@@ -59,6 +68,42 @@
     return Array.from(scheduleCells()).find(function (cell) {
       return cell.dataset.blockKey === block && cell.dataset.rowIndex === row;
     });
+  }
+
+  function destinationCells(option) {
+    return option.dataset.validDestinationCells.split(",").map(function (cellKey) {
+      const parts = cellKey.split(":");
+      return Array.from(scheduleCells()).find(function (cell) {
+        return cell.dataset.blockKey === parts[0] && cell.dataset.rowIndex === parts[1];
+      });
+    }).filter(Boolean);
+  }
+
+  function previewDestination(destination) {
+    if (!selectedForm || !destination) {
+      clearPreview();
+      return;
+    }
+    const option = Array.from(
+      selectedForm.querySelectorAll("[data-valid-destination-block]")
+    ).find(function (candidate) {
+      return destinationCell(candidate) === destination;
+    });
+    if (!option || option === previewedOption) {
+      return;
+    }
+    clearPreview();
+    previewedOption = option;
+    const projectedCells = destinationCells(option);
+    projectedCells.forEach(function (cell) {
+      cell.classList.add("schedule-cell-destination-preview");
+    });
+    destination.classList.add("schedule-cell-preview-target");
+  }
+
+  function destinationAtPoint(x, y) {
+    const target = document.elementFromPoint(x, y);
+    return target && target.closest(".schedule-cell-valid-destination");
   }
 
   function moveFormForCell(cell) {
@@ -176,11 +221,34 @@
     }
   });
 
+  schedule.addEventListener("pointerover", function (event) {
+    previewDestination(event.target.closest(".schedule-cell-valid-destination"));
+  });
+
+  schedule.addEventListener("pointerout", function (event) {
+    const destination = event.target.closest(".schedule-cell-valid-destination");
+    if (destination && !destination.contains(event.relatedTarget)) {
+      clearPreview();
+    }
+  });
+
+  schedule.addEventListener("focusin", function (event) {
+    previewDestination(event.target.closest(".schedule-cell-valid-destination"));
+  });
+
+  schedule.addEventListener("focusout", function (event) {
+    const destination = event.target.closest(".schedule-cell-valid-destination");
+    if (destination && !destination.contains(event.relatedTarget)) {
+      clearPreview();
+    }
+  });
+
   document.addEventListener("pointermove", function (event) {
     if (!pendingDrag || pendingDrag.pointerId !== event.pointerId) {
       return;
     }
     if (dragActive) {
+      previewDestination(destinationAtPoint(event.clientX, event.clientY));
       event.preventDefault();
       return;
     }
@@ -202,6 +270,7 @@
       pendingDrag.sourceCell.setPointerCapture(pendingDrag.pointerId);
       schedule.classList.add("schedule-drag-active");
       selectionMessage.textContent = "Drag active. Release over a highlighted destination.";
+      previewDestination(destinationAtPoint(event.clientX, event.clientY));
       event.preventDefault();
     }
   });

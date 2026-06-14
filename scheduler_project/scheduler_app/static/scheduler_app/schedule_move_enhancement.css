@@ -32,6 +32,16 @@
   outline-offset: -3px;
 }
 
+.schedule-cell-destination-preview {
+  background-color: #e2d9f3 !important;
+  box-shadow: inset 0 0 0 4px #6f42c1;
+}
+
+.schedule-cell-preview-target {
+  outline: 3px dashed #6f42c1;
+  outline-offset: -6px;
+}
+
 .schedule-move-selection-status[hidden] {
   display: none;
 }

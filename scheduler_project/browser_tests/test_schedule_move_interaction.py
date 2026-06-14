@@ -98,7 +98,17 @@ class ScheduleMoveInteractionTests(StaticLiveServerTestCase):
         self.assertFalse(self.page.locator("[data-schedule-move-selection-status]").is_hidden())
 
         self.cell("tue_am1").hover()
+        self.assertEqual(self.page.locator(".schedule-cell-destination-preview").count(), 2)
+        self.assertEqual(self.page.locator(".schedule-cell-preview-target").count(), 1)
         self.assertIn("schedule_detail", self.page.url)
+
+        self.cell("tue_pm1").hover()
+        self.assertEqual(self.page.locator(".schedule-cell-destination-preview").count(), 0)
+
+        self.cell("tue_am1").focus()
+        self.assertEqual(self.page.locator(".schedule-cell-destination-preview").count(), 2)
+        self.page.keyboard.press("Escape")
+        self.assertEqual(self.page.locator(".schedule-cell-destination-preview").count(), 0)
 
     def test_escape_outside_click_and_reclick_clear_selection(self):
         for cancel_action in (
@@ -162,6 +172,7 @@ class ScheduleMoveInteractionTests(StaticLiveServerTestCase):
         self.page.mouse.move(source_x, source_y)
         self.page.mouse.down()
         self.page.mouse.move(destination_x, destination_y, steps=5)
+        self.assertEqual(self.page.locator(".schedule-cell-destination-preview").count(), 2)
         self.page.mouse.up()
 
         self.page.get_by_text("Schedule move saved.").wait_for()
