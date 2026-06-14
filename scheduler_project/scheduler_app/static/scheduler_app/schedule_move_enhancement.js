@@ -6,6 +6,9 @@
     return;
   }
 
+  const selectionStatus = schedule.querySelector("[data-schedule-move-selection-status]");
+  const selectionMessage = schedule.querySelector("[data-schedule-move-selection-message]");
+  const cancelButton = schedule.querySelector("[data-schedule-move-cancel]");
   let selectedForm = null;
   let selectedAssignmentId = null;
 
@@ -16,7 +19,11 @@
   function clearSelection() {
     scheduleCells().forEach(function (cell) {
       cell.classList.remove("schedule-cell-selected", "schedule-cell-valid-destination");
+      cell.removeAttribute("tabindex");
+      cell.removeAttribute("role");
+      cell.removeAttribute("aria-label");
     });
+    selectionStatus.hidden = true;
     selectedForm = null;
     selectedAssignmentId = null;
   }
@@ -35,6 +42,7 @@
 
     const sourceCell = form.closest("[data-schedule-cell]");
     selectedAssignmentId = sourceCell.dataset.assignmentId;
+    const assignmentName = sourceCell.querySelector("div").textContent.trim();
     scheduleCells().forEach(function (cell) {
       if (cell.dataset.assignmentId === selectedAssignmentId) {
         cell.classList.add("schedule-cell-selected");
@@ -45,17 +53,16 @@
       const cell = destinationCell(option);
       if (cell) {
         cell.classList.add("schedule-cell-valid-destination");
+        cell.tabIndex = 0;
+        cell.setAttribute("role", "button");
+        cell.setAttribute("aria-label", "Move " + assignmentName + " to " + option.textContent.trim());
       }
     });
+    selectionMessage.textContent = assignmentName + " selected. Choose a highlighted destination.";
+    selectionStatus.hidden = false;
   }
 
-  schedule.addEventListener("click", function (event) {
-    const clickedCell = event.target.closest("[data-schedule-cell]");
-    if (!clickedCell || !schedule.contains(clickedCell)) {
-      clearSelection();
-      return;
-    }
-
+  function submitDestination(clickedCell) {
     if (selectedForm && clickedCell.classList.contains("schedule-cell-valid-destination")) {
       const matchingOption = Array.from(
         selectedForm.querySelectorAll("[data-valid-destination-block]")
@@ -66,6 +73,19 @@
         matchingOption.selected = true;
         selectedForm.requestSubmit();
       }
+      return true;
+    }
+    return false;
+  }
+
+  schedule.addEventListener("click", function (event) {
+    const clickedCell = event.target.closest("[data-schedule-cell]");
+    if (!clickedCell || !schedule.contains(clickedCell)) {
+      clearSelection();
+      return;
+    }
+
+    if (submitDestination(clickedCell)) {
       return;
     }
 
@@ -95,6 +115,16 @@
       clearSelection();
     }
   });
+
+  schedule.addEventListener("keydown", function (event) {
+    const destination = event.target.closest(".schedule-cell-valid-destination");
+    if (destination && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      submitDestination(destination);
+    }
+  });
+
+  cancelButton.addEventListener("click", clearSelection);
 
   document.addEventListener("click", function (event) {
     if (!schedule.contains(event.target)) {
