@@ -337,6 +337,7 @@ class SchedDetail(DetailView):
 
         context['selected_schools'] = self.object.schools.order_by('school_name')
         context['schedule_days'] = schedule_days
+        context['schedule_legend'] = SCHEDULE_LEGEND
         context['schedule_rows'] = schedule_rows
         context['selected_block'] = selected_block
         context['selected_holding'] = selected_holding

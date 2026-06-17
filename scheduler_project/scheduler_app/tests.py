@@ -4119,7 +4119,7 @@ class ScheduleGenerationRegressionTests(TestCase):
 
 
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
-class SchoolFormWorkflowTests(TestCase):
+class PublicLandingPageTests(TestCase):
     def setUp(self):
         wm_location = Locations.objects.create(loc_name="WM", loc_short="WM")
         various_location = Locations.objects.create(loc_name="Various", loc_short="VAR")
