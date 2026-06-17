@@ -12,12 +12,16 @@ from .forms import SchoolsForm, SchedForm, suggest_activity_group_count
 from .views import SchedDetail, SchedList, schedule_csv_export
 from .school_accounting import school_slot_accounting_summary
 from .schedule_operations import (
+    apply_holding_reassignment_proposal,
     apply_move_proposal,
+    apply_persisted_overrides,
     build_schedule_blocks,
     diagnose_sched_data_structure,
     evaluate_move_proposal_for_save,
+    iter_schedule_blocks,
     normalize_sched_data_structure,
     persist_manual_move,
+    repair_malformed_sched_data,
     repair_sched_data_structure,
     validate_schedule_blocks,
     verify_move_proposal_source,
@@ -321,6 +325,10 @@ class ScheduleOperationsTests(TestCase):
             "is_proposed_target": False,
             "proposed_from_block_id": None,
             "proposed_to_block_id": None,
+            "is_persisted_override": False,
+            "override_status": None,
+            "override_source": None,
+            "replay_conflicts": [],
             "has_overlap": False,
             "overlapping_blocks": [],
             "conflicts": [],
@@ -529,6 +537,20 @@ class ScheduleValidationTests(TestCase):
         self.assertIn("duplicate_group_slot", self.conflict_types(original_block))
         self.assertIn("duplicate_group_slot", self.conflict_types(duplicate_block))
 
+    def test_same_slot_in_different_groups_is_not_duplicate_occupancy(self):
+        first = Course.objects.create(course_name="Validation Group One", abriviation="VG1", course_len=1)
+        second = Course.objects.create(course_name="Validation Group Two", abriviation="VG2", course_len=1)
+        blocks = build_schedule_blocks({
+            "ags": ["Validation School 0", "Validation School 1"],
+            "mon_pm1": [first.course_name, second.course_name],
+        })
+
+        conflicts = validate_schedule_blocks(blocks)
+
+        self.assertNotIn("duplicate_group_slot", {conflict["type"] for conflict in conflicts})
+        self.assertEqual(blocks[0]["cells"][0]["group_index"], 0)
+        self.assertEqual(blocks[1]["cells"][0]["group_index"], 1)
+
 
 class ScheduleMoveProposalTests(TestCase):
     def test_valid_one_block_proposal_moves_activity_in_memory(self):
@@ -637,6 +659,847 @@ class ScheduleMoveProposalTests(TestCase):
         self.assertIn(target_activity.course_name, duplicate["message"])
         self.assertIn(target["group_label"], duplicate["message"])
         self.assertIn(target["slot_key"], duplicate["message"])
+
+    def test_non_first_row_proposal_uses_composite_group_slot_target(self):
+        first_row = Course.objects.create(course_name="First Row Control", abriviation="FRC", course_len=1)
+        second_row = Course.objects.create(course_name="Second Row Move", abriviation="SRM", course_len=1)
+        blocks = build_schedule_blocks({
+            "ags": ["Proposal School 0", "Proposal School 1"],
+            "mon_pm1": [first_row.course_name, second_row.course_name],
+            "tue_am1": ["empty", "empty"],
+        })
+
+        result = apply_move_proposal(blocks, {
+            "source_block_id": "1:mon_pm1",
+            "source_activity_id": second_row.id,
+            "source_activity_name": second_row.course_name,
+            "source_occurrence_id": "occurrence:1:mon_pm1",
+            "source_group_index": 1,
+            "source_slot_key": "mon_pm1",
+            "target_slot_key": "tue_am1",
+            "target_group_index": 1,
+        })
+
+        self.assertTrue(result["applied"])
+        self.assertEqual(result["source_group_index"], 1)
+        self.assertEqual(result["target_group_index"], 1)
+        self.assertEqual(result["target_block_id"], "1:tue_am1")
+        self.assertEqual(blocks[0]["cells"][0]["raw_value"], first_row.course_name)
+        self.assertEqual(blocks[0]["cells"][3]["raw_value"], "empty")
+        self.assertEqual(blocks[1]["cells"][0]["raw_value"], "empty")
+        self.assertEqual(blocks[1]["cells"][3]["raw_value"], second_row.course_name)
+
+    def test_source_group_identity_mismatch_rejects_proposal(self):
+        activity = Course.objects.create(course_name="Group Identity Check", abriviation="GIC", course_len=1)
+        blocks = build_schedule_blocks({
+            "ags": ["Proposal School 0", "Proposal School 1"],
+            "mon_pm1": ["empty", activity.course_name],
+            "tue_am1": ["empty", "empty"],
+        })
+
+        result = apply_move_proposal(blocks, {
+            "source_block_id": "1:mon_pm1",
+            "source_activity_id": activity.id,
+            "source_activity_name": activity.course_name,
+            "source_occurrence_id": "occurrence:1:mon_pm1",
+            "source_group_index": 0,
+            "source_slot_key": "mon_pm1",
+            "target_slot_key": "tue_am1",
+            "target_group_index": 1,
+        })
+
+        self.assertFalse(result["applied"])
+        self.assertEqual(result["error"], "source_identity_mismatch")
+        self.assertEqual(blocks[1]["cells"][0]["raw_value"], activity.course_name)
+
+
+class PersistedOverrideReplayTests(TestCase):
+    def setUp(self):
+        self.activity = Course.objects.create(
+            course_name="Replay Activity",
+            abriviation="RA",
+            course_len=1,
+        )
+        self.schedule = TheSched.objects.create(
+            sched_name="Replay Schedule",
+            sched_data={"version": 1, "manual_moves": []},
+        )
+
+    def move_record(
+        self,
+        *,
+        source_block_id="0:mon_pm1",
+        source_group_index=0,
+        source_slot_key="mon_pm1",
+        target_group_index=0,
+        target_slot_key="tue_am1",
+        activity=None,
+        occurrence_id=None,
+        status="active",
+        move_type="single_block",
+        action_type=None,
+    ):
+        activity = activity or self.activity
+        record = {
+            "source_block_id": source_block_id,
+            "source_activity_id": activity.id,
+            "source_activity_name": activity.course_name,
+            "source_occurrence_id": occurrence_id or f"occurrence:{source_block_id}",
+            "source_group_index": source_group_index,
+            "source_slot_key": source_slot_key,
+            "target_group_index": target_group_index,
+            "target_slot_key": target_slot_key,
+            "move_type": move_type,
+            "created_at": "2026-06-14T12:00:00Z",
+            "status": status,
+        }
+        if action_type is not None:
+            record["action_type"] = action_type
+        return record
+
+    def holding_record(
+        self,
+        *,
+        holding_id="holding:override:0:0:mon_pm2:1",
+        target_group_index=0,
+        target_slot_key="tue_am1",
+        activity=None,
+        occurrence_id="occurrence:0:mon_pm2",
+        action_type="overlap_move",
+        status="active",
+    ):
+        activity = activity or self.activity
+        return {
+            "source_kind": "holding",
+            "source_holding_id": holding_id,
+            "source_activity_id": activity.id,
+            "source_activity_name": activity.course_name,
+            "source_occurrence_id": occurrence_id,
+            "target_group_index": target_group_index,
+            "target_slot_key": target_slot_key,
+            "move_type": "single_block",
+            "action_type": action_type,
+            "created_at": "2026-06-14T12:01:00Z",
+            "status": status,
+        }
+
+    def test_replays_single_block_override_without_mutating_generated_schedule(self):
+        generated = {
+            "ags": ["Replay School 0"],
+            "mon_pm1": [self.activity.course_name],
+            "tue_am1": ["empty"],
+        }
+        generated_before = deepcopy(generated)
+        blocks = build_schedule_blocks(generated)
+        self.schedule.sched_data["manual_moves"] = [self.move_record()]
+
+        result = apply_persisted_overrides(self.schedule, blocks)
+        source, target = blocks[0]["cells"][0], blocks[0]["cells"][3]
+
+        self.assertEqual(generated, generated_before)
+        self.assertEqual(len(result["applied_overrides"]), 1)
+        self.assertTrue(source["is_empty"])
+        self.assertTrue(source["is_persisted_override"])
+        self.assertEqual(source["override_status"], "applied_source")
+        self.assertEqual(target["raw_value"], self.activity.course_name)
+        self.assertTrue(target["is_persisted_override"])
+        self.assertEqual(target["override_status"], "applied")
+
+    def test_replays_overlap_and_validation_detects_duplicate_occupancy(self):
+        target_activity = Course.objects.create(
+            course_name="Replay Occupied Target",
+            abriviation="ROT",
+            course_len=1,
+        )
+        blocks = build_schedule_blocks({
+            "ags": ["Replay School 0"],
+            "mon_pm1": [self.activity.course_name],
+            "mon_pm2": [target_activity.course_name],
+        })
+        self.schedule.sched_data["manual_moves"] = [
+            self.move_record(target_slot_key="mon_pm2", action_type="overlap_move")
+        ]
+
+        replay_result = apply_persisted_overrides(self.schedule, blocks)
+        conflicts = validate_schedule_blocks(blocks)
+        target = blocks[0]["cells"][1]
+        overlap = target["overlapping_blocks"][0]
+
+        self.assertTrue(replay_result["applied_overrides"][0]["target_was_occupied"])
+        self.assertEqual(target["raw_value"], target_activity.course_name)
+        self.assertEqual(overlap["raw_value"], self.activity.course_name)
+        self.assertTrue(overlap["is_persisted_override"])
+        self.assertEqual(overlap["override_status"], "applied")
+        self.assertIn("duplicate_group_slot", {conflict["type"] for conflict in conflicts})
+        self.assertEqual(replay_result["applied_overrides"][0]["action_type"], "overlap_move")
+
+    def test_legacy_record_without_action_type_defaults_to_overlap(self):
+        target_activity = Course.objects.create(
+            course_name="Legacy Overlap Target",
+            abriviation="LOT",
+            course_len=1,
+        )
+        blocks = build_schedule_blocks({
+            "ags": ["Replay School 0"],
+            "mon_pm1": [self.activity.course_name],
+            "mon_pm2": [target_activity.course_name],
+        })
+        legacy_move = self.move_record(target_slot_key="mon_pm2")
+        self.assertNotIn("action_type", legacy_move)
+        self.schedule.sched_data["manual_moves"] = [legacy_move]
+
+        result = apply_persisted_overrides(self.schedule, blocks, replay_mode="displacement")
+        target = blocks[0]["cells"][1]
+
+        self.assertEqual(result["holding_area"], [])
+        self.assertEqual(target["activity_id"], target_activity.id)
+        self.assertEqual(target["overlapping_blocks"][0]["activity_id"], self.activity.id)
+        self.assertEqual(result["applied_overrides"][0]["action_type"], "overlap_move")
+
+    def test_replays_multiple_ordered_overrides(self):
+        second_activity = Course.objects.create(
+            course_name="Second Replay Activity",
+            abriviation="SRA",
+            course_len=1,
+        )
+        blocks = build_schedule_blocks({
+            "ags": ["Replay School 0", "Replay School 1"],
+            "mon_pm1": [self.activity.course_name, second_activity.course_name],
+            "tue_am1": ["empty", "empty"],
+        })
+        self.schedule.sched_data["manual_moves"] = [
+            self.move_record(),
+            self.move_record(
+                source_block_id="1:mon_pm1",
+                source_group_index=1,
+                target_group_index=1,
+                activity=second_activity,
+            ),
+        ]
+
+        result = apply_persisted_overrides(self.schedule, blocks)
+
+        self.assertEqual(len(result["applied_overrides"]), 2)
+        self.assertEqual(blocks[0]["cells"][3]["raw_value"], self.activity.course_name)
+        self.assertEqual(blocks[1]["cells"][3]["raw_value"], second_activity.course_name)
+
+    def test_stale_and_invalid_active_overrides_fail_without_corrupting_blocks(self):
+        blocks = build_schedule_blocks({
+            "ags": ["Replay School 0"],
+            "mon_pm1": [self.activity.course_name],
+            "tue_am1": ["empty"],
+        })
+        blocks_before = deepcopy(blocks)
+        stale = self.move_record()
+        stale["source_activity_name"] = "Changed Activity"
+        self.schedule.sched_data["manual_moves"] = [
+            stale,
+            {"status": "active", "move_type": "single_block"},
+            "invalid",
+        ]
+
+        result = apply_persisted_overrides(self.schedule, blocks)
+
+        self.assertEqual(len(result["applied_overrides"]), 0)
+        self.assertEqual(len(result["replay_conflicts"]), 3)
+        self.assertEqual(blocks[0]["cells"][0]["raw_value"], blocks_before[0]["cells"][0]["raw_value"])
+        self.assertEqual(blocks[0]["cells"][3]["raw_value"], blocks_before[0]["cells"][3]["raw_value"])
+        self.assertTrue(all(
+            conflict["type"] == "persisted_override_replay"
+            for conflict in result["replay_conflicts"]
+        ))
+
+    def test_inactive_and_unsupported_overrides_are_not_applied(self):
+        blocks = build_schedule_blocks({
+            "ags": ["Replay School 0"],
+            "mon_pm1": [self.activity.course_name],
+            "tue_am1": ["empty"],
+        })
+        self.schedule.sched_data["manual_moves"] = [
+            self.move_record(status="inactive"),
+            self.move_record(move_type="multi_block"),
+        ]
+
+        result = apply_persisted_overrides(self.schedule, blocks)
+
+        self.assertEqual(result["applied_overrides"], [])
+        self.assertEqual(result["ignored_overrides"][0]["reason"], "inactive")
+        self.assertEqual(len(result["replay_conflicts"]), 1)
+        self.assertEqual(blocks[0]["cells"][0]["raw_value"], self.activity.course_name)
+
+    def test_chained_overlap_then_move_primary_preserves_both_activities(self):
+        displaced = Course.objects.create(
+            course_name="Chained Displaced Activity",
+            abriviation="CDA",
+            course_len=1,
+        )
+        blocks = build_schedule_blocks({
+            "ags": ["Replay School 0"],
+            "mon_pm1": [self.activity.course_name],
+            "mon_pm2": [displaced.course_name],
+            "tue_am1": ["empty"],
+        })
+        self.schedule.sched_data["manual_moves"] = [
+            self.move_record(target_slot_key="mon_pm2"),
+            self.move_record(
+                source_block_id="0:mon_pm2",
+                source_slot_key="mon_pm2",
+                target_slot_key="tue_am1",
+                activity=displaced,
+            ),
+        ]
+        stored_before = deepcopy(self.schedule.sched_data)
+
+        result = apply_persisted_overrides(self.schedule, blocks)
+        visible_activities = [
+            block["raw_value"]
+            for block in iter_schedule_blocks(blocks)
+            if block["is_activity"]
+        ]
+
+        self.assertEqual(len(result["applied_overrides"]), 2)
+        self.assertEqual(blocks[0]["cells"][1]["raw_value"], self.activity.course_name)
+        self.assertEqual(blocks[0]["cells"][3]["raw_value"], displaced.course_name)
+        self.assertEqual(visible_activities.count(self.activity.course_name), 1)
+        self.assertEqual(visible_activities.count(displaced.course_name), 1)
+        self.assertEqual(self.schedule.sched_data, stored_before)
+
+    def test_moving_displaced_overlap_activity_elsewhere_preserves_primary(self):
+        primary = Course.objects.create(
+            course_name="Chained Primary Activity",
+            abriviation="CPA",
+            course_len=1,
+        )
+        blocks = build_schedule_blocks({
+            "ags": ["Replay School 0"],
+            "mon_pm1": [self.activity.course_name],
+            "mon_pm2": [primary.course_name],
+            "tue_am1": ["empty"],
+        })
+        overlap_block_id = "overlap:persisted:0:0:mon_pm2:0:mon_pm1"
+        self.schedule.sched_data["manual_moves"] = [
+            self.move_record(target_slot_key="mon_pm2"),
+            self.move_record(
+                source_block_id=overlap_block_id,
+                source_slot_key="mon_pm2",
+                target_slot_key="tue_am1",
+                occurrence_id="occurrence:overlap:persisted:0:0:mon_pm2",
+            ),
+        ]
+
+        result = apply_persisted_overrides(self.schedule, blocks)
+        visible_activities = [
+            block["raw_value"]
+            for block in iter_schedule_blocks(blocks)
+            if block["is_activity"]
+        ]
+
+        self.assertEqual(len(result["applied_overrides"]), 2)
+        self.assertEqual(blocks[0]["cells"][1]["raw_value"], primary.course_name)
+        self.assertEqual(blocks[0]["cells"][3]["raw_value"], self.activity.course_name)
+        self.assertEqual(visible_activities.count(self.activity.course_name), 1)
+        self.assertEqual(visible_activities.count(primary.course_name), 1)
+
+    def test_superseded_stale_and_failed_replay_statuses_are_excluded(self):
+        blocks = build_schedule_blocks({
+            "ags": ["Replay School 0"],
+            "mon_pm1": [self.activity.course_name],
+            "tue_am1": ["empty"],
+        })
+        self.schedule.sched_data["manual_moves"] = [
+            self.move_record(status="superseded"),
+            self.move_record(status="stale"),
+            self.move_record(status="failed_replay"),
+        ]
+
+        result = apply_persisted_overrides(self.schedule, blocks)
+
+        self.assertEqual(result["applied_overrides"], [])
+        self.assertEqual(
+            [ignored["reason"] for ignored in result["ignored_overrides"]],
+            ["superseded", "stale", "failed_replay"],
+        )
+        self.assertEqual(blocks[0]["cells"][0]["raw_value"], self.activity.course_name)
+
+    def test_active_stale_and_failed_replay_overrides_report_in_memory_status(self):
+        blocks = build_schedule_blocks({
+            "ags": ["Replay School 0"],
+            "mon_pm1": [self.activity.course_name],
+            "tue_am1": ["empty"],
+        })
+        stale = self.move_record()
+        stale["source_activity_name"] = "Changed Activity"
+        failed = self.move_record(target_slot_key="invalid_slot")
+        self.schedule.sched_data["manual_moves"] = [stale, failed]
+        stored_before = deepcopy(self.schedule.sched_data)
+
+        result = apply_persisted_overrides(self.schedule, blocks)
+
+        self.assertEqual(
+            [conflict["override_status"] for conflict in result["replay_conflicts"]],
+            ["stale", "failed_replay"],
+        )
+        self.assertEqual(
+            [ignored["reason"] for ignored in result["ignored_overrides"]],
+            ["stale", "failed_replay"],
+        )
+        self.assertEqual(self.schedule.sched_data, stored_before)
+
+    def test_displacement_mode_moves_occupied_target_into_non_grid_holding_area(self):
+        displaced = Course.objects.create(
+            course_name="Displaced Holding Activity",
+            abriviation="DHA",
+            course_len=1,
+        )
+        blocks = build_schedule_blocks({
+            "ags": ["Replay School 0"],
+            "mon_pm1": [self.activity.course_name],
+            "mon_pm2": [displaced.course_name],
+        })
+        self.schedule.sched_data["manual_moves"] = [
+            self.move_record(target_slot_key="mon_pm2", action_type="displacement_move"),
+        ]
+        stored_before = deepcopy(self.schedule.sched_data)
+
+        result = apply_persisted_overrides(self.schedule, blocks, replay_mode="displacement")
+        conflicts = validate_schedule_blocks(blocks)
+        target = blocks[0]["cells"][1]
+        holding_item = result["holding_area"][0]
+
+        self.assertEqual(result["replay_mode"], "displacement")
+        self.assertEqual(target["raw_value"], self.activity.course_name)
+        self.assertEqual(target["activity_id"], self.activity.id)
+        self.assertEqual(target["overlapping_blocks"], [])
+        self.assertFalse(target["has_overlap"])
+        self.assertEqual(holding_item["activity_name"], displaced.course_name)
+        self.assertEqual(holding_item["activity_id"], displaced.id)
+        self.assertEqual(result["applied_overrides"][0]["moved_activity_id"], self.activity.id)
+        self.assertEqual(result["applied_overrides"][0]["displaced_activity_ids"], [displaced.id])
+        self.assertEqual(holding_item["holding_status"], "awaiting_assignment")
+        self.assertTrue(holding_item["is_holding"])
+        self.assertNotIn("slot_key", holding_item)
+        self.assertEqual(holding_item["origin_slot_key"], "mon_pm2")
+        self.assertEqual(blocks[0]["cells"][0]["raw_value"], "empty")
+        self.assertTrue(blocks[0]["cells"][0]["is_empty"])
+        self.assertNotIn("duplicate_group_slot", {conflict["type"] for conflict in conflicts})
+        self.assertNotIn(holding_item, list(iter_schedule_blocks(blocks)))
+        self.assertEqual(self.schedule.sched_data, stored_before)
+
+    def test_displacement_replay_is_stable_from_fresh_generated_blocks(self):
+        displaced = Course.objects.create(
+            course_name="Reload Stable Displaced Activity",
+            abriviation="RSDA",
+            course_len=1,
+        )
+        generated_schedule = {
+            "ags": ["Replay School 0"],
+            "mon_pm1": [self.activity.course_name],
+            "mon_pm2": [displaced.course_name],
+        }
+        self.schedule.sched_data["manual_moves"] = [
+            self.move_record(target_slot_key="mon_pm2", action_type="displacement_move"),
+        ]
+
+        first_blocks = build_schedule_blocks(generated_schedule)
+        first_result = apply_persisted_overrides(
+            self.schedule,
+            first_blocks,
+            replay_mode="displacement",
+        )
+        reloaded_blocks = build_schedule_blocks(generated_schedule)
+        reloaded_result = apply_persisted_overrides(
+            self.schedule,
+            reloaded_blocks,
+            replay_mode="displacement",
+        )
+
+        self.assertEqual(first_blocks, reloaded_blocks)
+        self.assertEqual(first_result, reloaded_result)
+        self.assertEqual(reloaded_blocks[0]["cells"][0]["raw_value"], "empty")
+        self.assertEqual(reloaded_blocks[0]["cells"][1]["activity_id"], self.activity.id)
+        self.assertEqual(reloaded_result["holding_area"][0]["activity_id"], displaced.id)
+
+    def test_holding_reassignment_consumes_holding_item_and_restores_grid_visibility(self):
+        displaced = Course.objects.create(
+            course_name="Reassigned Holding Activity",
+            abriviation="RHA",
+            course_len=1,
+        )
+        generated_schedule = {
+            "ags": ["Replay School 0"],
+            "mon_pm1": [self.activity.course_name],
+            "mon_pm2": [displaced.course_name],
+            "tue_am1": ["empty"],
+        }
+        self.schedule.sched_data["manual_moves"] = [
+            self.move_record(target_slot_key="mon_pm2", action_type="displacement_move"),
+            self.holding_record(activity=displaced, target_slot_key="tue_am1"),
+        ]
+        blocks = build_schedule_blocks(generated_schedule)
+
+        result = apply_persisted_overrides(self.schedule, blocks)
+
+        self.assertEqual(len(result["applied_overrides"]), 2)
+        self.assertEqual(result["holding_area"], [])
+        self.assertEqual(blocks[0]["cells"][1]["activity_id"], self.activity.id)
+        self.assertEqual(blocks[0]["cells"][3]["activity_id"], displaced.id)
+        self.assertEqual(
+            [move.get("source_kind") for move in self.schedule.sched_data["manual_moves"]],
+            [None, "holding"],
+        )
+
+    def test_holding_reassignment_into_occupied_target_can_displace_again(self):
+        displaced = Course.objects.create(
+            course_name="Reassigned Displacing Holding",
+            abriviation="RDH",
+            course_len=1,
+        )
+        next_displaced = Course.objects.create(
+            course_name="Second Holding Target",
+            abriviation="SHT",
+            course_len=1,
+        )
+        generated_schedule = {
+            "ags": ["Replay School 0"],
+            "mon_pm1": [self.activity.course_name],
+            "mon_pm2": [displaced.course_name],
+            "tue_am1": [next_displaced.course_name],
+        }
+        self.schedule.sched_data["manual_moves"] = [
+            self.move_record(target_slot_key="mon_pm2", action_type="displacement_move"),
+            self.holding_record(
+                activity=displaced,
+                target_slot_key="tue_am1",
+                action_type="displacement_move",
+            ),
+        ]
+        blocks = build_schedule_blocks(generated_schedule)
+
+        result = apply_persisted_overrides(self.schedule, blocks)
+
+        self.assertEqual(blocks[0]["cells"][3]["activity_id"], displaced.id)
+        self.assertEqual(
+            [item["activity_id"] for item in result["holding_area"]],
+            [next_displaced.id],
+        )
+
+    def test_stale_holding_reassignment_fails_without_consuming_unresolved_holding(self):
+        displaced = Course.objects.create(
+            course_name="Still Holding Activity",
+            abriviation="SHA",
+            course_len=1,
+        )
+        generated_schedule = {
+            "ags": ["Replay School 0"],
+            "mon_pm1": [self.activity.course_name],
+            "mon_pm2": [displaced.course_name],
+            "tue_am1": ["empty"],
+        }
+        self.schedule.sched_data["manual_moves"] = [
+            self.move_record(target_slot_key="mon_pm2", action_type="displacement_move"),
+            self.holding_record(
+                holding_id="holding:missing",
+                activity=displaced,
+                target_slot_key="tue_am1",
+            ),
+        ]
+        blocks = build_schedule_blocks(generated_schedule)
+
+        result = apply_persisted_overrides(self.schedule, blocks)
+
+        self.assertEqual(len(result["applied_overrides"]), 1)
+        self.assertEqual(result["replay_conflicts"][0]["override_status"], "stale")
+        self.assertEqual(result["holding_area"][0]["activity_id"], displaced.id)
+        self.assertEqual(blocks[0]["cells"][3]["raw_value"], "empty")
+
+    def test_holding_reassignment_proposal_removes_item_from_preview_holding_area(self):
+        displaced = Course.objects.create(
+            course_name="Proposal Holding Activity",
+            abriviation="PHA",
+            course_len=1,
+        )
+        generated_schedule = {
+            "ags": ["Replay School 0"],
+            "mon_pm1": [self.activity.course_name],
+            "mon_pm2": [displaced.course_name],
+            "tue_am1": ["empty"],
+        }
+        self.schedule.sched_data["manual_moves"] = [
+            self.move_record(target_slot_key="mon_pm2", action_type="displacement_move"),
+        ]
+        blocks = build_schedule_blocks(generated_schedule)
+        replay_result = apply_persisted_overrides(self.schedule, blocks)
+
+        proposal_result = apply_holding_reassignment_proposal(
+            blocks,
+            replay_result["holding_area"],
+            {
+                "source_holding_id": "holding:override:0:0:mon_pm2:1",
+                "source_activity_id": displaced.id,
+                "source_activity_name": displaced.course_name,
+                "source_occurrence_id": "occurrence:0:mon_pm2",
+                "target_group_index": 0,
+                "target_slot_key": "tue_am1",
+                "action_type": "overlap_move",
+            },
+        )
+
+        self.assertTrue(proposal_result["applied"])
+        self.assertEqual(replay_result["holding_area"], [])
+        self.assertEqual(blocks[0]["cells"][3]["activity_id"], displaced.id)
+
+    def test_displacement_mode_preserves_all_existing_target_occupants_in_holding(self):
+        primary = Course.objects.create(
+            course_name="Holding Primary",
+            abriviation="HP",
+            course_len=1,
+        )
+        overlap = Course.objects.create(
+            course_name="Holding Existing Overlap",
+            abriviation="HEO",
+            course_len=1,
+        )
+        blocks = build_schedule_blocks({
+            "ags": ["Replay School 0"],
+            "mon_pm1": [self.activity.course_name],
+            "mon_pm2": [primary.course_name],
+        })
+        target = blocks[0]["cells"][1]
+        target["overlapping_blocks"].append({
+            **deepcopy(target),
+            "block_id": "existing-overlap",
+            "raw_value": overlap.course_name,
+            "display_value": overlap.course_name,
+            "activity_id": overlap.id,
+            "overlapping_blocks": [],
+            "has_overlap": False,
+            "conflicts": [],
+            "replay_conflicts": [],
+        })
+        target["has_overlap"] = True
+        self.schedule.sched_data["manual_moves"] = [
+            self.move_record(target_slot_key="mon_pm2", action_type="displacement_move"),
+        ]
+
+        result = apply_persisted_overrides(self.schedule, blocks, replay_mode="displacement")
+
+        self.assertEqual(
+            [item["activity_name"] for item in result["holding_area"]],
+            [primary.course_name, overlap.course_name],
+        )
+        self.assertEqual(target["raw_value"], self.activity.course_name)
+        self.assertEqual(target["overlapping_blocks"], [])
+
+    def test_displacement_promotion_does_not_put_moved_overlap_in_holding(self):
+        primary = Course.objects.create(
+            course_name="Promotion Primary Target",
+            abriviation="PPT",
+            course_len=1,
+        )
+        blocks = build_schedule_blocks({
+            "ags": ["Replay School 0"],
+            "mon_pm2": [primary.course_name],
+        })
+        target = next(
+            block
+            for block in blocks[0]["cells"]
+            if block["slot_key"] == "mon_pm2"
+        )
+        source = {
+            **deepcopy(target),
+            "block_id": "existing-overlap-source",
+            "raw_value": self.activity.course_name,
+            "display_value": self.activity.course_name,
+            "activity_id": self.activity.id,
+            "occurrence_id": "occurrence:existing-overlap-source",
+            "overlapping_blocks": [],
+            "has_overlap": False,
+            "conflicts": [],
+            "replay_conflicts": [],
+        }
+        target["overlapping_blocks"].append(source)
+        target["has_overlap"] = True
+        self.schedule.sched_data["manual_moves"] = [
+            self.move_record(
+                source_block_id=source["block_id"],
+                source_slot_key="mon_pm2",
+                target_slot_key="mon_pm2",
+                occurrence_id=source["occurrence_id"],
+                action_type="displacement_move",
+            ),
+        ]
+
+        result = apply_persisted_overrides(self.schedule, blocks, replay_mode="displacement")
+
+        self.assertEqual(target["activity_id"], self.activity.id)
+        self.assertEqual(target["overlapping_blocks"], [])
+        self.assertEqual(
+            [item["activity_id"] for item in result["holding_area"]],
+            [primary.id],
+        )
+        self.assertEqual(
+            result["applied_overrides"][0]["displaced_activity_ids"],
+            [primary.id],
+        )
+        self.assertNotIn(
+            self.activity.id,
+            [item["activity_id"] for item in result["holding_area"]],
+        )
+
+    def test_overlap_mode_remains_default_fallback(self):
+        occupied = Course.objects.create(
+            course_name="Fallback Overlap Target",
+            abriviation="FOT",
+            course_len=1,
+        )
+        blocks = build_schedule_blocks({
+            "ags": ["Replay School 0"],
+            "mon_pm1": [self.activity.course_name],
+            "mon_pm2": [occupied.course_name],
+        })
+        self.schedule.sched_data["manual_moves"] = [
+            self.move_record(target_slot_key="mon_pm2"),
+        ]
+
+        result = apply_persisted_overrides(self.schedule, blocks)
+
+        self.assertEqual(result["replay_mode"], "overlap")
+        self.assertEqual(result["holding_area"], [])
+        self.assertEqual(blocks[0]["cells"][1]["raw_value"], occupied.course_name)
+        self.assertEqual(
+            blocks[0]["cells"][1]["overlapping_blocks"][0]["raw_value"],
+            self.activity.course_name,
+        )
+
+    def test_mixed_explicit_overlap_and_displacement_history_replays_in_order(self):
+        overlap_target = Course.objects.create(
+            course_name="Mixed History Target",
+            abriviation="MHT",
+            course_len=1,
+        )
+        displacement_source = Course.objects.create(
+            course_name="Mixed History Displacement Source",
+            abriviation="MHDS",
+            course_len=1,
+        )
+        blocks = build_schedule_blocks({
+            "ags": ["Replay School 0"],
+            "mon_pm1": [self.activity.course_name],
+            "mon_pm2": [overlap_target.course_name],
+            "tue_am1": [displacement_source.course_name],
+        })
+        self.schedule.sched_data["manual_moves"] = [
+            self.move_record(target_slot_key="mon_pm2", action_type="overlap_move"),
+            self.move_record(
+                source_block_id="0:tue_am1",
+                source_slot_key="tue_am1",
+                target_slot_key="mon_pm2",
+                activity=displacement_source,
+                action_type="displacement_move",
+            ),
+        ]
+
+        result = apply_persisted_overrides(self.schedule, blocks)
+        target = blocks[0]["cells"][1]
+
+        self.assertEqual([item["activity_id"] for item in result["holding_area"]], [
+            overlap_target.id,
+            self.activity.id,
+        ])
+        self.assertEqual(target["activity_id"], displacement_source.id)
+        self.assertEqual(target["overlapping_blocks"], [])
+        self.assertEqual(
+            [applied["action_type"] for applied in result["applied_overrides"]],
+            ["overlap_move", "displacement_move"],
+        )
+
+    def test_unknown_action_type_fails_safely_without_mutating_blocks(self):
+        blocks = build_schedule_blocks({
+            "ags": ["Replay School 0"],
+            "mon_pm1": [self.activity.course_name],
+            "tue_am1": ["empty"],
+        })
+        before = deepcopy(blocks)
+        self.schedule.sched_data["manual_moves"] = [
+            self.move_record(action_type="future_move_type"),
+        ]
+
+        result = apply_persisted_overrides(self.schedule, blocks)
+
+        self.assertEqual(blocks, before)
+        self.assertEqual(result["applied_overrides"], [])
+        self.assertEqual(result["ignored_overrides"][0]["reason"], "failed_replay")
+        self.assertIn("unsupported action type", result["replay_conflicts"][0]["message"])
+
+    def test_unknown_replay_mode_is_rejected_without_mutating_blocks(self):
+        blocks = build_schedule_blocks({
+            "ags": ["Replay School 0"],
+            "mon_pm1": [self.activity.course_name],
+        })
+        blocks_before = deepcopy(blocks)
+
+        with self.assertRaisesMessage(ValueError, "Unsupported persisted override replay mode"):
+            apply_persisted_overrides(self.schedule, blocks, replay_mode="unknown")
+
+        self.assertEqual(blocks, blocks_before)
+
+    def test_non_first_row_overlap_replay_preserves_row_identity(self):
+        first_row = Course.objects.create(course_name="Replay First Row", abriviation="RFR", course_len=1)
+        occupied = Course.objects.create(course_name="Replay Second Occupied", abriviation="RSO", course_len=1)
+        blocks = build_schedule_blocks({
+            "ags": ["Replay School 0", "Replay School 1"],
+            "mon_pm1": [first_row.course_name, self.activity.course_name],
+            "mon_pm2": ["empty", occupied.course_name],
+        })
+        self.schedule.sched_data["manual_moves"] = [
+            self.move_record(
+                source_block_id="1:mon_pm1",
+                source_group_index=1,
+                target_group_index=1,
+                target_slot_key="mon_pm2",
+            ),
+        ]
+
+        result = apply_persisted_overrides(self.schedule, blocks)
+
+        self.assertEqual(len(result["applied_overrides"]), 1)
+        self.assertEqual(blocks[0]["cells"][0]["raw_value"], first_row.course_name)
+        self.assertEqual(blocks[0]["cells"][1]["raw_value"], "empty")
+        self.assertEqual(blocks[1]["cells"][1]["raw_value"], occupied.course_name)
+        overlap = blocks[1]["cells"][1]["overlapping_blocks"][0]
+        self.assertEqual(overlap["raw_value"], self.activity.course_name)
+        self.assertEqual(overlap["group_index"], 1)
+        self.assertEqual(overlap["slot_key"], "mon_pm2")
+
+    def test_non_first_row_displacement_and_holding_preserve_group_identity(self):
+        first_row = Course.objects.create(course_name="Displacement First Row", abriviation="DFR", course_len=1)
+        displaced = Course.objects.create(course_name="Displacement Second Row", abriviation="DSR", course_len=1)
+        blocks = build_schedule_blocks({
+            "ags": ["Replay School 0", "Replay School 1"],
+            "mon_pm1": [first_row.course_name, self.activity.course_name],
+            "mon_pm2": ["empty", displaced.course_name],
+        })
+        self.schedule.sched_data["manual_moves"] = [
+            self.move_record(
+                source_block_id="1:mon_pm1",
+                source_group_index=1,
+                target_group_index=1,
+                target_slot_key="mon_pm2",
+                action_type="displacement_move",
+            ),
+        ]
+
+        result = apply_persisted_overrides(self.schedule, blocks, replay_mode="displacement")
+        holding_item = result["holding_area"][0]
+
+        self.assertEqual(blocks[0]["cells"][0]["raw_value"], first_row.course_name)
+        self.assertEqual(blocks[0]["cells"][1]["raw_value"], "empty")
+        self.assertEqual(blocks[1]["cells"][1]["raw_value"], self.activity.course_name)
+        self.assertEqual(blocks[1]["cells"][1]["group_index"], 1)
+        self.assertEqual(holding_item["activity_name"], displaced.course_name)
+        self.assertEqual(holding_item["origin_group_index"], 1)
+        self.assertEqual(holding_item["origin_group_label"], "Replay School 1")
+        self.assertEqual(holding_item["origin_slot_key"], "mon_pm2")
 
 
 class MoveProposalSourceIdentityTests(TestCase):
@@ -783,6 +1646,7 @@ class ManualMovePersistenceTests(TestCase):
         self.assertEqual(move_record["target_group_index"], 0)
         self.assertEqual(move_record["target_slot_key"], "tue_am1")
         self.assertEqual(move_record["move_type"], "single_block")
+        self.assertEqual(move_record["action_type"], "displacement_move")
         self.assertEqual(move_record["status"], "active")
         self.assertTrue(move_record["created_at"].endswith("Z"))
 
@@ -815,7 +1679,10 @@ class ManualMovePersistenceTests(TestCase):
         for malformed in (["existing"], "existing"):
             with self.subTest(malformed=malformed):
                 original = deepcopy(malformed)
-                with self.assertRaisesMessage(ValueError, "not a JSON object"):
+                with self.assertRaisesMessage(
+                    ValueError,
+                    "This schedule contains legacy operational data that must be repaired",
+                ):
                     normalize_sched_data_structure(malformed)
                 self.assertEqual(malformed, original)
 
@@ -823,7 +1690,10 @@ class ManualMovePersistenceTests(TestCase):
         malformed = {"source": "existing", "manual_moves": "invalid"}
         original = deepcopy(malformed)
 
-        with self.assertRaisesMessage(ValueError, "manual move data is not a list"):
+        with self.assertRaisesMessage(
+            ValueError,
+            "This schedule contains legacy operational data that must be repaired",
+        ):
             normalize_sched_data_structure(malformed)
 
         self.assertEqual(malformed, original)
@@ -835,7 +1705,8 @@ class ManualMovePersistenceTests(TestCase):
         self.assertEqual(malformed["status"], "malformed")
         self.assertFalse(malformed["recoverable"])
         self.assertEqual(malformed["value_type"], "list")
-        self.assertIn("administrator review", malformed["message"])
+        self.assertIn("must be repaired before schedule edits can be saved", malformed["message"])
+        self.assertIn("found list", malformed["debug_detail"])
 
     def test_admin_safe_repair_normalizes_recoverable_sched_data(self):
         repaired = repair_sched_data_structure(self.schedule)
@@ -848,11 +1719,41 @@ class ManualMovePersistenceTests(TestCase):
         self.schedule.sched_data = ["legacy"]
         self.schedule.save(update_fields=["sched_data"])
 
-        with self.assertRaisesMessage(ValueError, "not a JSON object"):
+        with self.assertRaisesMessage(
+            ValueError,
+            "This schedule contains legacy operational data that must be repaired",
+        ):
             repair_sched_data_structure(self.schedule)
 
         self.schedule.refresh_from_db()
         self.assertEqual(self.schedule.sched_data, ["legacy"])
+
+    def test_explicit_malformed_repair_initializes_none_and_blank_values(self):
+        for legacy_value in (None, "", "   "):
+            with self.subTest(legacy_value=legacy_value):
+                self.schedule.sched_data = legacy_value
+                self.schedule.save(update_fields=["sched_data"])
+
+                repaired = repair_malformed_sched_data(self.schedule)
+
+                self.schedule.refresh_from_db()
+                self.assertEqual(repaired, {"version": 1, "manual_moves": []})
+                self.assertEqual(self.schedule.sched_data, repaired)
+
+    def test_explicit_malformed_repair_rejects_populated_invalid_values(self):
+        for legacy_value in ("legacy", ["legacy"], {"manual_moves": "legacy"}):
+            with self.subTest(legacy_value=legacy_value):
+                self.schedule.sched_data = legacy_value
+                self.schedule.save(update_fields=["sched_data"])
+
+                with self.assertRaisesMessage(
+                    ValueError,
+                    "This schedule contains legacy operational data that must be repaired",
+                ):
+                    repair_malformed_sched_data(self.schedule)
+
+                self.schedule.refresh_from_db()
+                self.assertEqual(self.schedule.sched_data, legacy_value)
 
     def test_first_save_initializes_empty_sched_data_cleanly(self):
         self.schedule.sched_data = {}
@@ -918,6 +1819,16 @@ class ManualMovePersistenceTests(TestCase):
         }]
 
         with self.assertRaisesMessage(ValueError, "saveable proposal result"):
+            persist_manual_move(self.schedule, proposal_result)
+
+        self.schedule.refresh_from_db()
+        self.assertIsNone(self.schedule.sched_data)
+
+    def test_rejects_unsupported_action_type(self):
+        proposal_result = self.build_saveable_result()
+        proposal_result["action_type"] = "future_move_type"
+
+        with self.assertRaisesMessage(ValueError, "supported operational move actions"):
             persist_manual_move(self.schedule, proposal_result)
 
         self.schedule.refresh_from_db()
@@ -1132,6 +2043,46 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, "<td>****</td>", html=True)
         self.assertContains(response, "<td>/////</td>", html=True)
         self.assertContains(response, "How this Schedule record works")
+
+    def test_schedule_detail_places_operational_workspace_before_secondary_details(self):
+        generated_schedule = {
+            "ags": ["Example School 0"],
+            "mon_pm1": ["Archery"],
+            "mon_pm2": ["empty"],
+        }
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
+
+        content = response.content.decode()
+        self.assertLess(content.index("Generated Schedule"), content.index("schedule-table"))
+        self.assertLess(content.index("schedule-table"), content.index("Operational Editing Controls"))
+        self.assertLess(content.index("Operational Editing Controls"), content.index("Schedule Details"))
+        self.assertLess(content.index("Schedule Details"), content.index("Diagnostics"))
+        self.assertLess(content.index("Diagnostics"), content.index("Generation Status"))
+
+    def test_schedule_detail_messages_render_before_operational_workspace(self):
+        generated_schedule = {
+            "ags": ["Example School 0"],
+            "mon_pm1": ["Archery"],
+        }
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.post(
+                reverse("sched-move-confirm", args=[self.schedule.id]),
+                {
+                    "source_block": "invalid",
+                    "target_slot": "mon_pm2",
+                    "target_group": "0",
+                },
+                follow=True,
+            )
+
+        content = response.content.decode()
+        self.assertContains(response, "The selected source block ID is invalid.")
+        self.assertLess(content.index("System messages"), content.index("schedule-table"))
         self.assertContains(response, "Viewing this page regenerates the current output")
         self.assertContains(response, "/////</code> = unavailable or not present", html=False)
         self.assertContains(response, "****</code> = unassigned available block", html=False)
@@ -1170,6 +2121,12 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, 'name="source_occurrence_id" value="occurrence:0:mon_pm1"', html=False)
         self.assertContains(response, 'name="target_group"', html=False)
         self.assertContains(response, 'name="target_slot"', html=False)
+        self.assertContains(
+            response,
+            '<option value="displacement_move" selected>Replace activity and move current activity to holding</option>',
+            html=True,
+        )
+        self.assertContains(response, "Advanced: allow overlap / double-book warning")
         self.assertContains(response, "Preview Move")
 
     def test_schedule_detail_exposes_and_renders_selected_block_conflicts(self):
@@ -1698,7 +2655,7 @@ class ScheduleWorkflowTests(TestCase):
         self.assertEqual(saved_move["move_type"], "single_block")
         self.assertEqual(saved_move["status"], "active")
         self.assertContains(response, "Move saved as a manual override.")
-        self.assertContains(response, "Saved overrides are not yet applied to schedule rendering.")
+        self.assertContains(response, "It is now applied to the operational schedule.")
 
     def test_successful_save_uses_prg_and_refresh_does_not_resubmit(self):
         activity = Course.objects.create(course_name="PRG Saved Move", abriviation="PSM", course_len=1)
@@ -1768,8 +2725,114 @@ class ScheduleWorkflowTests(TestCase):
         self.schedule.refresh_from_db()
         self.assertEqual(self.schedule.sched_data, ["existing"])
         self.assertTrue(response.redirect_chain)
-        self.assertContains(response, "operational data is not a JSON object")
-        self.assertContains(response, "Existing schedule data was left unchanged")
+        self.assertContains(
+            response,
+            "This schedule contains legacy operational data that must be repaired before schedule edits can be saved.",
+        )
+        self.assertNotContains(response, "Expected sched_data to be a JSON object")
+
+    def test_schedule_detail_shows_repair_action_for_malformed_sched_data(self):
+        self.schedule.sched_data = ""
+        self.schedule.save(update_fields=["sched_data"])
+
+        response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
+
+        self.assertEqual(response.context["sched_data_diagnostic"]["status"], "malformed")
+        self.assertTrue(response.context["sched_data_diagnostic"]["repairable"])
+        self.assertContains(response, "Legacy Schedule Data Requires Repair")
+        self.assertContains(
+            response,
+            "This schedule contains legacy operational data that must be repaired before schedule edits can be saved.",
+        )
+        self.assertContains(response, "Repair Legacy Operational Data")
+        self.assertNotContains(response, "Administrator diagnostic:")
+
+    def test_staff_sees_legacy_sched_data_debug_detail(self):
+        staff = get_user_model().objects.create_user(
+            username="schedule-admin",
+            password="test-password",
+            is_staff=True,
+        )
+        self.client.force_login(staff)
+        self.schedule.sched_data = ["legacy"]
+        self.schedule.save(update_fields=["sched_data"])
+
+        response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
+
+        self.assertContains(response, "Administrator diagnostic:")
+        self.assertContains(response, "Expected sched_data to be a JSON object; found list.")
+
+    def test_repair_action_repairs_blank_data_with_prg(self):
+        self.schedule.sched_data = "   "
+        self.schedule.save(update_fields=["sched_data"])
+
+        response = self.client.post(
+            reverse("sched-data-repair", args=[self.schedule.id]),
+            follow=True,
+        )
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(
+            response.redirect_chain,
+            [(reverse("sched-detail", args=[self.schedule.id]), 302)],
+        )
+        self.assertEqual(self.schedule.sched_data, {"version": 1, "manual_moves": []})
+        self.assertContains(response, "Legacy operational data was repaired.")
+        self.assertNotContains(response, "Repair Legacy Operational Data")
+
+    def test_repair_action_requires_post(self):
+        self.schedule.sched_data = ""
+        self.schedule.save(update_fields=["sched_data"])
+
+        response = self.client.get(reverse("sched-data-repair", args=[self.schedule.id]))
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(response.status_code, 405)
+        self.assertEqual(self.schedule.sched_data, "")
+
+    def test_repair_action_refuses_populated_invalid_data_with_prg(self):
+        self.schedule.sched_data = "legacy"
+        self.schedule.save(update_fields=["sched_data"])
+
+        response = self.client.post(
+            reverse("sched-data-repair", args=[self.schedule.id]),
+            follow=True,
+        )
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(self.schedule.sched_data, "legacy")
+        self.assertContains(
+            response,
+            "This schedule contains legacy operational data that must be repaired before schedule edits can be saved.",
+        )
+        self.assertContains(response, "Repair Legacy Operational Data")
+
+    def test_successful_blank_repair_enables_save_workflow(self):
+        activity = Course.objects.create(course_name="Repair Then Save", abriviation="RTS", course_len=1)
+        self.schedule.sched_data = ""
+        self.schedule.save(update_fields=["sched_data"])
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            repair_response = self.client.post(
+                reverse("sched-data-repair", args=[self.schedule.id]),
+                follow=True,
+            )
+            save_response = self.client.post(
+                reverse("sched-move-save", args=[self.schedule.id]),
+                self.move_post_data(activity),
+                follow=True,
+            )
+
+        self.schedule.refresh_from_db()
+        self.assertContains(repair_response, "Legacy operational data was repaired.")
+        self.assertContains(save_response, "Move saved as a manual override.")
+        self.assertEqual(len(self.schedule.sched_data["manual_moves"]), 1)
 
     def test_save_move_endpoint_rejects_stale_proposal(self):
         selected_activity = Course.objects.create(course_name="Originally Selected", abriviation="OS", course_len=1)
@@ -1822,7 +2885,11 @@ class ScheduleWorkflowTests(TestCase):
             "mon_pm1": [source.course_name],
             "mon_pm2": [target.course_name],
         }
-        post_data = self.move_post_data(source, target_slot="mon_pm2")
+        post_data = self.move_post_data(
+            source,
+            target_slot="mon_pm2",
+            action_type="overlap_move",
+        )
 
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
@@ -1857,6 +2924,149 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(confirm_response, 'class="alert alert-warning mb-3"', html=False)
         self.assertContains(save_response, "Move saved as a manual override.")
         self.assertEqual(self.schedule.sched_data["manual_moves"][0]["target_slot_key"], "mon_pm2")
+        self.assertEqual(self.schedule.sched_data["manual_moves"][0]["action_type"], "overlap_move")
+
+    def test_explicit_displacement_save_persists_and_replays_after_reload(self):
+        source = Course.objects.create(course_name="Saved Displacement Source", abriviation="SDS", course_len=1)
+        displaced = Course.objects.create(course_name="Saved Displacement Target", abriviation="SDT", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [source.course_name],
+            "mon_pm2": [displaced.course_name],
+        }
+        post_data = self.move_post_data(
+            source,
+            target_slot="mon_pm2",
+            action_type="displacement_move",
+        )
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            confirm_response = self.client.post(
+                reverse("sched-move-confirm", args=[self.schedule.id]),
+                post_data,
+                follow=True,
+            )
+            save_response = self.client.post(
+                reverse("sched-move-save", args=[self.schedule.id]),
+                post_data,
+                follow=True,
+            )
+            reload_response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
+
+        self.schedule.refresh_from_db()
+        saved_move = self.schedule.sched_data["manual_moves"][0]
+        target = reload_response.context["schedule_rows"][0]["cells"][1]
+        holding_item = reload_response.context["holding_area_preview"][0]
+        self.assertEqual(confirm_response.context["proposal_result"]["action_type"], "displacement_move")
+        self.assertContains(confirm_response, "Displacement Preview")
+        self.assertContains(save_response, "Move saved as a manual override.")
+        self.assertEqual(saved_move["action_type"], "displacement_move")
+        self.assertEqual(target["activity_id"], source.id)
+        self.assertEqual(target["overlapping_blocks"], [])
+        self.assertEqual(holding_item["activity_id"], displaced.id)
+
+    def test_occupied_target_save_defaults_to_displacement_and_holding(self):
+        source = Course.objects.create(course_name="Default Displacement Source", abriviation="DDS", course_len=1)
+        displaced = Course.objects.create(course_name="Default Displacement Target", abriviation="DDT", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [source.course_name],
+            "mon_pm2": [displaced.course_name],
+        }
+        post_data = self.move_post_data(source, target_slot="mon_pm2", action_type="")
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            save_response = self.client.post(
+                reverse("sched-move-save", args=[self.schedule.id]),
+                post_data,
+                follow=True,
+            )
+            reload_response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
+
+        self.schedule.refresh_from_db()
+        saved_move = self.schedule.sched_data["manual_moves"][0]
+        target = reload_response.context["schedule_rows"][0]["cells"][1]
+        holding_item = reload_response.context["holding_area_preview"][0]
+        self.assertContains(save_response, "Move saved as a manual override.")
+        self.assertEqual(saved_move["action_type"], "displacement_move")
+        self.assertEqual(target["activity_id"], source.id)
+        self.assertEqual(target["overlapping_blocks"], [])
+        self.assertEqual(holding_item["activity_id"], displaced.id)
+
+    def test_holding_reassignment_save_appends_history_and_survives_reload(self):
+        source = Course.objects.create(course_name="Workflow Holding Source", abriviation="WHS", course_len=1)
+        displaced = Course.objects.create(course_name="Workflow Holding Displaced", abriviation="WHD", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [source.course_name],
+            "mon_pm2": [displaced.course_name],
+            "tue_am1": ["empty"],
+        }
+        self.schedule.sched_data = {
+            "version": 1,
+            "manual_moves": [{
+                "source_block_id": "0:mon_pm1",
+                "source_activity_id": source.id,
+                "source_activity_name": source.course_name,
+                "source_occurrence_id": "occurrence:0:mon_pm1",
+                "source_group_index": 0,
+                "source_slot_key": "mon_pm1",
+                "target_group_index": 0,
+                "target_slot_key": "mon_pm2",
+                "move_type": "single_block",
+                "action_type": "displacement_move",
+                "created_at": "2026-06-14T12:00:00Z",
+                "status": "active",
+            }],
+        }
+        self.schedule.save(update_fields=["sched_data"])
+        post_data = {
+            "source_kind": "holding",
+            "source_holding": "holding:override:0:0:mon_pm2:1",
+            "source_activity_id": displaced.id,
+            "source_activity_name": displaced.course_name,
+            "source_occurrence_id": "occurrence:0:mon_pm2",
+            "target_group": "0",
+            "target_slot": "tue_am1",
+            "action_type": "overlap_move",
+        }
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            preview_response = self.client.get(
+                reverse("sched-detail", args=[self.schedule.id]),
+                {
+                    "source_kind": "holding",
+                    "selected_holding": "holding:override:0:0:mon_pm2:1",
+                    "source_activity_id": displaced.id,
+                    "source_activity_name": displaced.course_name,
+                    "source_occurrence_id": "occurrence:0:mon_pm2",
+                    "target_group": "0",
+                    "target_slot": "tue_am1",
+                    "action_type": "overlap_move",
+                },
+            )
+            save_response = self.client.post(
+                reverse("sched-move-save", args=[self.schedule.id]),
+                post_data,
+                follow=True,
+            )
+            reload_response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
+
+        self.schedule.refresh_from_db()
+        self.assertTrue(preview_response.context["proposal_result"]["applied"])
+        self.assertEqual(preview_response.context["proposal_result"]["source_kind"], "holding")
+        self.assertEqual(preview_response.context["holding_area_preview"], [])
+        self.assertContains(save_response, "Move saved as a manual override.")
+        self.assertEqual(len(self.schedule.sched_data["manual_moves"]), 2)
+        saved_reassignment = self.schedule.sched_data["manual_moves"][1]
+        self.assertEqual(saved_reassignment["source_kind"], "holding")
+        self.assertEqual(saved_reassignment["source_holding_id"], "holding:override:0:0:mon_pm2:1")
+        self.assertEqual(reload_response.context["holding_area_preview"], [])
+        self.assertEqual(reload_response.context["schedule_rows"][0]["cells"][1]["activity_id"], source.id)
+        self.assertEqual(reload_response.context["schedule_rows"][0]["cells"][3]["activity_id"], displaced.id)
 
     def test_save_move_endpoint_rejects_invalid_and_multi_block_proposals(self):
         one_block = Course.objects.create(course_name="Save One Block", abriviation="SOB", course_len=1)
@@ -1917,7 +3127,11 @@ class ScheduleWorkflowTests(TestCase):
             )
             second_response = self.client.post(
                 reverse("sched-move-save", args=[self.schedule.id]),
-                self.move_post_data(activity, target_slot="wed_am1"),
+                self.move_post_data(
+                    activity,
+                    source_block="0:tue_am1",
+                    target_slot="wed_am1",
+                ),
                 follow=True,
             )
 
@@ -1929,8 +3143,8 @@ class ScheduleWorkflowTests(TestCase):
             ["tue_am1", "wed_am1"],
         )
 
-    def test_saved_move_does_not_change_schedule_rendering_on_reload(self):
-        activity = Course.objects.create(course_name="Saved But Unapplied", abriviation="SBU", course_len=1)
+    def test_saved_move_survives_reload_without_changing_generated_output(self):
+        activity = Course.objects.create(course_name="Saved And Replayed", abriviation="SAR", course_len=1)
         generated_schedule = {
             "ags": ["Proposal School 0"],
             "mon_pm1": [activity.course_name],
@@ -1947,13 +3161,344 @@ class ScheduleWorkflowTests(TestCase):
             reload_response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
 
         self.assertContains(save_response, "Move saved as a manual override.")
-        self.assertEqual(reload_response.context["schedule_rows"][0]["cells"][0]["raw_value"], activity.course_name)
-        self.assertEqual(reload_response.context["schedule_rows"][0]["cells"][3]["raw_value"], "empty")
+        self.assertEqual(reload_response.context["schedule_rows"][0]["cells"][0]["raw_value"], "empty")
+        self.assertEqual(reload_response.context["schedule_rows"][0]["cells"][3]["raw_value"], activity.course_name)
+        self.assertTrue(reload_response.context["schedule_rows"][0]["cells"][3]["is_persisted_override"])
+        self.assertEqual(len(reload_response.context["override_replay_result"]["applied_overrides"]), 1)
         self.assertIsNone(reload_response.context["proposal_result"])
+        self.assertContains(reload_response, "(persisted)")
+        self.assertContains(reload_response, "Saved overrides applied:")
         self.assertEqual(generated_schedule["mon_pm1"], [activity.course_name])
         self.assertEqual(generated_schedule["tue_am1"], ["empty"])
 
-    def move_post_data(self, activity, source_block="0:mon_pm1", target_slot="tue_am1"):
+    def test_persisted_overlap_and_temporary_proposal_render_distinctly(self):
+        source = Course.objects.create(course_name="Persisted Render Source", abriviation="PRS", course_len=1)
+        occupied = Course.objects.create(course_name="Persisted Render Target", abriviation="PRT", course_len=1)
+        proposal_activity = Course.objects.create(course_name="Temporary Render Proposal", abriviation="TRP", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [source.course_name],
+            "mon_pm2": [occupied.course_name],
+            "tue_am1": [proposal_activity.course_name],
+            "tue_am2": ["empty"],
+        }
+        self.schedule.sched_data = {
+            "version": 1,
+            "manual_moves": [{
+                "source_block_id": "0:mon_pm1",
+                "source_activity_id": source.id,
+                "source_activity_name": source.course_name,
+                "source_occurrence_id": "occurrence:0:mon_pm1",
+                "source_group_index": 0,
+                "source_slot_key": "mon_pm1",
+                "target_group_index": 0,
+                "target_slot_key": "mon_pm2",
+                "move_type": "single_block",
+                "created_at": "2026-06-14T12:00:00Z",
+                "status": "active",
+            }],
+        }
+        self.schedule.save(update_fields=["sched_data"])
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.get(
+                reverse("sched-detail", args=[self.schedule.id]),
+                {
+                    "selected_block": "0:tue_am1",
+                    "source_activity_id": proposal_activity.id,
+                    "source_activity_name": proposal_activity.course_name,
+                    "source_occurrence_id": "occurrence:0:tue_am1",
+                    "target_slot": "tue_am2",
+                    "target_group": "0",
+                },
+            )
+
+        self.assertContains(response, "(persisted overlap)")
+        self.assertContains(response, "(proposed)")
+        self.assertContains(response, "duplicate_group_slot")
+        self.assertTrue(response.context["proposal_result"]["applied"])
+
+    def test_explicit_displacement_renders_holding_area_without_switching_global_default(self):
+        source = Course.objects.create(course_name="Preview Holding Source", abriviation="PHS", course_len=1)
+        displaced = Course.objects.create(course_name="Preview Holding Displaced", abriviation="PHD", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [source.course_name],
+            "mon_pm2": [displaced.course_name],
+        }
+        self.schedule.sched_data = {
+            "version": 1,
+            "manual_moves": [{
+                "source_block_id": "0:mon_pm1",
+                "source_activity_id": source.id,
+                "source_activity_name": source.course_name,
+                "source_occurrence_id": "occurrence:0:mon_pm1",
+                "source_group_index": 0,
+                "source_slot_key": "mon_pm1",
+                "target_group_index": 0,
+                "target_slot_key": "mon_pm2",
+                "move_type": "single_block",
+                "action_type": "displacement_move",
+                "created_at": "2026-06-14T12:00:00Z",
+                "status": "active",
+            }],
+        }
+        stored_before = deepcopy(self.schedule.sched_data)
+        self.schedule.save(update_fields=["sched_data"])
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
+
+        self.schedule.refresh_from_db()
+        main_target = response.context["schedule_rows"][0]["cells"][1]
+        holding_item = response.context["holding_area_preview"][0]
+        self.assertContains(response, "Operational Holding Area")
+        self.assertContains(
+            response,
+            "These activities were displaced by saved displacement moves",
+        )
+        self.assertContains(response, displaced.course_name)
+        self.assertContains(response, "Proposal School 0")
+        self.assertContains(response, "PM2")
+        self.assertContains(response, "displaced by saved override 1")
+        self.assertEqual(response.context["override_replay_result"]["replay_mode"], "overlap")
+        self.assertEqual(response.context["displacement_preview"]["replay_mode"], "overlap")
+        self.assertEqual(main_target["raw_value"], source.course_name)
+        self.assertEqual(main_target["overlapping_blocks"], [])
+        self.assertEqual(holding_item["activity_name"], displaced.course_name)
+        self.assertEqual(holding_item["activity_id"], displaced.id)
+        displacement_applied = response.context["displacement_preview"]["applied_overrides"][0]
+        self.assertEqual(displacement_applied["moved_activity_id"], source.id)
+        self.assertEqual(displacement_applied["displaced_activity_ids"], [displaced.id])
+        self.assertNotIn(
+            "duplicate_group_slot",
+            {conflict["type"] for conflict in response.context["conflict_summaries"]},
+        )
+        self.assertEqual(self.schedule.sched_data, stored_before)
+
+    def test_holding_area_preview_is_hidden_when_displacement_holds_nothing(self):
+        activity = Course.objects.create(course_name="Preview Empty Target", abriviation="PET", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+        self.schedule.sched_data = {
+            "version": 1,
+            "manual_moves": [{
+                "source_block_id": "0:mon_pm1",
+                "source_activity_id": activity.id,
+                "source_activity_name": activity.course_name,
+                "source_occurrence_id": "occurrence:0:mon_pm1",
+                "source_group_index": 0,
+                "source_slot_key": "mon_pm1",
+                "target_group_index": 0,
+                "target_slot_key": "tue_am1",
+                "move_type": "single_block",
+                "created_at": "2026-06-14T12:00:00Z",
+                "status": "active",
+            }],
+        }
+        self.schedule.save(update_fields=["sched_data"])
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
+
+        self.assertEqual(response.context["holding_area_preview"], [])
+        self.assertNotContains(response, "Operational Holding Area")
+        self.assertNotContains(
+            response,
+            "These activities were displaced by saved displacement moves",
+        )
+        self.assertEqual(response.context["schedule_rows"][0]["cells"][3]["raw_value"], activity.course_name)
+        self.assertEqual(response.context["conflict_summaries"], [])
+
+    def test_non_first_row_selection_defaults_target_group_and_replays_on_same_row(self):
+        first_row = Course.objects.create(course_name="View First Row", abriviation="VFR", course_len=1)
+        second_row = Course.objects.create(course_name="View Second Row", abriviation="VSR", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0", "Proposal School 1"],
+            "mon_pm1": [first_row.course_name, second_row.course_name],
+            "tue_am1": ["empty", "empty"],
+        }
+        post_data = {
+            "source_block": "1:mon_pm1",
+            "source_activity_id": second_row.id,
+            "source_activity_name": second_row.course_name,
+            "source_occurrence_id": "occurrence:1:mon_pm1",
+            "source_group": "1",
+            "source_slot": "mon_pm1",
+            "target_slot": "tue_am1",
+            "target_group": "1",
+        }
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            selection_response = self.client.get(
+                reverse("sched-detail", args=[self.schedule.id]),
+                {"selected_block": "1:mon_pm1"},
+            )
+            save_response = self.client.post(
+                reverse("sched-move-save", args=[self.schedule.id]),
+                post_data,
+                follow=True,
+            )
+            reload_response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
+
+        self.schedule.refresh_from_db()
+        self.assertContains(selection_response, '<option value="1" selected>Proposal School 1</option>', html=True)
+        self.assertContains(selection_response, 'name="source_group" value="1"', html=False)
+        self.assertContains(selection_response, 'name="source_slot" value="mon_pm1"', html=False)
+        self.assertContains(save_response, "Move saved as a manual override.")
+        saved_move = self.schedule.sched_data["manual_moves"][0]
+        self.assertEqual(saved_move["source_group_index"], 1)
+        self.assertEqual(saved_move["target_group_index"], 1)
+        self.assertEqual(reload_response.context["schedule_rows"][0]["cells"][0]["raw_value"], first_row.course_name)
+        self.assertEqual(reload_response.context["schedule_rows"][0]["cells"][3]["raw_value"], "empty")
+        self.assertEqual(reload_response.context["schedule_rows"][1]["cells"][0]["raw_value"], "empty")
+        self.assertEqual(reload_response.context["schedule_rows"][1]["cells"][3]["raw_value"], second_row.course_name)
+
+    def test_non_first_row_holding_preview_reports_displaced_target_group(self):
+        source = Course.objects.create(course_name="Holding Row Two Source", abriviation="HRS", course_len=1)
+        displaced = Course.objects.create(course_name="Holding Row Two Displaced", abriviation="HRD", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0", "Proposal School 1"],
+            "mon_pm1": ["empty", source.course_name],
+            "mon_pm2": ["empty", displaced.course_name],
+        }
+        self.schedule.sched_data = {
+            "version": 1,
+            "manual_moves": [{
+                "source_block_id": "1:mon_pm1",
+                "source_activity_id": source.id,
+                "source_activity_name": source.course_name,
+                "source_occurrence_id": "occurrence:1:mon_pm1",
+                "source_group_index": 1,
+                "source_slot_key": "mon_pm1",
+                "target_group_index": 1,
+                "target_slot_key": "mon_pm2",
+                "move_type": "single_block",
+                "action_type": "displacement_move",
+                "created_at": "2026-06-14T12:00:00Z",
+                "status": "active",
+            }],
+        }
+        self.schedule.save(update_fields=["sched_data"])
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
+
+        holding_item = response.context["holding_area_preview"][0]
+        self.assertEqual(holding_item["activity_name"], displaced.course_name)
+        self.assertEqual(holding_item["origin_group_index"], 1)
+        self.assertEqual(holding_item["origin_group_label"], "Proposal School 1")
+        self.assertContains(response, "Proposal School 1")
+        self.assertNotEqual(holding_item["origin_group_label"], "Proposal School 0")
+
+    def test_stale_persisted_override_warns_without_crashing_render(self):
+        activity = Course.objects.create(course_name="Current Generated Activity", abriviation="CGA", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+        self.schedule.sched_data = {
+            "version": 1,
+            "manual_moves": [{
+                "source_block_id": "0:mon_pm1",
+                "source_activity_id": activity.id,
+                "source_activity_name": "Old Activity Name",
+                "source_occurrence_id": "occurrence:0:mon_pm1",
+                "source_group_index": 0,
+                "source_slot_key": "mon_pm1",
+                "target_group_index": 0,
+                "target_slot_key": "tue_am1",
+                "move_type": "single_block",
+                "created_at": "2026-06-14T12:00:00Z",
+                "status": "active",
+            }],
+        }
+        self.schedule.save(update_fields=["sched_data"])
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["schedule_rows"][0]["cells"][0]["raw_value"], activity.course_name)
+        self.assertEqual(response.context["schedule_rows"][0]["cells"][3]["raw_value"], "empty")
+        self.assertContains(response, "persisted_override_replay")
+        self.assertContains(response, "is stale")
+        self.assertContains(response, "Replay status:")
+        self.assertContains(response, "stale")
+
+    def test_chained_overlap_rearrangement_keeps_all_activities_visible(self):
+        first = Course.objects.create(course_name="Rendered Chain First", abriviation="RCF", course_len=1)
+        second = Course.objects.create(course_name="Rendered Chain Second", abriviation="RCS", course_len=1)
+        generated_schedule = {
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [first.course_name],
+            "mon_pm2": [second.course_name],
+            "tue_am1": ["empty"],
+        }
+        self.schedule.sched_data = {
+            "version": 1,
+            "manual_moves": [
+                {
+                    "source_block_id": "0:mon_pm1",
+                    "source_activity_id": first.id,
+                    "source_activity_name": first.course_name,
+                    "source_occurrence_id": "occurrence:0:mon_pm1",
+                    "source_group_index": 0,
+                    "source_slot_key": "mon_pm1",
+                    "target_group_index": 0,
+                    "target_slot_key": "mon_pm2",
+                    "move_type": "single_block",
+                    "created_at": "2026-06-14T12:00:00Z",
+                    "status": "active",
+                },
+                {
+                    "source_block_id": "0:mon_pm2",
+                    "source_activity_id": second.id,
+                    "source_activity_name": second.course_name,
+                    "source_occurrence_id": "occurrence:0:mon_pm2",
+                    "source_group_index": 0,
+                    "source_slot_key": "mon_pm2",
+                    "target_group_index": 0,
+                    "target_slot_key": "tue_am1",
+                    "move_type": "single_block",
+                    "created_at": "2026-06-14T12:01:00Z",
+                    "status": "active",
+                },
+            ],
+        }
+        stored_before = deepcopy(self.schedule.sched_data)
+        self.schedule.save(update_fields=["sched_data"])
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, first.course_name)
+        self.assertContains(response, second.course_name)
+        self.assertEqual(response.context["schedule_rows"][0]["cells"][1]["raw_value"], first.course_name)
+        self.assertEqual(response.context["schedule_rows"][0]["cells"][3]["raw_value"], second.course_name)
+        self.assertEqual(len(response.context["override_replay_result"]["applied_overrides"]), 2)
+        self.assertEqual(self.schedule.sched_data, stored_before)
+
+    def move_post_data(
+        self,
+        activity,
+        source_block="0:mon_pm1",
+        target_slot="tue_am1",
+        action_type="displacement_move",
+    ):
         return {
             "source_block": source_block,
             "source_activity_id": activity.id,
@@ -1961,6 +3506,7 @@ class ScheduleWorkflowTests(TestCase):
             "source_occurrence_id": f"occurrence:{source_block}",
             "target_slot": target_slot,
             "target_group": "0",
+            "action_type": action_type,
             "can_save": "manipulated-client-value",
         }
 

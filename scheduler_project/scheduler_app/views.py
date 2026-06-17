@@ -11,13 +11,19 @@ from django.utils.text import slugify
 
 from .school_accounting import school_slot_accounting_summary
 from .schedule_operations import (
+    DEFAULT_NEW_MOVE_ACTION,
+    MalformedSchedDataError,
     MOVE_CONFLICT_SEVERITY,
     SCHEDULE_DAYS,
+    apply_holding_reassignment_proposal,
     apply_move_proposal,
+    apply_persisted_overrides,
     build_schedule_blocks,
+    diagnose_sched_data_structure,
     evaluate_move_proposal_for_save,
     iter_schedule_blocks,
     persist_manual_move,
+    repair_malformed_sched_data,
     validate_schedule_blocks,
 )
 
@@ -197,12 +203,17 @@ class SchedDetail(DetailView):
         target_group_value = self.request.GET.get('target_group')
         return {
             'requested': target_slot_key is not None or target_group_value is not None,
+            'source_kind': self.request.GET.get('source_kind') or 'grid',
             'source_block_id': self.request.GET.get('selected_block'),
+            'source_holding_id': self.request.GET.get('selected_holding'),
             'source_activity_id_value': self.request.GET.get('source_activity_id'),
             'source_activity_name': self.request.GET.get('source_activity_name'),
             'source_occurrence_id': self.request.GET.get('source_occurrence_id'),
+            'source_group_value': self.request.GET.get('source_group'),
+            'source_slot_key': self.request.GET.get('source_slot') or None,
             'target_slot_key': target_slot_key,
             'target_group_value': target_group_value,
+            'action_type': self.request.GET.get('action_type') or DEFAULT_NEW_MOVE_ACTION,
             'recomputed_server_side': self.request.GET.get('proposal_confirmed') == '1',
         }
 
@@ -211,6 +222,7 @@ class SchedDetail(DetailView):
         schedule = self.object.create_sched
         schedule_days = SCHEDULE_DAYS
         schedule_rows = build_schedule_blocks(schedule)
+        replay_result = apply_persisted_overrides(self.object, schedule_rows)
         proposal_input = self.get_move_proposal_input()
         selected_block_id = proposal_input['source_block_id']
         proposal_result = None
@@ -223,18 +235,51 @@ class SchedDetail(DetailView):
                 source_activity_id = int(proposal_input['source_activity_id_value'])
             except (TypeError, ValueError):
                 source_activity_id = None
-            proposal_result = apply_move_proposal(schedule_rows, {
+            try:
+                source_group_index = int(proposal_input['source_group_value'])
+            except (TypeError, ValueError):
+                source_group_index = None
+            proposal = {
                 'source_block_id': selected_block_id,
+                'source_holding_id': proposal_input['source_holding_id'],
                 'source_activity_id': source_activity_id,
                 'source_activity_name': proposal_input['source_activity_name'],
                 'source_occurrence_id': proposal_input['source_occurrence_id'],
+                'source_group_index': source_group_index,
+                'source_slot_key': proposal_input['source_slot_key'],
                 'target_slot_key': proposal_input['target_slot_key'],
                 'target_group_index': target_group_index,
-            })
+                'action_type': proposal_input['action_type'],
+            }
+            if proposal_input['source_kind'] == 'holding':
+                proposal_result = apply_holding_reassignment_proposal(
+                    schedule_rows,
+                    replay_result['holding_area'],
+                    proposal,
+                )
+            else:
+                proposal_result = apply_move_proposal(schedule_rows, proposal)
             if proposal_result['applied']:
                 selected_block_id = proposal_result['target_block_id']
 
         conflict_summaries = validate_schedule_blocks(schedule_rows)
+        existing_replay_conflicts = {
+            (
+                conflict.get('type'),
+                conflict.get('override_index'),
+                conflict.get('message'),
+            )
+            for conflict in conflict_summaries
+        }
+        conflict_summaries.extend(
+            conflict
+            for conflict in replay_result['replay_conflicts']
+            if (
+                conflict.get('type'),
+                conflict.get('override_index'),
+                conflict.get('message'),
+            ) not in existing_replay_conflicts
+        )
         save_readiness = None
         if proposal_result:
             proposal_result['conflicts'] = conflict_summaries
@@ -280,13 +325,25 @@ class SchedDetail(DetailView):
             ),
             None,
         )
+        selected_holding = next(
+            (
+                item
+                for item in replay_result['holding_area']
+                if item['holding_id'] == proposal_input['source_holding_id']
+            ),
+            None,
+        )
 
         context['selected_schools'] = self.object.schools.order_by('school_name')
         context['schedule_days'] = schedule_days
         context['schedule_rows'] = schedule_rows
         context['selected_block'] = selected_block
+        context['selected_holding'] = selected_holding
         context['selected_occurrence_id'] = selected_block['occurrence_id'] if selected_block else None
         context['proposal_result'] = proposal_result
+        context['override_replay_result'] = replay_result
+        context['displacement_preview'] = replay_result
+        context['holding_area_preview'] = replay_result['holding_area']
         context['save_readiness'] = save_readiness
         context['proposal_recomputed_server_side'] = proposal_input['recomputed_server_side']
         context['conflict_summaries'] = conflict_summaries
@@ -295,6 +352,7 @@ class SchedDetail(DetailView):
             group['severity'] == 'error'
             for group in conflict_summary_groups
         )
+        context['sched_data_diagnostic'] = diagnose_sched_data_structure(self.object.sched_data)
         context['generation_diagnostics'] = getattr(self.object, 'generation_diagnostics', [])
         context['generation_blocked'] = bool(context['generation_diagnostics'])
         context['generation_complete'] = getattr(self.object, 'generation_complete', True)
@@ -309,12 +367,17 @@ class SchedMoveConfirm(SchedDetail):
     def get_move_proposal_input(self):
         return {
             'requested': True,
+            'source_kind': self.request.POST.get('source_kind') or 'grid',
             'source_block_id': self.request.POST.get('source_block'),
+            'source_holding_id': self.request.POST.get('source_holding'),
             'source_activity_id_value': self.request.POST.get('source_activity_id'),
             'source_activity_name': self.request.POST.get('source_activity_name'),
             'source_occurrence_id': self.request.POST.get('source_occurrence_id'),
+            'source_group_value': self.request.POST.get('source_group'),
+            'source_slot_key': self.request.POST.get('source_slot') or None,
             'target_slot_key': self.request.POST.get('target_slot'),
             'target_group_value': self.request.POST.get('target_group'),
+            'action_type': self.request.POST.get('action_type') or DEFAULT_NEW_MOVE_ACTION,
             'recomputed_server_side': True,
         }
 
@@ -341,11 +404,16 @@ class SchedMoveConfirm(SchedDetail):
     def get_proposal_redirect_url(self, confirmed=False):
         query = {
             'selected_block': self.request.POST.get('source_block', ''),
+            'selected_holding': self.request.POST.get('source_holding', ''),
+            'source_kind': self.request.POST.get('source_kind', 'grid'),
             'source_activity_id': self.request.POST.get('source_activity_id', ''),
             'source_activity_name': self.request.POST.get('source_activity_name', ''),
             'source_occurrence_id': self.request.POST.get('source_occurrence_id', ''),
+            'source_group': self.request.POST.get('source_group', ''),
+            'source_slot': self.request.POST.get('source_slot', ''),
             'target_slot': self.request.POST.get('target_slot', ''),
             'target_group': self.request.POST.get('target_group', ''),
+            'action_type': self.request.POST.get('action_type', DEFAULT_NEW_MOVE_ACTION),
         }
         if confirmed:
             query['proposal_confirmed'] = '1'
@@ -372,17 +440,42 @@ class SchedMoveSave(SchedMoveConfirm):
         else:
             try:
                 persist_manual_move(self.object, proposal_result)
+            except MalformedSchedDataError as error:
+                messages.error(request, error.operator_message)
+                if request.user.is_staff:
+                    messages.warning(request, f'Administrator diagnostic: {error.debug_detail}')
             except ValueError as error:
                 messages.error(request, f'Move was not saved: {error}')
             else:
                 messages.success(
                     request,
-                    'Move saved as a manual override. Saved overrides are not yet applied '
-                    'to schedule rendering.',
+                    'Move saved as a manual override. It is now applied to the operational schedule.',
                 )
                 return HttpResponseRedirect(reverse('sched-detail', args=[self.object.pk]))
 
         return HttpResponseRedirect(self.get_proposal_redirect_url(confirmed=True))
+
+
+class SchedDataRepair(DetailView):
+    model = TheSched
+    http_method_names = ['post']
+
+    def post(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        try:
+            repair_malformed_sched_data(self.object)
+        except MalformedSchedDataError as error:
+            messages.error(request, error.operator_message)
+            if request.user.is_staff:
+                messages.warning(request, f'Administrator diagnostic: {error.debug_detail}')
+        except ValueError as error:
+            messages.error(request, f'Operational data repair failed: {error}')
+        else:
+            messages.success(
+                request,
+                'Legacy operational data was repaired. Schedule edits can now be saved.',
+            )
+        return HttpResponseRedirect(reverse('sched-detail', args=[self.object.pk]))
 
 
 class SchedCreate(CreateView):
