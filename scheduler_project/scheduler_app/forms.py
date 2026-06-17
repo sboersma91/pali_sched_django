@@ -190,7 +190,15 @@ class SchoolsForm(ModelForm):
 
     class Meta:
         model = Schools
-        fields = "__all__"
+        fields = (
+            'school_name',
+            'subject',
+            'arrive',
+            'depart',
+            'total_students',
+            'ag_num',
+            'attending_year',
+        )
         ordering= ('school_name',)
         labels = {
             'school_name': 'School Name',
@@ -218,7 +226,6 @@ class SchoolsForm(ModelForm):
                 'data-target-group-size': DEFAULT_ACTIVITY_GROUP_SIZE,
             }),
             'attending_year': widgets.DateInput(attrs={'class': 'form-control', 'type': 'date'}),
-            'sorted_subject_lst': forms.TextInput(attrs={'class': 'form-control'}),
         }
 
     def save(self, commit=True):

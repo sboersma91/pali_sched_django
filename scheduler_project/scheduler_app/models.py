@@ -240,6 +240,8 @@ class TheSched(models.Model):
         sched['classes_needed'] = []
           
         group_count=0
+        day_offset = {'Mon':0, "Tue":5, "Wed":10, "Thur":15, "Fri":19}
+        #  day_end_offsett = {'Mon':, 'Tues':, 'Wed':,'Fri':}
         for school in self.schools.all():
             school.update_sorted_subject_lst()
             sorted_subjects = [subject for subject in school.sorted_subject_lst.split(',') if subject]
@@ -247,7 +249,7 @@ class TheSched(models.Model):
                 sched['ags'].append(school.school_name + ' ' + str(i))
                 # ------------------
                 sched['classes_needed'].append(sorted_subjects[::-1])
-            for key in SCHEDULE_SLOT_KEYS[DAY_OFFSETS[school.arrive]:DAY_OFFSETS[school.depart]]:
+            for key in list(sched.keys())[day_offset[school.arrive]:day_offset[school.depart]]:    
                 for i in range(group_count,group_count+school.ag_num):
                             sched[key][i] = UNASSIGNED_SLOT_VALUE
                             # gray box means school is gone
