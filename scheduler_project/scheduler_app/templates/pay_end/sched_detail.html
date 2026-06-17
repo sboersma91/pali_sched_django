@@ -43,6 +43,9 @@
             {% for item in holding_area_preview %}
               <li class="list-group-item px-0">
                 <strong>{{ item.display_value }}</strong>
+                {% if item.occurrence_length and item.occurrence_length > 1 %}
+                  <span class="badge bg-warning text-dark ms-2">{{ item.occurrence_length }}-block occurrence</span>
+                {% endif %}
                 <span class="d-block small">
                   Source: {{ item.origin_group_label }} — {{ item.origin_slot_label }}
                   (<code>{{ item.origin_slot_key }}</code>)
@@ -285,49 +288,45 @@
               </dd>
             {% endif %}
           </dl>
-          {% if not selected_block.is_multi_block %}
-            <form method="get" action="{% url 'sched-detail' sched.id %}#schedule-workspace" class="row g-2 align-items-end mt-3">
-              <input type="hidden" name="source_kind" value="grid">
-              <input type="hidden" name="selected_block" value="{{ selected_block.block_id }}">
-              <input type="hidden" name="source_activity_id" value="{{ selected_block.activity_id }}">
-              <input type="hidden" name="source_activity_name" value="{{ selected_block.raw_value }}">
-              <input type="hidden" name="source_occurrence_id" value="{{ selected_block.occurrence_id }}">
-              <input type="hidden" name="source_group" value="{{ selected_block.group_index }}">
-              <input type="hidden" name="source_slot" value="{{ selected_block.slot_key }}">
-              <div class="col-md-3">
-                <label for="target-group" class="form-label">Proposed Activity Group</label>
-                <select id="target-group" name="target_group" class="form-select" required>
-                  {% for row in schedule_rows %}
-                    <option value="{{ row.group_index }}"{% if row.group_index == selected_block.group_index %} selected{% endif %}>{{ row.ag }}</option>
-                  {% endfor %}
-                </select>
-              </div>
-              <div class="col-md-3">
-                <label for="target-slot" class="form-label">Proposed Time Block</label>
-                <select id="target-slot" name="target_slot" class="form-select" required>
-                  {% for day in schedule_days %}
-                    <optgroup label="{{ day.name }}">
-                      {% for slot in day.slots %}
-                        <option value="{{ slot.key }}">{{ slot.label }} — {{ slot.key }}</option>
-                      {% endfor %}
-                    </optgroup>
-                  {% endfor %}
-                </select>
-              </div>
-              <div class="col-md-4">
-                <label for="action-type" class="form-label">Occupied Target Behavior</label>
-                <select id="action-type" name="action_type" class="form-select" required>
-                  <option value="displacement_move" selected>Replace activity and move current activity to holding</option>
-                  <option value="overlap_move">Advanced: allow overlap / double-book warning</option>
-                </select>
-              </div>
-              <div class="col-md-2">
-                <button type="submit" class="btn btn-outline-primary w-100">Preview Move</button>
-              </div>
-            </form>
-          {% else %}
-            <p class="text-muted mb-0 mt-3">Multi-block activity move proposals are not supported yet.</p>
-          {% endif %}
+          <form method="get" action="{% url 'sched-detail' sched.id %}#schedule-workspace" class="row g-2 align-items-end mt-3">
+            <input type="hidden" name="source_kind" value="grid">
+            <input type="hidden" name="selected_block" value="{{ selected_block.block_id }}">
+            <input type="hidden" name="source_activity_id" value="{{ selected_block.activity_id }}">
+            <input type="hidden" name="source_activity_name" value="{{ selected_block.raw_value }}">
+            <input type="hidden" name="source_occurrence_id" value="{{ selected_block.occurrence_id }}">
+            <input type="hidden" name="source_group" value="{{ selected_block.group_index }}">
+            <input type="hidden" name="source_slot" value="{{ selected_block.slot_key }}">
+            <div class="col-md-3">
+              <label for="target-group" class="form-label">Proposed Activity Group</label>
+              <select id="target-group" name="target_group" class="form-select" required>
+                {% for row in schedule_rows %}
+                  <option value="{{ row.group_index }}"{% if row.group_index == selected_block.group_index %} selected{% endif %}>{{ row.ag }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="col-md-3">
+              <label for="target-slot" class="form-label">Proposed Starting Time Block</label>
+              <select id="target-slot" name="target_slot" class="form-select" required>
+                {% for day in schedule_days %}
+                  <optgroup label="{{ day.name }}">
+                    {% for slot in day.slots %}
+                      <option value="{{ slot.key }}">{{ slot.label }} — {{ slot.key }}</option>
+                    {% endfor %}
+                  </optgroup>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="col-md-4">
+              <label for="action-type" class="form-label">Occupied Target Behavior</label>
+              <select id="action-type" name="action_type" class="form-select" required>
+                <option value="displacement_move" selected>Replace activity and move current activity to holding</option>
+                <option value="overlap_move">Advanced: allow overlap / double-book warning</option>
+              </select>
+            </div>
+            <div class="col-md-2">
+              <button type="submit" class="btn btn-outline-primary w-100">Preview Move</button>
+            </div>
+          </form>
         </div>
       </div>
     {% endif %}

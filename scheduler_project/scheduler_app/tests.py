@@ -602,13 +602,14 @@ class ScheduleMoveProposalTests(TestCase):
         self.assertEqual(result["error"], "invalid_target_slot")
         self.assertEqual(blocks[0]["cells"][0], source_before)
 
-    def test_multi_block_proposal_is_rejected(self):
+    def test_multi_block_proposal_moves_whole_occurrence(self):
         activity = Course.objects.create(course_name="Proposal Two Block", abriviation="P2", course_len=2)
         blocks = build_schedule_blocks({
             "ags": ["Proposal School 0"],
             "tue_am1": [activity.course_name],
             "tue_am2": [activity.course_name],
             "wed_am1": ["empty"],
+            "wed_am2": ["empty"],
         })
 
         result = apply_move_proposal(blocks, {
@@ -620,12 +621,17 @@ class ScheduleMoveProposalTests(TestCase):
             "target_group_index": 0,
         })
 
-        self.assertFalse(result["applied"])
-        self.assertEqual(result["error"], "multi_block_not_supported")
-        self.assertEqual(blocks[0]["cells"][3]["raw_value"], activity.course_name)
-        self.assertEqual(blocks[0]["cells"][4]["raw_value"], activity.course_name)
+        self.assertTrue(result["applied"])
+        self.assertEqual(result["move_type"], "occurrence")
+        self.assertEqual(result["occurrence_length"], 2)
+        self.assertEqual(blocks[0]["cells"][3]["raw_value"], "empty")
+        self.assertEqual(blocks[0]["cells"][4]["raw_value"], "empty")
+        self.assertEqual(blocks[0]["cells"][8]["raw_value"], activity.course_name)
+        self.assertEqual(blocks[0]["cells"][9]["raw_value"], activity.course_name)
+        self.assertEqual(blocks[0]["cells"][8]["occurrence_id"], blocks[0]["cells"][9]["occurrence_id"])
+        self.assertTrue(blocks[0]["cells"][8]["is_multi_block"])
 
-    def test_occupied_target_proposal_keeps_both_activities_and_creates_duplicate_conflict(self):
+    def test_occupied_target_proposal_defaults_to_displacement_preview(self):
         source_activity = Course.objects.create(course_name="Overlap Source", abriviation="OS", course_len=1)
         target_activity = Course.objects.create(course_name="Overlap Target", abriviation="OT", course_len=1)
         blocks = build_schedule_blocks({
@@ -644,21 +650,44 @@ class ScheduleMoveProposalTests(TestCase):
         })
         conflicts = validate_schedule_blocks(blocks)
         target = blocks[0]["cells"][1]
-        overlap = target["overlapping_blocks"][0]
+        holding_item = result["proposal_holding_area"][0]
 
         self.assertTrue(result["applied"])
         self.assertTrue(result["target_was_occupied"])
+        self.assertEqual(target["raw_value"], source_activity.course_name)
+        self.assertEqual(target["overlapping_blocks"], [])
+        self.assertEqual(holding_item["activity_name"], target_activity.course_name)
+        self.assertEqual(holding_item["origin_slot_key"], "mon_pm2")
+        self.assertNotIn("duplicate_group_slot", {conflict["type"] for conflict in conflicts})
+
+    def test_explicit_overlap_target_proposal_keeps_both_activities_and_creates_duplicate_conflict(self):
+        source_activity = Course.objects.create(course_name="Overlap Source Explicit", abriviation="OSE", course_len=1)
+        target_activity = Course.objects.create(course_name="Overlap Target Explicit", abriviation="OTE", course_len=1)
+        blocks = build_schedule_blocks({
+            "ags": ["Proposal School 0"],
+            "mon_pm1": [source_activity.course_name],
+            "mon_pm2": [target_activity.course_name],
+        })
+
+        result = apply_move_proposal(blocks, {
+            "source_block_id": "0:mon_pm1",
+            "source_activity_id": source_activity.id,
+            "source_activity_name": source_activity.course_name,
+            "source_occurrence_id": "occurrence:0:mon_pm1",
+            "target_slot_key": "mon_pm2",
+            "target_group_index": 0,
+            "action_type": "overlap_move",
+        })
+        conflicts = validate_schedule_blocks(blocks)
+        target = blocks[0]["cells"][1]
+        overlap = target["overlapping_blocks"][0]
+
+        self.assertTrue(result["applied"])
         self.assertEqual(target["raw_value"], target_activity.course_name)
         self.assertEqual(overlap["raw_value"], source_activity.course_name)
-        self.assertEqual(overlap["group_index"], target["group_index"])
-        self.assertEqual(overlap["slot_key"], target["slot_key"])
         duplicate = next(conflict for conflict in conflicts if conflict["type"] == "duplicate_group_slot")
         self.assertEqual(duplicate["severity"], "warning")
         self.assertEqual(duplicate["related_block_ids"], [target["block_id"], overlap["block_id"]])
-        self.assertIn(source_activity.course_name, duplicate["message"])
-        self.assertIn(target_activity.course_name, duplicate["message"])
-        self.assertIn(target["group_label"], duplicate["message"])
-        self.assertIn(target["slot_key"], duplicate["message"])
 
     def test_non_first_row_proposal_uses_composite_group_slot_target(self):
         first_row = Course.objects.create(course_name="First Row Control", abriviation="FRC", course_len=1)
@@ -1148,6 +1177,129 @@ class PersistedOverrideReplayTests(TestCase):
             [None, "holding"],
         )
 
+    def test_persisted_multi_block_override_replays_whole_occurrence(self):
+        activity = Course.objects.create(
+            course_name="Persisted Two Block Replay",
+            abriviation="PTBR",
+            course_len=2,
+        )
+        generated_schedule = {
+            "ags": ["Replay School 0"],
+            "tue_am1": [activity.course_name],
+            "tue_am2": [activity.course_name],
+            "wed_am1": ["empty"],
+            "wed_am2": ["empty"],
+        }
+        self.schedule.sched_data["manual_moves"] = [
+            self.move_record(
+                source_block_id="0:tue_am1",
+                source_group_index=0,
+                source_slot_key="tue_am1",
+                target_group_index=0,
+                target_slot_key="wed_am1",
+                activity=activity,
+                occurrence_id="occurrence:0:tue_am1",
+                move_type="occurrence",
+                action_type="displacement_move",
+            ),
+        ]
+        blocks = build_schedule_blocks(generated_schedule)
+
+        result = apply_persisted_overrides(self.schedule, blocks)
+
+        self.assertEqual(len(result["applied_overrides"]), 1)
+        self.assertTrue(blocks[0]["cells"][3]["is_empty"])
+        self.assertTrue(blocks[0]["cells"][4]["is_empty"])
+        self.assertEqual(blocks[0]["cells"][8]["activity_id"], activity.id)
+        self.assertEqual(blocks[0]["cells"][9]["activity_id"], activity.id)
+        self.assertEqual(blocks[0]["cells"][8]["occurrence_id"], blocks[0]["cells"][9]["occurrence_id"])
+
+    def test_single_block_displacement_moves_entire_multi_block_target_to_holding(self):
+        source = Course.objects.create(
+            course_name="Single Displaces Multi",
+            abriviation="SDM",
+            course_len=1,
+        )
+        displaced = Course.objects.create(
+            course_name="Whole Target Two Block",
+            abriviation="WTTB",
+            course_len=2,
+        )
+        generated_schedule = {
+            "ags": ["Replay School 0"],
+            "mon_pm1": [source.course_name],
+            "tue_am1": [displaced.course_name],
+            "tue_am2": [displaced.course_name],
+        }
+        self.schedule.sched_data["manual_moves"] = [
+            self.move_record(
+                source_block_id="0:mon_pm1",
+                source_slot_key="mon_pm1",
+                target_slot_key="tue_am1",
+                activity=source,
+                action_type="displacement_move",
+            ),
+        ]
+        blocks = build_schedule_blocks(generated_schedule)
+
+        result = apply_persisted_overrides(self.schedule, blocks)
+
+        self.assertEqual(blocks[0]["cells"][3]["activity_id"], source.id)
+        self.assertTrue(blocks[0]["cells"][4]["is_empty"])
+        self.assertEqual(len(result["holding_area"]), 1)
+        self.assertEqual(result["holding_area"][0]["activity_id"], displaced.id)
+        self.assertEqual(result["holding_area"][0]["occurrence_length"], 2)
+        self.assertEqual(result["holding_area"][0]["source_slot_keys"], ["tue_am1", "tue_am2"])
+
+    def test_multi_block_holding_reassignment_restores_whole_occurrence(self):
+        source = Course.objects.create(
+            course_name="Holding Multi Source",
+            abriviation="HMS",
+            course_len=1,
+        )
+        displaced = Course.objects.create(
+            course_name="Holding Multi Target",
+            abriviation="HMT",
+            course_len=2,
+        )
+        generated_schedule = {
+            "ags": ["Replay School 0"],
+            "mon_pm1": [source.course_name],
+            "mon_pm2": ["empty"],
+            "tue_am1": [displaced.course_name],
+            "tue_am2": [displaced.course_name],
+            "wed_am1": ["empty"],
+            "wed_am2": ["empty"],
+        }
+        self.schedule.sched_data["manual_moves"] = [
+            self.move_record(
+                source_block_id="0:mon_pm1",
+                source_slot_key="mon_pm1",
+                target_slot_key="tue_am1",
+                activity=source,
+                action_type="displacement_move",
+            ),
+            {
+                **self.holding_record(
+                    holding_id="holding:override:0:0:tue_am1:1",
+                    activity=displaced,
+                    occurrence_id="occurrence:0:tue_am1",
+                    target_slot_key="wed_am1",
+                    action_type="displacement_move",
+                ),
+                "move_type": "occurrence",
+                "occurrence_length": 2,
+            },
+        ]
+        blocks = build_schedule_blocks(generated_schedule)
+
+        result = apply_persisted_overrides(self.schedule, blocks)
+
+        self.assertEqual(result["holding_area"], [])
+        self.assertEqual(blocks[0]["cells"][8]["activity_id"], displaced.id)
+        self.assertEqual(blocks[0]["cells"][9]["activity_id"], displaced.id)
+        self.assertEqual(blocks[0]["cells"][8]["occurrence_id"], blocks[0]["cells"][9]["occurrence_id"])
+
     def test_holding_reassignment_into_occupied_target_can_displace_again(self):
         displaced = Course.objects.create(
             course_name="Reassigned Displacing Holding",
@@ -1558,7 +1710,7 @@ class MoveProposalSourceIdentityTests(TestCase):
         self.assertEqual(proposal_result["error"], "invalid_source")
         self.assertFalse(save_readiness["can_save"])
 
-    def test_multi_block_source_remains_blocked(self):
+    def test_multi_block_source_requires_valid_target_footprint(self):
         multi_block = Course.objects.create(
             course_name="Identity Multi Block",
             abriviation="IMB",
@@ -1569,6 +1721,7 @@ class MoveProposalSourceIdentityTests(TestCase):
             "tue_am1": [multi_block.course_name],
             "tue_am2": [multi_block.course_name],
             "wed_am1": ["empty"],
+            "wed_am2": ["empty"],
         })
         proposal = {
             "source_block_id": "0:tue_am1",
@@ -1582,9 +1735,10 @@ class MoveProposalSourceIdentityTests(TestCase):
         proposal_result = apply_move_proposal(blocks, proposal)
         save_readiness = evaluate_move_proposal_for_save(proposal_result)
 
-        self.assertFalse(proposal_result["applied"])
-        self.assertEqual(proposal_result["error"], "multi_block_not_supported")
-        self.assertFalse(save_readiness["can_save"])
+        self.assertTrue(proposal_result["applied"])
+        self.assertEqual(proposal_result["move_type"], "occurrence")
+        self.assertEqual(proposal_result["occurrence_length"], 2)
+        self.assertTrue(save_readiness["can_save"])
 
     def assert_identity_mismatch_blocks_save(self):
         proposal_result = apply_move_proposal(self.blocks, self.proposal)
@@ -2261,13 +2415,14 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, "invalid_target_slot")
         self.assertContains(response, "This proposed move cannot be saved.")
 
-    def test_schedule_detail_rejects_multi_block_move_proposal(self):
-        activity = Course.objects.create(course_name="Rejected Two Block", abriviation="RTB", course_len=2)
+    def test_schedule_detail_moves_multi_block_occurrence_as_unit(self):
+        activity = Course.objects.create(course_name="Moved Two Block", abriviation="MTB", course_len=2)
         generated_schedule = {
             "ags": ["Proposal School 0"],
             "tue_am1": [activity.course_name],
             "tue_am2": [activity.course_name],
             "wed_am1": ["empty"],
+            "wed_am2": ["empty"],
         }
         url = (
             f'{reverse("sched-detail", args=[self.schedule.id])}'
@@ -2281,9 +2436,17 @@ class ScheduleWorkflowTests(TestCase):
             response = self.client.get(url)
 
         self.assertEqual(response.status_code, 200)
-        self.assertFalse(response.context["proposal_result"]["applied"])
-        self.assertEqual(response.context["proposal_result"]["error"], "multi_block_not_supported")
-        self.assertContains(response, "Multi-block activity moves are not supported yet.")
+        self.assertTrue(response.context["proposal_result"]["applied"])
+        self.assertEqual(response.context["proposal_result"]["move_type"], "occurrence")
+        self.assertEqual(response.context["proposal_result"]["occurrence_length"], 2)
+        source_first, source_second = response.context["schedule_rows"][0]["cells"][3:5]
+        target_first, target_second = response.context["schedule_rows"][0]["cells"][8:10]
+        self.assertTrue(source_first["is_empty"])
+        self.assertTrue(source_second["is_empty"])
+        self.assertEqual(target_first["activity_id"], activity.id)
+        self.assertEqual(target_second["activity_id"], activity.id)
+        self.assertEqual(target_first["occurrence_id"], target_second["occurrence_id"])
+        self.assertContains(response, "Temporary Move Proposal")
 
     def test_schedule_detail_reruns_validation_after_move_proposal(self):
         activity = Course.objects.create(course_name="Proposal Daytime", abriviation="PD", course_len=1)
@@ -2504,18 +2667,6 @@ class ScheduleWorkflowTests(TestCase):
                     "target_group": "0",
                 },
                 "stale_source",
-            ),
-            (
-                "multi-block source",
-                {
-                    "source_block": "0:tue_am1",
-                    "source_activity_id": multi_block.id,
-                    "source_activity_name": multi_block.course_name,
-                    "source_occurrence_id": "occurrence:0:tue_am1",
-                    "target_slot": "wed_am1",
-                    "target_group": "0",
-                },
-                "multi_block_not_supported",
             ),
             (
                 "invalid target slot",
@@ -3093,10 +3244,6 @@ class ScheduleWorkflowTests(TestCase):
                 "invalid_source",
             ),
             (
-                self.move_post_data(multi_block, source_block="0:tue_am1", target_slot="wed_am1"),
-                "multi_block_not_supported",
-            ),
-            (
                 self.move_post_data(one_block, target_slot="invalid"),
                 "invalid_target_slot",
             ),
@@ -3138,6 +3285,7 @@ class ScheduleWorkflowTests(TestCase):
                     activity,
                     source_block="0:tue_am1",
                     target_slot="wed_am1",
+                    source_occurrence_id="occurrence:persisted:0:0:tue_am1",
                 ),
                 follow=True,
             )
@@ -3505,12 +3653,13 @@ class ScheduleWorkflowTests(TestCase):
         source_block="0:mon_pm1",
         target_slot="tue_am1",
         action_type="displacement_move",
+        source_occurrence_id=None,
     ):
         return {
             "source_block": source_block,
             "source_activity_id": activity.id,
             "source_activity_name": activity.course_name,
-            "source_occurrence_id": f"occurrence:{source_block}",
+            "source_occurrence_id": source_occurrence_id or f"occurrence:{source_block}",
             "target_slot": target_slot,
             "target_group": "0",
             "action_type": action_type,
@@ -3565,8 +3714,8 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, "2 blocks")
         self.assertContains(response, "Selected Position")
         self.assertContains(response, "Block 2 of 2")
-        self.assertNotContains(response, "Preview Move")
-        self.assertContains(response, "Multi-block activity move proposals are not supported yet.")
+        self.assertContains(response, "Preview Move")
+        self.assertContains(response, "Proposed Starting Time Block")
 
     def test_schedule_detail_does_not_make_empty_or_unavailable_cells_selectable(self):
         generated_schedule = {

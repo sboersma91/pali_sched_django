@@ -41,6 +41,7 @@ MOVE_CONFLICT_SEVERITY = {
     'invalid_time_slot': 'warning',
     'persisted_override_replay': 'warning',
 }
+SUPPORTED_MOVE_TYPES = {'single_block', 'occurrence'}
 SOURCE_IDENTITY_CHANGED_MESSAGE = (
     'This proposal cannot be saved because the generated schedule changed since selection.'
 )
@@ -168,17 +169,308 @@ def iter_schedule_blocks(blocks):
             yield from block.get('overlapping_blocks', [])
 
 
+def get_block_grid_map(blocks):
+    return {
+        (block['group_index'], block['slot_key']): block
+        for row in blocks
+        for block in row['cells']
+    }
+
+
+def get_blocks_by_id(blocks):
+    return {
+        block['block_id']: block
+        for block in iter_schedule_blocks(blocks)
+    }
+
+
+def get_occurrence_blocks(blocks, occurrence_id):
+    if not occurrence_id:
+        return []
+    return [
+        block
+        for block in iter_schedule_blocks(blocks)
+        if block.get('occurrence_id') == occurrence_id and block.get('is_activity')
+    ]
+
+
+def get_source_occurrence(blocks, source):
+    if not source:
+        return []
+    occurrence_blocks = get_occurrence_blocks(blocks, source.get('occurrence_id'))
+    return sorted(
+        occurrence_blocks or [source],
+        key=lambda block: block.get('occurrence_position') or 1,
+    )
+
+
+def expected_target_slot_keys(target_slot_key, occurrence_length):
+    if occurrence_length == 1:
+        return [target_slot_key]
+    if occurrence_length == 2:
+        if not target_slot_key or not target_slot_key.endswith('1'):
+            return None
+        return [target_slot_key, f'{target_slot_key[:-1]}2']
+    return None
+
+
+def get_target_footprint(blocks, target_group_index, target_slot_key, occurrence_length):
+    slot_keys = expected_target_slot_keys(target_slot_key, occurrence_length)
+    if not slot_keys:
+        return None
+    blocks_by_group_slot = get_block_grid_map(blocks)
+    footprint = [
+        blocks_by_group_slot.get((target_group_index, slot_key))
+        for slot_key in slot_keys
+    ]
+    if any(block is None for block in footprint):
+        return None
+    return footprint
+
+
+def occurrence_identity_matches(source_blocks, proposal):
+    expected_activity_id = proposal.get('source_activity_id')
+    expected_activity_name = proposal.get('source_activity_name')
+    expected_occurrence_id = proposal.get('source_occurrence_id')
+    expected_group_index = proposal.get('source_group_index')
+    expected_slot_key = proposal.get('source_slot_key')
+
+    if expected_activity_id is None or not expected_activity_name:
+        return False
+    if not source_blocks:
+        return False
+
+    first = source_blocks[0]
+    if expected_occurrence_id is not None and first.get('occurrence_id') != expected_occurrence_id:
+        return False
+    if expected_group_index is not None and first.get('group_index') != expected_group_index:
+        return False
+    if expected_slot_key is not None and expected_slot_key not in {block.get('slot_key') for block in source_blocks}:
+        return False
+
+    return all(
+        block.get('is_activity')
+        and not block.get('is_empty')
+        and not block.get('is_unavailable')
+        and block.get('activity_id') == expected_activity_id
+        and block.get('raw_value') == expected_activity_name
+        and block.get('display_value') == expected_activity_name
+        and block.get('occurrence_id') == first.get('occurrence_id')
+        and block.get('group_index') == first.get('group_index')
+        for block in source_blocks
+    )
+
+
+def clear_block_activity(block, empty_metadata=None):
+    block.update({
+        'raw_value': 'empty',
+        'display_value': SCHEDULE_DISPLAY_VALUES['empty'],
+        'activity_id': None,
+        'activity_length': None,
+        'is_activity': False,
+        'is_empty': True,
+        'is_unavailable': False,
+        'occurrence_id': None,
+        'occurrence_length': None,
+        'occurrence_position': None,
+        'is_multi_block': False,
+        'has_overlap': False,
+        'overlapping_blocks': [],
+        **(empty_metadata or {}),
+    })
+
+
+def remove_occurrence_from_operational_blocks(blocks, source_blocks, empty_metadata=None):
+    removal_results = []
+    for source in list(source_blocks):
+        removal_results.append(remove_activity_from_operational_blocks(blocks, source, empty_metadata))
+    return {
+        'source_removed': all(result['source_removed'] for result in removal_results),
+        'promoted_blocks': [result['promoted_block'] for result in removal_results if result['promoted_block']],
+    }
+
+
+def build_activity_values_from_source(source):
+    if source.get('is_holding'):
+        return {
+            'raw_value': source['activity_name'],
+            'display_value': source['display_value'],
+            'activity_id': source['activity_id'],
+            'activity_length': source['activity_length'],
+        }
+    return {
+        key: source[key]
+        for key in ('raw_value', 'display_value', 'activity_id', 'activity_length')
+    }
+
+
+def source_occurrence_snapshots(source_blocks, occurrence_length):
+    snapshots = deepcopy(source_blocks)
+    return sorted(
+        snapshots,
+        key=lambda block: block.get('occurrence_position') or 1,
+    )[:occurrence_length]
+
+
+def holding_occurrence_snapshots(source):
+    occurrence_length = source.get('occurrence_length') or source.get('activity_length') or 1
+    snapshots = []
+    for position in range(1, occurrence_length + 1):
+        snapshots.append({
+            **deepcopy(source),
+            'occurrence_length': occurrence_length,
+            'occurrence_position': position,
+            'is_multi_block': occurrence_length > 1,
+            'is_holding': True,
+        })
+    return snapshots
+
+
+def collect_displaced_occurrences(blocks, target_blocks, exclude_block_ids=None):
+    exclude_block_ids = set(exclude_block_ids or [])
+    occupants = []
+    for target in target_blocks:
+        occupants.extend([target, *target.get('overlapping_blocks', [])])
+
+    grouped = {}
+    for occupant in occupants:
+        if not occupant.get('is_activity') or occupant.get('block_id') in exclude_block_ids:
+            continue
+        occurrence_id = (
+            occupant.get('occurrence_id')
+            if (occupant.get('occurrence_length') or 1) > 1
+            else occupant.get('block_id')
+        ) or occupant.get('block_id')
+        if occurrence_id not in grouped:
+            full_occurrence = get_occurrence_blocks(blocks, occurrence_id)
+            if full_occurrence:
+                grouped[occurrence_id] = [
+                    deepcopy(block)
+                    for block in full_occurrence
+                    if block.get('block_id') not in exclude_block_ids
+                ]
+            else:
+                grouped[occurrence_id] = [deepcopy(occupant)]
+
+    displaced = []
+    for occurrence_blocks in grouped.values():
+        occurrence_blocks = sorted(
+            occurrence_blocks,
+            key=lambda block: block.get('occurrence_position') or 1,
+        )
+        displaced.append(occurrence_blocks)
+    return displaced
+
+
+def remove_displaced_occurrences_from_grid(blocks, displaced_occurrences, empty_metadata=None):
+    for occurrence_blocks in displaced_occurrences:
+        if not occurrence_blocks:
+            continue
+        live_blocks = get_occurrence_blocks(blocks, occurrence_blocks[0].get('occurrence_id'))
+        if live_blocks:
+            remove_occurrence_from_operational_blocks(blocks, live_blocks, empty_metadata)
+
+
+def reset_target_footprint_for_displacement(target_blocks):
+    for target in target_blocks:
+        target['overlapping_blocks'] = []
+        target['has_overlap'] = False
+
+
+def place_occurrence_in_targets(
+    target_blocks,
+    source_snapshots,
+    *,
+    source_identifier,
+    override_source=None,
+    is_persisted=False,
+    is_proposed=False,
+    action_type=OVERLAP_MOVE_ACTION,
+    override_index=None,
+):
+    occurrence_length = len(source_snapshots)
+    if is_persisted and action_type == OVERLAP_MOVE_ACTION:
+        occurrence_id = f'occurrence:overlap:persisted:{override_index}:{target_blocks[0]["block_id"]}'
+    elif is_persisted:
+        occurrence_id = f'occurrence:persisted:{override_index}:{target_blocks[0]["block_id"]}'
+    elif action_type == OVERLAP_MOVE_ACTION and any(target['is_activity'] for target in target_blocks):
+        occurrence_id = f'occurrence:overlap:{target_blocks[0]["block_id"]}:{source_identifier}'
+    else:
+        occurrence_id = f'occurrence:{target_blocks[0]["block_id"]}'
+    placed_blocks = []
+    target_was_occupied = any(target['is_activity'] for target in target_blocks)
+
+    for position, (target, snapshot) in enumerate(zip(target_blocks, source_snapshots), start=1):
+        activity_values = build_activity_values_from_source(snapshot)
+        common_values = {
+            **activity_values,
+            'group_index': target['group_index'],
+            'group_label': target['group_label'],
+            'slot_key': target['slot_key'],
+            'slot_label': target['slot_label'],
+            'is_activity': True,
+            'is_empty': False,
+            'is_unavailable': False,
+            'occurrence_id': occurrence_id,
+            'occurrence_length': occurrence_length,
+            'occurrence_position': position,
+            'is_multi_block': occurrence_length > 1,
+            'is_persisted_override': is_persisted,
+            'override_status': 'applied' if is_persisted else None,
+            'override_source': override_source,
+            'replay_conflicts': [],
+            'conflicts': [],
+        }
+        if action_type == OVERLAP_MOVE_ACTION and target['is_activity']:
+            placed = {
+                **snapshot,
+                **common_values,
+                'block_id': (
+                    f'overlap:persisted:{override_index}:{target["block_id"]}:{source_identifier}'
+                    if is_persisted
+                    else f'overlap:{target["block_id"]}:{source_identifier}'
+                ),
+                'is_proposed_source': False,
+                'is_proposed_target': is_proposed,
+                'proposed_from_block_id': source_identifier,
+                'proposed_to_block_id': None,
+                'has_overlap': False,
+                'overlapping_blocks': [],
+            }
+            target['overlapping_blocks'].append(placed)
+            target['has_overlap'] = True
+        else:
+            target.update({
+                **common_values,
+                'is_proposed_source': False,
+                'is_proposed_target': is_proposed,
+                'proposed_from_block_id': source_identifier,
+                'proposed_to_block_id': None,
+                'has_overlap': False,
+                'overlapping_blocks': [],
+            })
+            placed = target
+        placed_blocks.append(placed)
+
+    return {
+        'placed_blocks': placed_blocks,
+        'target_was_occupied': target_was_occupied,
+    }
+
+
 def verify_move_proposal_source(blocks, proposal):
     all_blocks = list(iter_schedule_blocks(blocks))
     blocks_by_id = {block['block_id']: block for block in all_blocks}
     source_block_id = proposal.get('source_block_id')
     source = blocks_by_id.get(source_block_id)
+    source_blocks = get_source_occurrence(blocks, source)
     result = {
         'verified': False,
         'error': None,
         'message': '',
         'source_block_id': source_block_id,
         'source': source,
+        'source_blocks': source_blocks,
     }
 
     def reject(error, message):
@@ -189,33 +481,7 @@ def verify_move_proposal_source(blocks, proposal):
         return reject('invalid_source', 'The selected source block ID is invalid.')
     if not source['is_activity'] or source['is_empty'] or source['is_unavailable']:
         return reject('stale_source', SOURCE_IDENTITY_CHANGED_MESSAGE)
-    if source['is_multi_block'] or source.get('occurrence_length') != 1:
-        return reject('multi_block_not_supported', 'Multi-block activity moves are not supported yet.')
-
-    expected_activity_id = proposal.get('source_activity_id')
-    expected_activity_name = proposal.get('source_activity_name')
-    expected_occurrence_id = proposal.get('source_occurrence_id')
-    expected_group_index = proposal.get('source_group_index')
-    expected_slot_key = proposal.get('source_slot_key')
-    if (
-        expected_activity_id is None
-        or not expected_activity_name
-        or source.get('activity_id') != expected_activity_id
-        or source.get('raw_value') != expected_activity_name
-        or source.get('display_value') != expected_activity_name
-        or (
-            expected_group_index is not None
-            and source.get('group_index') != expected_group_index
-        )
-        or (
-            expected_slot_key is not None
-            and source.get('slot_key') != expected_slot_key
-        )
-        or (
-            expected_occurrence_id is not None
-            and source.get('occurrence_id') != expected_occurrence_id
-        )
-    ):
+    if not occurrence_identity_matches(source_blocks, proposal):
         return reject('source_identity_mismatch', SOURCE_IDENTITY_CHANGED_MESSAGE)
 
     result['verified'] = True
@@ -291,11 +557,6 @@ def apply_move_proposal(blocks, proposal):
         for day in SCHEDULE_DAYS
         for slot in day['slots']
     }
-    blocks_by_group_slot = {
-        (block['group_index'], block['slot_key']): block
-        for row in blocks
-        for block in row['cells']
-    }
     source_block_id = proposal.get('source_block_id')
     target_slot_key = proposal.get('target_slot_key')
     target_group_index = proposal.get('target_group_index')
@@ -329,12 +590,17 @@ def apply_move_proposal(blocks, proposal):
     if action_type not in SUPPORTED_MOVE_ACTIONS:
         return reject('unsupported_action_type', 'The requested operational move action is not supported.')
     source = source_verification['source']
+    source_blocks = source_verification['source_blocks']
+    occurrence_length = source.get('occurrence_length') or 1
     result.update({
         'source_activity_id': source['activity_id'],
         'source_activity_name': source['raw_value'],
         'source_occurrence_id': source['occurrence_id'],
         'source_group_index': source['group_index'],
         'source_slot_key': source['slot_key'],
+        'source_block_ids': [block['block_id'] for block in source_blocks],
+        'occurrence_length': occurrence_length,
+        'move_type': 'occurrence' if occurrence_length > 1 else 'single_block',
     })
     if not isinstance(target_group_index, int):
         return reject('invalid_target_group', 'The target activity group is invalid.')
@@ -343,28 +609,36 @@ def apply_move_proposal(blocks, proposal):
     if target_slot_key not in valid_slot_keys:
         return reject('invalid_target_slot', 'The target time slot is invalid.')
 
-    target = blocks_by_group_slot.get((target_group_index, target_slot_key))
-    if not target:
-        return reject('invalid_target_slot', 'The target activity group or time slot is invalid.')
+    target_blocks = get_target_footprint(blocks, target_group_index, target_slot_key, occurrence_length)
+    if not target_blocks:
+        return reject('invalid_target_footprint', 'The target does not have a valid footprint for this activity occurrence.')
+    target = target_blocks[0]
     result['target_block_id'] = target['block_id']
-    if target['block_id'] == source['block_id']:
+    result['target_block_ids'] = [block['block_id'] for block in target_blocks]
+    if {block['block_id'] for block in target_blocks} == {block['block_id'] for block in source_blocks}:
         return reject('same_source_and_target', 'The target is the current activity block.')
-    if target['is_unavailable']:
+    if any(block['is_unavailable'] for block in target_blocks):
         return reject('target_unavailable', 'The target block is unavailable for this activity group.')
-    if not target['is_empty'] and not target['is_activity']:
+    if any(not block['is_empty'] and not block['is_activity'] for block in target_blocks):
         return reject('target_not_available', 'The target block is not available for a move proposal.')
 
-    activity_values = {
-        key: source[key]
-        for key in (
-            'raw_value',
-            'display_value',
-            'activity_id',
-            'activity_length',
+    source_snapshots = source_occurrence_snapshots(source_blocks, occurrence_length)
+    target_activities = [
+        block['display_value']
+        for block in target_blocks
+        if block['is_activity']
+    ]
+    target_was_occupied = bool(target_activities)
+    displaced_occurrences = (
+        collect_displaced_occurrences(
+            blocks,
+            target_blocks,
+            exclude_block_ids=[block['block_id'] for block in source_blocks],
         )
-    }
-    source_snapshot = deepcopy(source)
-    source_removal = remove_activity_from_operational_blocks(blocks, source, {
+        if target_was_occupied and action_type == DISPLACEMENT_MOVE_ACTION
+        else []
+    )
+    source_removal = remove_occurrence_from_operational_blocks(blocks, source_blocks, {
         'is_proposed_source': True,
         'is_proposed_target': False,
         'proposed_from_block_id': None,
@@ -372,54 +646,28 @@ def apply_move_proposal(blocks, proposal):
     })
     if not source_removal['source_removed']:
         return reject('stale_source', SOURCE_IDENTITY_CHANGED_MESSAGE)
-    if target['is_activity']:
-        proposed_target = {
-            **source_snapshot,
-            **activity_values,
-            'block_id': f'overlap:{target["block_id"]}:{source["block_id"]}',
-            'group_index': target['group_index'],
-            'group_label': target['group_label'],
-            'slot_key': target['slot_key'],
-            'slot_label': target['slot_label'],
-            'is_activity': True,
-            'is_empty': False,
-            'is_unavailable': False,
-            'occurrence_id': f'occurrence:overlap:{target["block_id"]}:{source["block_id"]}',
-            'occurrence_length': 1,
-            'occurrence_position': 1,
-            'is_multi_block': False,
-            'is_proposed_source': False,
-            'is_proposed_target': True,
-            'proposed_from_block_id': source['block_id'],
-            'proposed_to_block_id': None,
-            'has_overlap': False,
-            'overlapping_blocks': [],
-            'conflicts': [],
-        }
-        target['overlapping_blocks'].append(proposed_target)
-        target['has_overlap'] = True
-        result.update({
-            'target_block_id': proposed_target['block_id'],
-            'target_was_occupied': True,
-            'target_activity': target['display_value'],
+    if displaced_occurrences:
+        remove_displaced_occurrences_from_grid(blocks, displaced_occurrences, {
+            'is_proposed_source': True,
+            'is_proposed_target': False,
         })
-    else:
-        target.update({
-            **activity_values,
-            'is_activity': True,
-            'is_empty': False,
-            'is_unavailable': False,
-            'occurrence_id': f'occurrence:{target["block_id"]}',
-            'occurrence_length': 1,
-            'occurrence_position': 1,
-            'is_multi_block': False,
-            'is_proposed_source': False,
-            'is_proposed_target': True,
-            'proposed_from_block_id': source['block_id'],
-            'proposed_to_block_id': None,
-        })
-        proposed_target = target
-        result['target_was_occupied'] = False
+    placement = place_occurrence_in_targets(
+        target_blocks,
+        source_snapshots,
+        source_identifier=source['block_id'],
+        is_proposed=True,
+        action_type=action_type,
+    )
+    proposed_target = placement['placed_blocks'][0]
+    result.update({
+        'target_block_id': proposed_target['block_id'],
+        'target_was_occupied': target_was_occupied,
+        'target_activity': ', '.join(target_activities) if target_was_occupied else None,
+        'proposal_holding_area': [
+            build_holding_area_item(occurrence_blocks, 'proposal', position)
+            for position, occurrence_blocks in enumerate(displaced_occurrences, start=1)
+        ],
+    })
     result.update({
         'applied': True,
         'message': 'The move proposal was applied in memory only.',
@@ -438,11 +686,6 @@ def apply_holding_reassignment_proposal(blocks, holding_area, proposal):
         slot['key']
         for day in SCHEDULE_DAYS
         for slot in day['slots']
-    }
-    blocks_by_group_slot = {
-        (block['group_index'], block['slot_key']): block
-        for row in blocks
-        for block in row['cells']
     }
     source_holding_id = proposal.get('source_holding_id')
     target_slot_key = proposal.get('target_slot_key')
@@ -487,8 +730,7 @@ def apply_holding_reassignment_proposal(blocks, holding_area, proposal):
         or source.get('occurrence_id') != proposal.get('source_occurrence_id')
     ):
         return reject('source_identity_mismatch', SOURCE_IDENTITY_CHANGED_MESSAGE)
-    if source.get('activity_length') == 2:
-        return reject('multi_block_not_supported', 'Multi-block activity moves are not supported yet.')
+    occurrence_length = source.get('occurrence_length') or source.get('activity_length') or 1
     if not isinstance(target_group_index, int):
         return reject('invalid_target_group', 'The target activity group is invalid.')
     if target_group_index not in valid_group_indices:
@@ -496,13 +738,15 @@ def apply_holding_reassignment_proposal(blocks, holding_area, proposal):
     if target_slot_key not in valid_slot_keys:
         return reject('invalid_target_slot', 'The target time slot is invalid.')
 
-    target = blocks_by_group_slot.get((target_group_index, target_slot_key))
-    if not target:
-        return reject('invalid_target_slot', 'The target activity group or time slot is invalid.')
+    target_blocks = get_target_footprint(blocks, target_group_index, target_slot_key, occurrence_length)
+    if not target_blocks:
+        return reject('invalid_target_footprint', 'The target does not have a valid footprint for this activity occurrence.')
+    target = target_blocks[0]
     result['target_block_id'] = target['block_id']
-    if target['is_unavailable']:
+    result['target_block_ids'] = [block['block_id'] for block in target_blocks]
+    if any(block['is_unavailable'] for block in target_blocks):
         return reject('target_unavailable', 'The target block is unavailable for this activity group.')
-    if not target['is_empty'] and not target['is_activity']:
+    if any(not block['is_empty'] and not block['is_activity'] for block in target_blocks):
         return reject('target_not_available', 'The target block is not available for a move proposal.')
 
     result['source_identity_verified'] = True
@@ -510,69 +754,44 @@ def apply_holding_reassignment_proposal(blocks, holding_area, proposal):
         'source_activity_id': source['activity_id'],
         'source_activity_name': source['activity_name'],
         'source_occurrence_id': source['occurrence_id'],
+        'source_block_ids': source.get('source_block_ids', []),
+        'occurrence_length': occurrence_length,
+        'move_type': 'occurrence' if occurrence_length > 1 else 'single_block',
     })
-    source_snapshot = {
-        'raw_value': source['activity_name'],
-        'display_value': source['display_value'],
-        'activity_id': source['activity_id'],
-        'activity_length': source['activity_length'],
-        'block_id': source['holding_id'],
-        'occurrence_id': source['occurrence_id'],
-        'replay_conflicts': [],
-    }
-    activity_values = {
-        key: source_snapshot[key]
-        for key in ('raw_value', 'display_value', 'activity_id', 'activity_length')
-    }
+    source_snapshots = holding_occurrence_snapshots(source)
+    target_activities = [
+        block['display_value']
+        for block in target_blocks
+        if block['is_activity']
+    ]
+    displaced_occurrences = (
+        collect_displaced_occurrences(blocks, target_blocks)
+        if target_activities and action_type == DISPLACEMENT_MOVE_ACTION
+        else []
+    )
     holding_area.remove(source)
-    if target['is_activity']:
-        proposed_target = {
-            **source_snapshot,
-            **activity_values,
-            'block_id': f'overlap:{target["block_id"]}:{source["holding_id"]}',
-            'group_index': target['group_index'],
-            'group_label': target['group_label'],
-            'slot_key': target['slot_key'],
-            'slot_label': target['slot_label'],
-            'is_activity': True,
-            'is_empty': False,
-            'is_unavailable': False,
-            'occurrence_id': f'occurrence:overlap:{target["block_id"]}:{source["holding_id"]}',
-            'occurrence_length': 1,
-            'occurrence_position': 1,
-            'is_multi_block': False,
-            'is_proposed_source': False,
-            'is_proposed_target': True,
-            'proposed_from_block_id': source['holding_id'],
-            'proposed_to_block_id': None,
-            'has_overlap': False,
-            'overlapping_blocks': [],
-            'conflicts': [],
-        }
-        target['overlapping_blocks'].append(proposed_target)
-        target['has_overlap'] = True
-        result.update({
-            'target_block_id': proposed_target['block_id'],
-            'target_was_occupied': True,
-            'target_activity': target['display_value'],
+    if displaced_occurrences:
+        remove_displaced_occurrences_from_grid(blocks, displaced_occurrences, {
+            'is_proposed_source': True,
+            'is_proposed_target': False,
         })
-    else:
-        target.update({
-            **activity_values,
-            'is_activity': True,
-            'is_empty': False,
-            'is_unavailable': False,
-            'occurrence_id': f'occurrence:{target["block_id"]}',
-            'occurrence_length': 1,
-            'occurrence_position': 1,
-            'is_multi_block': False,
-            'is_proposed_source': False,
-            'is_proposed_target': True,
-            'proposed_from_block_id': source['holding_id'],
-            'proposed_to_block_id': None,
-        })
-        proposed_target = target
-        result['target_was_occupied'] = False
+    placement = place_occurrence_in_targets(
+        target_blocks,
+        source_snapshots,
+        source_identifier=source['holding_id'],
+        is_proposed=True,
+        action_type=action_type,
+    )
+    proposed_target = placement['placed_blocks'][0]
+    result.update({
+        'target_block_id': proposed_target['block_id'],
+        'target_was_occupied': bool(target_activities),
+        'target_activity': ', '.join(target_activities) if target_activities else None,
+        'proposal_holding_area': [
+            build_holding_area_item(occurrence_blocks, 'proposal', position)
+            for position, occurrence_blocks in enumerate(displaced_occurrences, start=1)
+        ],
+    })
 
     result.update({
         'applied': True,
@@ -586,7 +805,14 @@ def apply_holding_reassignment_proposal(blocks, holding_area, proposal):
     return result
 
 
-def build_holding_area_item(block, override_index, displacement_position):
+def build_holding_area_item(block_or_blocks, override_index, displacement_position):
+    occurrence_blocks = block_or_blocks if isinstance(block_or_blocks, list) else [block_or_blocks]
+    occurrence_blocks = sorted(
+        occurrence_blocks,
+        key=lambda block: block.get('occurrence_position') or 1,
+    )
+    block = occurrence_blocks[0]
+    occurrence_length = block.get('occurrence_length') or len(occurrence_blocks)
     return {
         'holding_id': (
             f'holding:override:{override_index}:{block["group_index"]}:'
@@ -597,6 +823,9 @@ def build_holding_area_item(block, override_index, displacement_position):
         'display_value': block.get('display_value'),
         'activity_length': block.get('activity_length'),
         'occurrence_id': block.get('occurrence_id'),
+        'occurrence_length': occurrence_length,
+        'source_block_ids': [occurrence_block.get('block_id') for occurrence_block in occurrence_blocks],
+        'source_slot_keys': [occurrence_block.get('slot_key') for occurrence_block in occurrence_blocks],
         'origin_block_id': block.get('block_id'),
         'origin_group_index': block.get('group_index'),
         'origin_group_label': block.get('group_label'),
@@ -687,7 +916,7 @@ def apply_persisted_overrides(schedule_obj, blocks, replay_mode='overlap'):
                 'reason': override.get('status') or 'invalid_status',
             })
             continue
-        if override.get('move_type') != 'single_block':
+        if override.get('move_type') not in SUPPORTED_MOVE_TYPES:
             add_replay_conflict(
                 f'Saved override {override_index + 1} uses an unsupported move type and was not replayed.',
                 override_index=override_index,
@@ -714,13 +943,9 @@ def apply_persisted_overrides(schedule_obj, blocks, replay_mode='overlap'):
             )
             continue
 
-        blocks_by_id = {
-            block['block_id']: block
-            for block in iter_schedule_blocks(blocks)
-        }
+        blocks_by_id = get_blocks_by_id(blocks)
         target_group_index = override.get('target_group_index')
         target_slot_key = override.get('target_slot_key')
-        target = blocks_by_group_slot.get((target_group_index, target_slot_key))
         source = (
             blocks_by_id.get(override.get('source_block_id'))
             if source_kind == GRID_SOURCE_KIND
@@ -733,7 +958,23 @@ def apply_persisted_overrides(schedule_obj, blocks, replay_mode='overlap'):
                 None,
             )
         )
-        related_blocks = [block for block in (source, target) if block and block.get('block_id')]
+        source_blocks = (
+            get_source_occurrence(blocks, source)
+            if source_kind == GRID_SOURCE_KIND
+            else holding_occurrence_snapshots(source) if source else []
+        )
+        occurrence_length = (
+            (source_blocks[0].get('occurrence_length') or 1)
+            if source_blocks
+            else override.get('occurrence_length') or 1
+        )
+        target_blocks = get_target_footprint(blocks, target_group_index, target_slot_key, occurrence_length)
+        target = target_blocks[0] if target_blocks else None
+        related_blocks = [
+            block
+            for block in [*source_blocks, *(target_blocks or [])]
+            if block and block.get('block_id')
+        ]
 
         required_fields = (
             MANUAL_MOVE_REQUIRED_FIELDS
@@ -754,17 +995,13 @@ def apply_persisted_overrides(schedule_obj, blocks, replay_mode='overlap'):
         if source_kind == GRID_SOURCE_KIND:
             if (
                 not source
-                or not source.get('is_activity')
-                or source.get('is_empty')
-                or source.get('is_unavailable')
-                or source.get('is_multi_block')
-                or source.get('occurrence_length') != 1
-                or source.get('activity_id') != override.get('source_activity_id')
-                or source.get('raw_value') != override.get('source_activity_name')
-                or source.get('display_value') != override.get('source_activity_name')
-                or source.get('occurrence_id') != override.get('source_occurrence_id')
-                or source.get('group_index') != override.get('source_group_index')
-                or source.get('slot_key') != override.get('source_slot_key')
+                or not occurrence_identity_matches(source_blocks, {
+                    'source_activity_id': override.get('source_activity_id'),
+                    'source_activity_name': override.get('source_activity_name'),
+                    'source_occurrence_id': override.get('source_occurrence_id'),
+                    'source_group_index': override.get('source_group_index'),
+                    'source_slot_key': override.get('source_slot_key'),
+                })
             ):
                 add_replay_conflict(
                     (
@@ -796,12 +1033,13 @@ def apply_persisted_overrides(schedule_obj, blocks, replay_mode='overlap'):
         if (
             not isinstance(target_group_index, int)
             or target_slot_key not in valid_slot_keys
-            or not target
-            or target.get('is_unavailable')
-            or (not target.get('is_empty') and not target.get('is_activity'))
+            or not target_blocks
+            or any(target_block.get('is_unavailable') for target_block in target_blocks)
+            or any(not target_block.get('is_empty') and not target_block.get('is_activity') for target_block in target_blocks)
             or (
                 source_kind == GRID_SOURCE_KIND
-                and target['block_id'] == source['block_id']
+                and {target_block['block_id'] for target_block in target_blocks}
+                == {source_block['block_id'] for source_block in source_blocks}
             )
         ):
             add_replay_conflict(
@@ -812,30 +1050,17 @@ def apply_persisted_overrides(schedule_obj, blocks, replay_mode='overlap'):
             continue
 
         override_source = deepcopy(override)
-        source_snapshot = deepcopy(source)
-        target_was_occupied = target['is_activity']
-        displaced_target_snapshots = []
+        source_snapshots = source_occurrence_snapshots(source_blocks, occurrence_length)
+        target_was_occupied = any(target_block['is_activity'] for target_block in target_blocks)
+        displaced_target_occurrences = []
         if target_was_occupied and action_type == DISPLACEMENT_MOVE_ACTION:
-            # Capture displacement ownership before source removal mutates the
-            # operational graph during chained or overlap-based replay. The
-            # moved source may already be an overlap in this target cell; it
-            # becomes primary and must not also enter the holding area.
-            displaced_target_snapshots = deepcopy([
-                occupant
-                for occupant in [target, *target.get('overlapping_blocks', [])]
-                if occupant.get('block_id') != source.get('block_id')
-            ])
-        activity_values = {
-            key: source_snapshot[key]
-            for key in ('raw_value', 'display_value', 'activity_id', 'activity_length')
-        } if source_kind == GRID_SOURCE_KIND else {
-            'raw_value': source_snapshot['activity_name'],
-            'display_value': source_snapshot['display_value'],
-            'activity_id': source_snapshot['activity_id'],
-            'activity_length': source_snapshot['activity_length'],
-        }
+            displaced_target_occurrences = collect_displaced_occurrences(
+                blocks,
+                target_blocks,
+                exclude_block_ids=[block.get('block_id') for block in source_blocks],
+            )
         if source_kind == GRID_SOURCE_KIND:
-            source_removal = remove_activity_from_operational_blocks(blocks, source, {
+            source_removal = remove_occurrence_from_operational_blocks(blocks, source_blocks, {
                 'is_persisted_override': True,
                 'override_status': 'applied_source',
                 'override_source': override_source,
@@ -856,70 +1081,30 @@ def apply_persisted_overrides(schedule_obj, blocks, replay_mode='overlap'):
             if source_kind == GRID_SOURCE_KIND
             else source.get('holding_id')
         )
-        if displaced_target_snapshots:
+        if displaced_target_occurrences:
+            remove_displaced_occurrences_from_grid(blocks, displaced_target_occurrences, {
+                'is_persisted_override': True,
+                'override_status': 'displaced',
+                'override_source': override_source,
+            })
             holding_items = [
-                build_holding_area_item(block, override_index, position)
-                for position, block in enumerate(displaced_target_snapshots, start=1)
+                build_holding_area_item(occurrence_blocks, override_index, position)
+                for position, occurrence_blocks in enumerate(displaced_target_occurrences, start=1)
             ]
             replay_result['holding_area'].extend(holding_items)
             displaced_holding_ids = [item['holding_id'] for item in holding_items]
-            target.update({
-                **activity_values,
-                'is_activity': True,
-                'is_empty': False,
-                'is_unavailable': False,
-                'occurrence_id': f'occurrence:{target["block_id"]}',
-                'occurrence_length': 1,
-                'occurrence_position': 1,
-                'is_multi_block': False,
-                'is_persisted_override': True,
-                'override_status': 'applied',
-                'override_source': override_source,
-                'has_overlap': False,
-                'overlapping_blocks': [],
-            })
-            persisted_target = target
-        elif target['is_activity']:
-            persisted_target = {
-                **source_snapshot,
-                **activity_values,
-                'block_id': f'overlap:persisted:{override_index}:{target["block_id"]}:{source_identifier}',
-                'group_index': target['group_index'],
-                'group_label': target['group_label'],
-                'slot_key': target['slot_key'],
-                'slot_label': target['slot_label'],
-                'is_activity': True,
-                'is_empty': False,
-                'is_unavailable': False,
-                'occurrence_id': f'occurrence:overlap:persisted:{override_index}:{target["block_id"]}',
-                'occurrence_length': 1,
-                'occurrence_position': 1,
-                'is_multi_block': False,
-                'is_persisted_override': True,
-                'override_status': 'applied',
-                'override_source': override_source,
-                'replay_conflicts': [],
-                'has_overlap': False,
-                'overlapping_blocks': [],
-                'conflicts': [],
-            }
-            target['overlapping_blocks'].append(persisted_target)
-            target['has_overlap'] = True
-        else:
-            target.update({
-                **activity_values,
-                'is_activity': True,
-                'is_empty': False,
-                'is_unavailable': False,
-                'occurrence_id': f'occurrence:{target["block_id"]}',
-                'occurrence_length': 1,
-                'occurrence_position': 1,
-                'is_multi_block': False,
-                'is_persisted_override': True,
-                'override_status': 'applied',
-                'override_source': override_source,
-            })
-            persisted_target = target
+            reset_target_footprint_for_displacement(target_blocks)
+
+        placement = place_occurrence_in_targets(
+            target_blocks,
+            source_snapshots,
+            source_identifier=source_identifier,
+            override_source=override_source,
+            is_persisted=True,
+            action_type=action_type,
+            override_index=override_index,
+        )
+        persisted_target = placement['placed_blocks'][0]
 
         replay_result['applied_overrides'].append({
             'override_index': override_index,
@@ -928,17 +1113,18 @@ def apply_persisted_overrides(schedule_obj, blocks, replay_mode='overlap'):
             'source_kind': source_kind,
             'source_block_id': source.get('block_id'),
             'source_holding_id': source.get('holding_id'),
-            'moved_activity_id': source_snapshot.get('activity_id'),
+            'moved_activity_id': source_snapshots[0].get('activity_id'),
             'moved_activity_name': (
-                source_snapshot.get('raw_value')
-                or source_snapshot.get('activity_name')
+                source_snapshots[0].get('raw_value')
+                or source_snapshots[0].get('activity_name')
             ),
             'target_block_id': persisted_target['block_id'],
+            'target_block_ids': [block['block_id'] for block in placement['placed_blocks']],
             'target_was_occupied': target_was_occupied,
             'displaced_holding_ids': displaced_holding_ids,
             'displaced_activity_ids': [
-                block.get('activity_id')
-                for block in displaced_target_snapshots
+                occurrence_blocks[0].get('activity_id')
+                for occurrence_blocks in displaced_target_occurrences
             ],
         })
 
@@ -1123,8 +1309,8 @@ def persist_manual_move(schedule_obj, proposal_result):
     save_readiness = evaluate_move_proposal_for_save(proposal_result)
     if not save_readiness['can_save']:
         raise ValueError('Manual moves require a saveable proposal result.')
-    if proposal_result.get('move_type') != 'single_block':
-        raise ValueError('Only single-block manual moves can be persisted.')
+    if proposal_result.get('move_type') not in SUPPORTED_MOVE_TYPES:
+        raise ValueError('Only supported manual move types can be persisted.')
     action_type = proposal_result.get('action_type') or DEFAULT_NEW_MOVE_ACTION
     if action_type not in SUPPORTED_MOVE_ACTIONS:
         raise ValueError('Only supported operational move actions can be persisted.')
@@ -1155,8 +1341,11 @@ def persist_manual_move(schedule_obj, proposal_result):
     }
     move_record.update({
         'source_kind': source_kind,
-        'move_type': 'single_block',
+        'move_type': proposal_result.get('move_type'),
         'action_type': action_type,
+        'occurrence_length': proposal_result.get('occurrence_length', 1),
+        'source_block_ids': proposal_result.get('source_block_ids', []),
+        'target_block_ids': proposal_result.get('target_block_ids', []),
         'created_at': timezone.now().isoformat().replace('+00:00', 'Z'),
         'status': 'active',
     })

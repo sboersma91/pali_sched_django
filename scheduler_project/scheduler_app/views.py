@@ -261,6 +261,7 @@ class SchedDetail(DetailView):
                 proposal_result = apply_move_proposal(schedule_rows, proposal)
             if proposal_result['applied']:
                 selected_block_id = proposal_result['target_block_id']
+                replay_result['holding_area'].extend(proposal_result.get('proposal_holding_area', []))
 
         conflict_summaries = validate_schedule_blocks(schedule_rows)
         existing_replay_conflicts = {
