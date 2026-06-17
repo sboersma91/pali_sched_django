@@ -18,7 +18,7 @@
   </div>
 
   {% if not generation_blocked %}
-  <section class="mb-4" aria-labelledby="generated-schedule-heading">
+  <section id="schedule-workspace" class="mb-4" aria-labelledby="generated-schedule-heading" tabindex="-1">
     <div class="mb-3">
       <h2 id="generated-schedule-heading" class="h3 mb-1">{% if generation_incomplete %}Incomplete Schedule Output{% else %}Generated Schedule{% endif %}</h2>
       <p class="text-muted mb-2">{% if generation_incomplete %}This output is incomplete and must not be treated as a fully generated Schedule.{% else %}Activity groups are shown across the available daytime and night schedule blocks.{% endif %}</p>
@@ -50,7 +50,7 @@
                 <span class="d-block small">
                   Reason: displaced by saved override {{ item.displaced_by_override_index|add:"1" }}.
                 </span>
-                <form method="get" class="row g-2 align-items-end mt-2">
+                <form method="get" action="{% url 'sched-detail' sched.id %}#schedule-workspace" class="row g-2 align-items-end mt-2">
                   <input type="hidden" name="source_kind" value="holding">
                   <input type="hidden" name="selected_holding" value="{{ item.holding_id }}">
                   <input type="hidden" name="source_activity_id" value="{{ item.activity_id }}">
@@ -118,11 +118,19 @@
               {% for cell in row.cells %}
                 <td{% if cell.conflicts %} class="{% if has_blocking_conflicts %}table-danger{% else %}table-warning{% endif %}{% if selected_occurrence_id and selected_occurrence_id == cell.occurrence_id %} border border-primary border-2{% endif %}"{% elif cell.is_proposed_target %} class="table-success border border-primary border-2"{% elif cell.is_proposed_source %} class="table-warning"{% elif cell.is_persisted_override and cell.is_activity %} class="table-info"{% elif cell.is_persisted_override %} class="table-secondary"{% elif selected_occurrence_id and selected_occurrence_id == cell.occurrence_id %} class="table-primary"{% endif %}>
                   {% if cell.is_activity %}
-                    <a href="?selected_block={{ cell.block_id|urlencode }}" class="text-reset text-decoration-none d-block">{{ cell.display_value }}{% if cell.is_proposed_target %} <span class="small">(proposed)</span>{% elif cell.is_persisted_override %} <span class="small">(persisted)</span>{% endif %}</a>
+                    {% if proposal_result %}
+                      <span class="d-block">{{ cell.display_value }}{% if cell.is_proposed_target %} <span class="small">(proposed)</span>{% elif cell.is_persisted_override %} <span class="small">(persisted)</span>{% endif %}</span>
+                    {% else %}
+                      <a href="?selected_block={{ cell.block_id|urlencode }}#schedule-workspace" class="text-reset text-decoration-none d-block">{{ cell.display_value }}{% if cell.is_proposed_target %} <span class="small">(proposed)</span>{% elif cell.is_persisted_override %} <span class="small">(persisted)</span>{% endif %}</a>
+                    {% endif %}
                     {% for overlap in cell.overlapping_blocks %}
                       <span class="d-block border-top mt-1 pt-1 fw-bold">
                         {% if overlap.is_persisted_override %}
-                          <a href="?selected_block={{ overlap.block_id|urlencode }}" class="text-reset text-decoration-none d-block">{{ overlap.display_value }} <span class="small">(persisted overlap)</span></a>
+                          {% if proposal_result %}
+                            {{ overlap.display_value }} <span class="small">(persisted overlap)</span>
+                          {% else %}
+                            <a href="?selected_block={{ overlap.block_id|urlencode }}#schedule-workspace" class="text-reset text-decoration-none d-block">{{ overlap.display_value }} <span class="small">(persisted overlap)</span></a>
+                          {% endif %}
                         {% else %}
                           {{ overlap.display_value }} <span class="small">(proposed overlap)</span>
                         {% endif %}
@@ -146,6 +154,7 @@
     {% if proposal_result %}
       <div class="alert {% if proposal_result.applied %}alert-info{% else %}alert-warning{% endif %} mb-3" role="status" aria-labelledby="move-proposal-heading">
         <h3 id="move-proposal-heading" class="h5 alert-heading">Temporary Move Proposal</h3>
+        <p class="small mb-2">Activity links in the schedule grid are paused while this proposal is active.</p>
         {% if proposal_recomputed_server_side %}
           <p class="fw-bold">Proposal recomputed server-side.</p>
         {% endif %}
@@ -211,8 +220,10 @@
               <button type="submit" class="btn btn-primary">Save Move</button>
             </form>
           {% endif %}
+          <a href="{% url 'sched-detail' sched.id %}#schedule-workspace" class="btn btn-outline-secondary mt-3">Cancel / Choose Different Activity</a>
         {% else %}
           <p class="mb-0"><strong>{{ proposal_result.error }}</strong></p>
+          <a href="{% url 'sched-detail' sched.id %}#schedule-workspace" class="btn btn-outline-secondary mt-3">Cancel / Choose Different Activity</a>
         {% endif %}
         {% if save_readiness %}
           <div class="mt-3 pt-3 border-top">
@@ -275,7 +286,7 @@
             {% endif %}
           </dl>
           {% if not selected_block.is_multi_block %}
-            <form method="get" class="row g-2 align-items-end mt-3">
+            <form method="get" action="{% url 'sched-detail' sched.id %}#schedule-workspace" class="row g-2 align-items-end mt-3">
               <input type="hidden" name="source_kind" value="grid">
               <input type="hidden" name="selected_block" value="{{ selected_block.block_id }}">
               <input type="hidden" name="source_activity_id" value="{{ selected_block.activity_id }}">

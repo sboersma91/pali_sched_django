@@ -417,7 +417,7 @@ class SchedMoveConfirm(SchedDetail):
         }
         if confirmed:
             query['proposal_confirmed'] = '1'
-        return f'{reverse("sched-detail", args=[self.object.pk])}?{urlencode(query)}'
+        return f'{reverse("sched-detail", args=[self.object.pk])}?{urlencode(query)}#schedule-workspace'
 
 
 class SchedMoveSave(SchedMoveConfirm):
@@ -451,7 +451,7 @@ class SchedMoveSave(SchedMoveConfirm):
                     request,
                     'Move saved as a manual override. It is now applied to the operational schedule.',
                 )
-                return HttpResponseRedirect(reverse('sched-detail', args=[self.object.pk]))
+                return HttpResponseRedirect(f'{reverse("sched-detail", args=[self.object.pk])}#schedule-workspace')
 
         return HttpResponseRedirect(self.get_proposal_redirect_url(confirmed=True))
 

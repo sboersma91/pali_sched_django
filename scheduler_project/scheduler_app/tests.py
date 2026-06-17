@@ -2037,12 +2037,13 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, "Archery")
         self.assertContains(
             response,
-            '<a href="?selected_block=0%3Amon_pm1" class="text-reset text-decoration-none d-block">Archery</a>',
+            '<a href="?selected_block=0%3Amon_pm1#schedule-workspace" class="text-reset text-decoration-none d-block">Archery</a>',
             html=True,
         )
         self.assertContains(response, "<td>****</td>", html=True)
         self.assertContains(response, "<td>/////</td>", html=True)
         self.assertContains(response, "How this Schedule record works")
+        self.assertContains(response, 'id="schedule-workspace"', html=False)
 
     def test_schedule_detail_places_operational_workspace_before_secondary_details(self):
         generated_schedule = {
@@ -2230,6 +2231,9 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, f'name="source_activity_id" value="{activity.id}"', html=False)
         self.assertContains(response, f'name="source_activity_name" value="{activity.course_name}"', html=False)
         self.assertContains(response, 'name="source_occurrence_id" value="occurrence:0:mon_pm1"', html=False)
+        self.assertContains(response, "Activity links in the schedule grid are paused while this proposal is active.")
+        self.assertContains(response, "Cancel / Choose Different Activity")
+        self.assertNotContains(response, 'href="?selected_block=0%3Atue_am1#schedule-workspace"', html=False)
 
     def test_schedule_detail_rejects_invalid_target_slot_safely(self):
         activity = Course.objects.create(course_name="Rejected Proposal", abriviation="RJP", course_len=1)
@@ -2641,7 +2645,10 @@ class ScheduleWorkflowTests(TestCase):
         self.schedule.refresh_from_db()
         saved_move = self.schedule.sched_data["manual_moves"][0]
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.redirect_chain, [(reverse("sched-detail", args=[self.schedule.id]), 302)])
+        self.assertEqual(
+            response.redirect_chain,
+            [(f'{reverse("sched-detail", args=[self.schedule.id])}#schedule-workspace', 302)],
+        )
         self.assertEqual(self.schedule.sched_data["source"], "test")
         self.assertEqual(self.schedule.sched_data["version"], 1)
         self.assertEqual(saved_move["source_block_id"], "0:mon_pm1")
@@ -2676,7 +2683,7 @@ class ScheduleWorkflowTests(TestCase):
 
         self.schedule.refresh_from_db()
         self.assertEqual(post_response.status_code, 302)
-        self.assertEqual(post_response["Location"], reverse("sched-detail", args=[self.schedule.id]))
+        self.assertEqual(post_response["Location"], f'{reverse("sched-detail", args=[self.schedule.id])}#schedule-workspace')
         self.assertContains(first_get, "Move saved as a manual override.")
         self.assertNotContains(refreshed_get, "Move saved as a manual override.")
         self.assertEqual(len(self.schedule.sched_data["manual_moves"]), 1)
@@ -4287,8 +4294,14 @@ class SchoolFormWorkflowTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Schedule Block Summary")
+        self.assertNotContains(response, "sorted_subject_lst")
+        self.assertNotContains(response, "Sorted Subject")
+        self.assertContains(response, 'data-summary-value="required-total"', html=False)
         self.assertContains(response, "data-summary-value=\"selected-daytime\">0</span>")
         self.assertContains(response, "data-summary-value=\"selected-night\">0</span>")
+        self.assertContains(response, "const scheduleSlotBlocks = [", html=False)
+        self.assertContains(response, "arrive?.addEventListener('change', updateSummary);", html=False)
+        self.assertContains(response, "depart?.addEventListener('change', updateSummary);", html=False)
 
     def test_school_update_page_includes_slot_accounting_summary(self):
         school = Schools(school_name="Summary Test School", arrive="Mon", depart="Wed", total_students=16, ag_num=1, attending_year="2026-06-04")
@@ -4301,8 +4314,11 @@ class SchoolFormWorkflowTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Schedule Block Summary")
-        self.assertContains(response, "Required daytime blocks:</strong> 8")
-        self.assertContains(response, "Required night blocks:</strong> 2")
+        self.assertNotContains(response, "sorted_subject_lst")
+        self.assertNotContains(response, "Sorted Subject")
+        self.assertContains(response, 'data-summary-value="required-daytime">8</span>', html=False)
+        self.assertContains(response, 'data-summary-value="required-night">2</span>', html=False)
+        self.assertContains(response, 'data-summary-value="required-total">10</span>', html=False)
         self.assertContains(response, "data-summary-value=\"selected-daytime\">2</span>")
         self.assertContains(response, "data-summary-value=\"selected-night\">1</span>")
         self.assertContains(response, "data-summary-status=\"daytime\">under by 6</span>")
@@ -4319,8 +4335,11 @@ class SchoolFormWorkflowTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Schedule Block Summary")
-        self.assertContains(response, "Required daytime blocks:</strong> 8")
-        self.assertContains(response, "Required night blocks:</strong> 2")
+        self.assertNotContains(response, "sorted_subject_lst")
+        self.assertNotContains(response, "Sorted Subject")
+        self.assertContains(response, 'data-summary-value="required-daytime">8</span>', html=False)
+        self.assertContains(response, 'data-summary-value="required-night">2</span>', html=False)
+        self.assertContains(response, 'data-summary-value="required-total">10</span>', html=False)
         self.assertContains(response, "data-summary-value=\"selected-daytime\">1</span>")
         self.assertContains(response, "data-summary-value=\"selected-night\">1</span>")
         self.assertContains(response, "data-summary-status=\"daytime\">under by 7</span>")
