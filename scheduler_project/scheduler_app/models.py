@@ -8,6 +8,7 @@ from django.db.models import JSONField
 
 from .schedule_blocks import (
     DAY_OFFSETS,
+    SCHEDULE_SLOT_BLOCKS,
     SCHEDULE_SLOT_KEYS,
     UNASSIGNED_SLOT_VALUE,
     UNAVAILABLE_SLOT_VALUE,
@@ -88,6 +89,22 @@ def create_class_locs_dict():
 
 
 scheduling_data_initialized = False
+GENERATION_SEARCH_MAX_ATTEMPTS = 100000
+
+
+class GenerationSearchLimitExceeded(Exception):
+    pass
+
+
+def location_capacity_for_generation(location_name, class_locs_lookup):
+    if location_name == 'Various':
+        return 100
+    if location_name == 'Manz':
+        return 10
+    if location_name in class_locs_lookup.get('Ropes', []):
+        return 3
+    return 1
+
 
 def initialize_scheduling_data(force=False):
     global scheduling_data_initialized
@@ -130,8 +147,11 @@ class Schools(models.Model):
         # Because it messes up how you access the number it is now going to be a manuel entry -- ideally it will later become an auto calculation that can be overriden
         '''
 
-    def update_sorted_subject_lst(self):
-        initialize_scheduling_data(force=True)
+    def update_sorted_subject_lst(self, class_len_lookup=None, class_locs_lookup=None):
+        if class_len_lookup is None or class_locs_lookup is None:
+            initialize_scheduling_data(force=True)
+            class_len_lookup = class_len
+            class_locs_lookup = class_locs
         # Sorted order = Two Block w/ loc, two block no loc, one block w/ loc, one block no loc, night
         ropes = []
         various_one = []
@@ -146,15 +166,15 @@ class Schools(models.Model):
         for c in range(len(self.subjects)):
             if self.subjects[c] in ["WM",'LCR','SLIDE']:
                 ropes.append(self.subjects[c])
-            elif class_len[self.subjects[c]] == 2 and class_locs[self.subjects[c]] == 'Various':
+            elif class_len_lookup[self.subjects[c]] == 2 and class_locs_lookup[self.subjects[c]] == 'Various':
                 various_two.append(self.subjects[c])
-            elif class_len[self.subjects[c]] == 2:
+            elif class_len_lookup[self.subjects[c]] == 2:
                 two_block.append(self.subjects[c])
-            elif class_len[self.subjects[c]] == 1 and class_locs[self.subjects[c]]== 'Various' :
+            elif class_len_lookup[self.subjects[c]] == 1 and class_locs_lookup[self.subjects[c]]== 'Various' :
                 various_one.append(self.subjects[c])
-            elif class_len[self.subjects[c]] == 1:
+            elif class_len_lookup[self.subjects[c]] == 1:
                 one_block.append(self.subjects[c])
-            elif class_len[self.subjects[c]] == 0:
+            elif class_len_lookup[self.subjects[c]] == 0:
                 # 'N' = 0 now.
                 night.append(self.subjects[c])
             else:
@@ -203,7 +223,8 @@ class TheSched(models.Model):
     def __str__(self):
         return self.sched_name
 
-    def get_scheduling_diagnostics(self):
+    def get_scheduling_diagnostics(self, class_locs_lookup=None):
+        class_locs_lookup = class_locs if class_locs_lookup is None else class_locs_lookup
         diagnostics = []
         for school in self.schools.all():
             for activity in school.subject.all():
@@ -211,7 +232,7 @@ class TheSched(models.Model):
                     reason = "Activity is not connected to any scheduling Locations."
                 elif not activity.primary_locs.filter(availible=True).exists():
                     reason = "Activity has no available scheduling Locations."
-                elif activity.course_name not in class_locs:
+                elif activity.course_name not in class_locs_lookup:
                     reason = "Activity does not appear in current scheduling Location lookups."
                 else:
                     continue
@@ -223,10 +244,82 @@ class TheSched(models.Model):
                 })
         return diagnostics
 
+    def get_activity_capacity_diagnostics(self, class_locs_lookup, class_len_lookup, master_locs_lookup):
+        diagnostics = []
+        slot_blocks = list(SCHEDULE_SLOT_BLOCKS)
+        master_locs_lookup = set(master_locs_lookup)
+        special_capacity_locs = {'Various', 'Manz'}
+
+        for school in self.schools.all():
+            available_slot_blocks = slot_blocks[DAY_OFFSETS[school.arrive]:DAY_OFFSETS[school.depart]]
+            available_slot_keys = {slot_key for slot_key, _slot_kind in available_slot_blocks}
+            night_slots = [
+                slot_key
+                for slot_key, _slot_kind in available_slot_blocks
+                if 'night' in slot_key
+            ]
+            daytime_slots = [
+                slot_key
+                for slot_key, _slot_kind in available_slot_blocks
+                if 'night' not in slot_key
+            ]
+            paired_daytime_footprints = [
+                (slot_key, slot_key[:-1] + '2')
+                for slot_key in daytime_slots
+                if '1' in slot_key and slot_key[:-1] + '2' in available_slot_keys
+            ]
+
+            for activity in school.subject.all():
+                activity_name = activity.course_name
+                activity_len = class_len_lookup[activity_name]
+                eligible_locs = [
+                    loc
+                    for loc in class_locs_lookup[activity_name]
+                    if loc in master_locs_lookup or loc in special_capacity_locs
+                ]
+                location_capacity = sum(
+                    location_capacity_for_generation(loc, class_locs_lookup)
+                    for loc in eligible_locs
+                )
+                if activity_len == 0:
+                    slot_capacity = len(night_slots)
+                elif activity_len == 2:
+                    slot_capacity = len(paired_daytime_footprints)
+                else:
+                    slot_capacity = len(daytime_slots)
+
+                capacity = location_capacity * slot_capacity
+                demand = school.ag_num
+                if capacity >= demand:
+                    continue
+
+                placement_word = "placement" if demand == 1 else "placements"
+                availability_word = "is" if capacity == 1 else "are"
+                diagnostics.append({
+                    "type": "activity_capacity_insufficient",
+                    "severity": "warning",
+                    "school": school.school_name,
+                    "activity": activity_name,
+                    "demand": demand,
+                    "capacity": capacity,
+                    "reason": (
+                        f"{school.school_name} — {activity_name} needs {demand} {placement_word}, "
+                        f"but only {capacity} {availability_word} available in this trip window."
+                    ),
+                })
+        return diagnostics
+
     @property
     def create_sched(self): #save(self, *args, **kwargs):
         initialize_scheduling_data(force=True)
-        self.generation_diagnostics = self.get_scheduling_diagnostics()
+        local_class_locs = {
+            activity_name: list(locations)
+            for activity_name, locations in class_locs.items()
+        }
+        local_class_len = dict(class_len)
+        local_master_locs = list(master_locs)
+        self.generation_runtime_diagnostics = []
+        self.generation_diagnostics = self.get_scheduling_diagnostics(local_class_locs)
         if self.generation_diagnostics:
             self.generation_complete = False
             return {}
@@ -243,7 +336,7 @@ class TheSched(models.Model):
         day_offset = {'Mon':0, "Tue":5, "Wed":10, "Thur":15, "Fri":19}
         #  day_end_offsett = {'Mon':, 'Tues':, 'Wed':,'Fri':}
         for school in self.schools.all():
-            school.update_sorted_subject_lst()
+            school.update_sorted_subject_lst(local_class_len, local_class_locs)
             sorted_subjects = [subject for subject in school.sorted_subject_lst.split(',') if subject]
             for i in range(school.ag_num):
                 sched['ags'].append(school.school_name + ' ' + str(i))
@@ -256,14 +349,30 @@ class TheSched(models.Model):
             group_count += school.ag_num
         
         self.sched = sched
+        capacity_diagnostics = self.get_activity_capacity_diagnostics(
+            local_class_locs,
+            local_class_len,
+            local_master_locs,
+        )
+        if capacity_diagnostics:
+            self.generation_complete = False
+            self.generation_runtime_diagnostics.extend(capacity_diagnostics)
+            self.sched.pop('classes_needed', None)
+            return self.sched
+
         time_slots = list(SCHEDULE_SLOT_KEYS)
         locs_open = {
-            loc:{slot: 3 if loc in class_locs['Ropes'] else 1 for slot in time_slots} for loc in master_locs
+            loc:{slot: 3 if loc in local_class_locs['Ropes'] else 1 for slot in time_slots} for loc in local_master_locs
         }  
         locs_open['Various'] = {slot:100 for slot in time_slots}
         locs_open['Manz'] = {slot:10 for slot in time_slots}
+        search_attempts = {"count": 0}
         
         def search_open_slot(locs_open, n=0, slots=time_slots,schedule=self.sched,):
+            search_attempts["count"] += 1
+            if search_attempts["count"] > GENERATION_SEARCH_MAX_ATTEMPTS:
+                raise GenerationSearchLimitExceeded
+
             if n >= len(schedule['classes_needed']):
                 return True
             
@@ -273,8 +382,8 @@ class TheSched(models.Model):
                 return search_open_slot(locs_open, n+1, schedule=self.sched,)
             
             current_class = classes_needed.pop()
-            for current_loc in class_locs[current_class]: 
-                current_len = class_len[current_class]
+            for current_loc in local_class_locs[current_class]:
+                current_len = local_class_len[current_class]
 
                 if current_len == 0: 
                     for slot in slots:
@@ -324,8 +433,19 @@ class TheSched(models.Model):
             classes_needed.append(current_class)
             return False
         
-        self.generation_complete = search_open_slot(locs_open,schedule=self.sched,)
-        self.sched.popitem()
+        try:
+            self.generation_complete = search_open_slot(locs_open,schedule=self.sched,)
+        except GenerationSearchLimitExceeded:
+            self.generation_complete = False
+            self.generation_runtime_diagnostics.append({
+                "type": "search_limit_exceeded",
+                "severity": "warning",
+                "reason": (
+                    "Schedule generation stopped because the recursive assignment "
+                    f"search reached the safety limit of {GENERATION_SEARCH_MAX_ATTEMPTS} attempts."
+                ),
+            })
+        self.sched.pop('classes_needed', None)
         # self.sched_data = self.sched.copy()
 
         # super().save(*args, **kwargs)

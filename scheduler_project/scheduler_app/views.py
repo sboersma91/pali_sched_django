@@ -10,6 +10,7 @@ from django.urls import reverse, reverse_lazy
 from django.utils.text import slugify
 
 from .school_accounting import school_slot_accounting_summary
+from .schedule_blocks import SCHEDULE_LEGEND
 from .schedule_operations import (
     DEFAULT_NEW_MOVE_ACTION,
     MalformedSchedDataError,
@@ -356,6 +357,7 @@ class SchedDetail(DetailView):
         )
         context['sched_data_diagnostic'] = diagnose_sched_data_structure(self.object.sched_data)
         context['generation_diagnostics'] = getattr(self.object, 'generation_diagnostics', [])
+        context['generation_runtime_diagnostics'] = getattr(self.object, 'generation_runtime_diagnostics', [])
         context['generation_blocked'] = bool(context['generation_diagnostics'])
         context['generation_complete'] = getattr(self.object, 'generation_complete', True)
         context['generation_succeeded'] = not context['generation_blocked'] and context['generation_complete']

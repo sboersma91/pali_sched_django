@@ -3940,6 +3940,50 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.school.refresh_from_db()
         self.assertEqual(self.school.sorted_subject_lst, "")
 
+    def test_astronomy_with_valid_locations_generates_without_lookup_key_error(self):
+        astronomy = Course.objects.create(course_name="Astronomy", abriviation="AST", course_len=0)
+        astronomy.primary_locs.add(Locations.objects.get(loc_name="Schedule Regression Location"))
+        self.school.subject.set([self.two_block, self.one_block, astronomy])
+
+        generated_schedule = self.schedule.create_sched
+
+        self.assertEqual(self.schedule.generation_diagnostics, [])
+        self.assertTrue(self.schedule.generation_complete)
+        self.assertIn("Astronomy", [activity for values in generated_schedule.values() for activity in values])
+
+    def test_generation_survives_global_lookup_clear_after_snapshots_are_built(self):
+        original_update_sorted_subject_lst = Schools.update_sorted_subject_lst
+
+        def clear_global_lookups_during_school_sort(school, class_len_lookup=None, class_locs_lookup=None):
+            class_locs.clear()
+            class_len.clear()
+            master_locs.clear()
+            return original_update_sorted_subject_lst(school, class_len_lookup, class_locs_lookup)
+
+        with patch.object(
+            Schools,
+            "update_sorted_subject_lst",
+            autospec=True,
+            side_effect=clear_global_lookups_during_school_sort,
+        ):
+            generated_schedule = self.schedule.create_sched
+
+        self.assertEqual(self.schedule.generation_diagnostics, [])
+        self.assertTrue(self.schedule.generation_complete)
+        self.assertEqual(generated_schedule["ags"], ["Balanced Regression School 0"])
+        self.assertIn(
+            "Regression One Block",
+            [activity for values in generated_schedule.values() for activity in values],
+        )
+
+    def test_create_sched_does_not_reinitialize_lookups_inside_school_sorting(self):
+        with patch("scheduler_app.models.initialize_scheduling_data", wraps=initialize_scheduling_data) as initializer:
+            generated_schedule = self.schedule.create_sched
+
+        self.assertEqual(initializer.call_count, 1)
+        self.assertTrue(self.schedule.generation_complete)
+        self.assertEqual(generated_schedule["ags"], ["Balanced Regression School 0"])
+
     def test_schedule_recursion_does_not_look_up_empty_activity_name(self):
         class RejectEmptyActivityLookup(dict):
             def __getitem__(self, activity_name):
@@ -4000,6 +4044,30 @@ class ScheduleGenerationRegressionTests(TestCase):
         extra_two_block.primary_locs.add(location)
         self.school.subject.set([self.two_block, extra_two_block, self.one_block, self.night])
 
+    def make_insufficient_night_capacity_schedule(self):
+        limited_location = Locations.objects.create(
+            loc_name="Limited Night Location",
+            loc_short="LNL",
+        )
+        limited_night = Course.objects.create(
+            course_name="Limited Night Activity",
+            abriviation="LNA",
+            course_len=0,
+        )
+        limited_night.primary_locs.add(limited_location)
+        school = Schools.schools_list.create(
+            school_name="Limited Night School",
+            arrive="Thur",
+            depart="Fri",
+            total_students=32,
+            ag_num=2,
+            attending_year="2026-06-04",
+        )
+        school.subject.set([limited_night])
+        schedule = TheSched.objects.create(sched_name="Limited Night Schedule", sched_data={})
+        schedule.schools.add(school)
+        return schedule
+
     def test_location_valid_schedule_that_cannot_fit_reports_incomplete_generation(self):
         self.make_location_valid_schedule_unassignable()
 
@@ -4020,6 +4088,82 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.assertIn("Location capacity, timing constraints, or Activity combinations", rendered_content)
         self.assertIn("Incomplete Schedule Output", rendered_content)
         self.assertIn("must not be treated as a fully generated Schedule", rendered_content)
+        self.assertIn("<table", rendered_content)
+
+    def test_insufficient_activity_capacity_is_caught_before_recursive_search(self):
+        schedule = self.make_insufficient_night_capacity_schedule()
+
+        with patch("scheduler_app.models.GENERATION_SEARCH_MAX_ATTEMPTS", 0):
+            generated_schedule = schedule.create_sched
+
+        self.assertFalse(schedule.generation_complete)
+        self.assertEqual(schedule.generation_diagnostics, [])
+        self.assertEqual(generated_schedule["ags"], ["Limited Night School 0", "Limited Night School 1"])
+        self.assertNotIn("classes_needed", generated_schedule)
+        self.assertEqual(len(schedule.generation_runtime_diagnostics), 1)
+        diagnostic = schedule.generation_runtime_diagnostics[0]
+        self.assertEqual(diagnostic["type"], "activity_capacity_insufficient")
+        self.assertEqual(diagnostic["school"], "Limited Night School")
+        self.assertEqual(diagnostic["activity"], "Limited Night Activity")
+        self.assertEqual(diagnostic["demand"], 2)
+        self.assertEqual(diagnostic["capacity"], 1)
+        self.assertIn("Limited Night School — Limited Night Activity needs 2 placements", diagnostic["reason"])
+        self.assertIn("only 1 is available", diagnostic["reason"])
+
+    def test_valid_capacity_still_proceeds_to_recursive_search(self):
+        with patch("scheduler_app.models.GENERATION_SEARCH_MAX_ATTEMPTS", 0):
+            generated_schedule = self.schedule.create_sched
+
+        self.assertFalse(self.schedule.generation_complete)
+        self.assertEqual(generated_schedule["ags"], ["Balanced Regression School 0"])
+        self.assertEqual(len(self.schedule.generation_runtime_diagnostics), 1)
+        self.assertEqual(
+            self.schedule.generation_runtime_diagnostics[0]["type"],
+            "search_limit_exceeded",
+        )
+
+    def test_schedule_detail_renders_activity_capacity_diagnostic(self):
+        self.schedule = self.make_insufficient_night_capacity_schedule()
+
+        with patch("scheduler_app.models.GENERATION_SEARCH_MAX_ATTEMPTS", 0):
+            response, rendered_content = self.render_schedule_detail()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context_data["generation_complete"])
+        self.assertContains(response, "Schedule generation is incomplete")
+        self.assertIn("Limited Night School — Limited Night Activity needs 2 placements", rendered_content)
+        self.assertIn("only 1 is available", rendered_content)
+        self.assertIn("<table", rendered_content)
+
+    def test_generation_search_limit_returns_incomplete_schedule(self):
+        with patch("scheduler_app.models.GENERATION_SEARCH_MAX_ATTEMPTS", 1):
+            generated_schedule = self.schedule.create_sched
+
+        self.assertFalse(self.schedule.generation_complete)
+        self.assertEqual(self.schedule.generation_diagnostics, [])
+        self.assertEqual(generated_schedule["ags"], ["Balanced Regression School 0"])
+        self.assertNotIn("classes_needed", generated_schedule)
+        self.assertEqual(
+            self.schedule.generation_runtime_diagnostics,
+            [{
+                "type": "search_limit_exceeded",
+                "severity": "warning",
+                "reason": (
+                    "Schedule generation stopped because the recursive assignment "
+                    "search reached the safety limit of 1 attempts."
+                ),
+            }],
+        )
+
+    def test_schedule_detail_renders_when_generation_search_limit_is_exceeded(self):
+        with patch("scheduler_app.models.GENERATION_SEARCH_MAX_ATTEMPTS", 1):
+            response, rendered_content = self.render_schedule_detail()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context_data["generation_complete"])
+        self.assertContains(response, "Schedule generation is incomplete")
+        self.assertIn("search reached the safety limit of 1 attempts", rendered_content)
+        self.assertIn("Incomplete Schedule Output", rendered_content)
         self.assertIn("<table", rendered_content)
 
     def test_incomplete_schedule_csv_export_labels_output_and_unassigned_entries(self):
