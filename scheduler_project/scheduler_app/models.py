@@ -14,6 +14,7 @@ from .schedule_blocks import (
     UNAVAILABLE_SLOT_VALUE,
     WEEKDAY_CHOICES,
 )
+from .schedule_feasibility import audit_schedule_feasibility
 
 # from django.db.models.signals import pre_save, post_save
 # from .custom_fields import CommaSepField
@@ -349,14 +350,16 @@ class TheSched(models.Model):
             group_count += school.ag_num
         
         self.sched = sched
-        capacity_diagnostics = self.get_activity_capacity_diagnostics(
+        feasibility_audit = audit_schedule_feasibility(
+            self.schools.all(),
             local_class_locs,
             local_class_len,
             local_master_locs,
+            location_capacity_for_generation,
         )
-        if capacity_diagnostics:
+        self.generation_runtime_diagnostics.extend(feasibility_audit["diagnostics"])
+        if feasibility_audit["blocks_generation"]:
             self.generation_complete = False
-            self.generation_runtime_diagnostics.extend(capacity_diagnostics)
             self.sched.pop('classes_needed', None)
             return self.sched
 

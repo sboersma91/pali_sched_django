@@ -4068,6 +4068,22 @@ class ScheduleGenerationRegressionTests(TestCase):
         schedule.schools.add(school)
         return schedule
 
+    def make_activity(self, name, abbreviation, course_len, location=None):
+        activity = Course.objects.create(
+            course_name=name,
+            abriviation=abbreviation,
+            course_len=course_len,
+        )
+        if location:
+            activity.primary_locs.add(location)
+        return activity
+
+    def diagnostic_types(self, schedule):
+        return {
+            diagnostic["type"]
+            for diagnostic in schedule.generation_runtime_diagnostics
+        }
+
     def test_location_valid_schedule_that_cannot_fit_reports_incomplete_generation(self):
         self.make_location_valid_schedule_unassignable()
 
@@ -4109,6 +4125,101 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.assertEqual(diagnostic["capacity"], 1)
         self.assertIn("Limited Night School — Limited Night Activity needs 2 placements", diagnostic["reason"])
         self.assertIn("only 1 is available", diagnostic["reason"])
+
+    def test_insufficient_total_school_blocks_is_caught_before_recursive_search(self):
+        broad_location = Locations.objects.create(loc_name="Various", loc_short="VAR")
+        selected_activities = [
+            self.make_activity(f"Total Block Day {index}", f"TBD{index}", 1, broad_location)
+            for index in range(1, 6)
+        ]
+        selected_activities.append(self.make_activity("Total Block Night", "TBN", 0, broad_location))
+        school = Schools.schools_list.create(
+            school_name="Total Block School",
+            arrive="Mon",
+            depart="Tue",
+            total_students=16,
+            ag_num=1,
+            attending_year="2026-06-04",
+        )
+        school.subject.set(selected_activities)
+        schedule = TheSched.objects.create(sched_name="Total Block Schedule", sched_data={})
+        schedule.schools.add(school)
+
+        with patch("scheduler_app.models.GENERATION_SEARCH_MAX_ATTEMPTS", 0):
+            generated_schedule = schedule.create_sched
+
+        self.assertFalse(schedule.generation_complete)
+        self.assertEqual(generated_schedule["ags"], ["Total Block School 0"])
+        self.assertIn("school_trip_window_capacity_insufficient", self.diagnostic_types(schedule))
+        self.assertNotIn("search_limit_exceeded", self.diagnostic_types(schedule))
+        self.assertTrue(any(
+            "requires 6 total activity blocks but only 5 usable schedule blocks exist"
+            in diagnostic["reason"]
+            for diagnostic in schedule.generation_runtime_diagnostics
+        ))
+
+    def test_insufficient_two_block_paired_footprints_are_caught_before_recursive_search(self):
+        broad_location = Locations.objects.create(loc_name="Two Block Various", loc_short="TBV")
+        first_two_block = self.make_activity("Paired Footprint One", "PF1", 2, broad_location)
+        second_two_block = self.make_activity("Paired Footprint Two", "PF2", 2, broad_location)
+        school = Schools.schools_list.create(
+            school_name="Paired Footprint School",
+            arrive="Thur",
+            depart="Fri",
+            total_students=16,
+            ag_num=1,
+            attending_year="2026-06-04",
+        )
+        school.subject.set([first_two_block, second_two_block])
+        schedule = TheSched.objects.create(sched_name="Paired Footprint Schedule", sched_data={})
+        schedule.schools.add(school)
+
+        with patch("scheduler_app.models.GENERATION_SEARCH_MAX_ATTEMPTS", 0):
+            generated_schedule = schedule.create_sched
+
+        self.assertFalse(schedule.generation_complete)
+        self.assertEqual(generated_schedule["ags"], ["Paired Footprint School 0"])
+        self.assertIn("school_two_block_footprint_capacity_insufficient", self.diagnostic_types(schedule))
+        self.assertNotIn("search_limit_exceeded", self.diagnostic_types(schedule))
+        self.assertTrue(any(
+            "requires 2 two-block paired footprints but only 1 usable paired footprints exist"
+            in diagnostic["reason"]
+            for diagnostic in schedule.generation_runtime_diagnostics
+        ))
+
+    def test_hard_location_bottleneck_is_diagnosed_before_search_limit(self):
+        bottleneck_location = Locations.objects.create(
+            loc_name="Hallz Bottleneck Location",
+            loc_short="HBL",
+        )
+        selected_activities = [
+            self.make_activity(f"Hallz Day Activity {index}", f"HDA{index}", 1, bottleneck_location)
+            for index in range(1, 9)
+        ]
+        school = Schools.schools_list.create(
+            school_name="Hallz Style School",
+            arrive="Mon",
+            depart="Fri",
+            total_students=32,
+            ag_num=2,
+            attending_year="2026-06-04",
+        )
+        school.subject.set(selected_activities)
+        schedule = TheSched.objects.create(sched_name="Hallz Style Schedule", sched_data={})
+        schedule.schools.add(school)
+
+        with patch("scheduler_app.models.GENERATION_SEARCH_MAX_ATTEMPTS", 0):
+            generated_schedule = schedule.create_sched
+
+        self.assertFalse(schedule.generation_complete)
+        self.assertEqual(generated_schedule["ags"], ["Hallz Style School 0", "Hallz Style School 1"])
+        self.assertIn("location_bottleneck_insufficient", self.diagnostic_types(schedule))
+        self.assertNotIn("search_limit_exceeded", self.diagnostic_types(schedule))
+        self.assertTrue(any(
+            "Hallz Bottleneck Location may be unschedulable: 16 requested placements"
+            in diagnostic["reason"]
+            for diagnostic in schedule.generation_runtime_diagnostics
+        ))
 
     def test_valid_capacity_still_proceeds_to_recursive_search(self):
         with patch("scheduler_app.models.GENERATION_SEARCH_MAX_ATTEMPTS", 0):
