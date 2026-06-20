@@ -22,6 +22,7 @@ from .views import (
     SchedUpdate,
     SchedList,
     SchedDetail,
+    SchedGenerate,
     SchedDataRepair,
     SchedMoveConfirm,
     SchedMoveSave,
@@ -57,6 +58,7 @@ urlpatterns = [
     # Schedule views
     path("schedule_list", SchedList.as_view(), name="sched-list"),
     path("schedule_detail/<int:pk>/", SchedDetail.as_view(), name="sched-detail"),
+    path("schedule_detail/<int:pk>/generate/", SchedGenerate.as_view(), name="sched-generate"),
     path("schedule_detail/<int:pk>/confirm-move/", SchedMoveConfirm.as_view(), name="sched-move-confirm"),
     path("schedule_detail/<int:pk>/save-move/", SchedMoveSave.as_view(), name="sched-move-save"),
     path("schedule_detail/<int:pk>/repair-data/", SchedDataRepair.as_view(), name="sched-data-repair"),

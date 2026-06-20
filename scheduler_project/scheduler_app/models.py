@@ -1,3 +1,6 @@
+from collections import Counter
+from copy import deepcopy
+
 from django.db.models import CASCADE
 from django.db import models
 from django.db.models.fields import BooleanField, CharField, IntegerField, SmallIntegerField, TextField, DateField
@@ -224,6 +227,44 @@ class TheSched(models.Model):
     def __str__(self):
         return self.sched_name
 
+    def get_stored_generation_result(self):
+        if not isinstance(self.sched_data, dict) or "generated_schedule" not in self.sched_data:
+            return {
+                "has_generated_schedule": False,
+                "generated_schedule": None,
+                "generation_diagnostics": [],
+                "generation_runtime_diagnostics": [],
+                "generation_complete": False,
+            }
+
+        return {
+            "has_generated_schedule": True,
+            "generated_schedule": deepcopy(self.sched_data.get("generated_schedule") or {}),
+            "generation_diagnostics": deepcopy(self.sched_data.get("generation_diagnostics") or []),
+            "generation_runtime_diagnostics": deepcopy(
+                self.sched_data.get("generation_runtime_diagnostics") or []
+            ),
+            "generation_complete": self.sched_data.get("generation_complete", True),
+        }
+
+    def store_generated_schedule(self, generated_schedule):
+        self.sched_data = {
+            "version": 1,
+            "manual_moves": [],
+            "generated_schedule": deepcopy(generated_schedule),
+            "generation_diagnostics": deepcopy(getattr(self, "generation_diagnostics", [])),
+            "generation_runtime_diagnostics": deepcopy(
+                getattr(self, "generation_runtime_diagnostics", [])
+            ),
+            "generation_complete": getattr(self, "generation_complete", True),
+        }
+        self.save(update_fields=["sched_data"])
+        return generated_schedule
+
+    def generate_and_store_schedule(self):
+        generated_schedule = self.create_sched
+        return self.store_generated_schedule(generated_schedule)
+
     def get_scheduling_diagnostics(self, class_locs_lookup=None):
         class_locs_lookup = class_locs if class_locs_lookup is None else class_locs_lookup
         diagnostics = []
@@ -332,6 +373,7 @@ class TheSched(models.Model):
         sched = {slot_key: [UNAVAILABLE_SLOT_VALUE] * count for slot_key in SCHEDULE_SLOT_KEYS}
         sched['ags'] = []
         sched['classes_needed'] = []
+        expected_activities_by_group = []
           
         group_count=0
         day_offset = {'Mon':0, "Tue":5, "Wed":10, "Thur":15, "Fri":19}
@@ -340,9 +382,15 @@ class TheSched(models.Model):
             school.update_sorted_subject_lst(local_class_len, local_class_locs)
             sorted_subjects = [subject for subject in school.sorted_subject_lst.split(',') if subject]
             for i in range(school.ag_num):
-                sched['ags'].append(school.school_name + ' ' + str(i))
+                group_label = school.school_name + ' ' + str(i)
+                sched['ags'].append(group_label)
                 # ------------------
                 sched['classes_needed'].append(sorted_subjects[::-1])
+                expected_activities_by_group.append({
+                    "school": school.school_name,
+                    "group": group_label,
+                    "activities": list(sorted_subjects),
+                })
             for key in list(sched.keys())[day_offset[school.arrive]:day_offset[school.depart]]:    
                 for i in range(group_count,group_count+school.ag_num):
                             sched[key][i] = UNASSIGNED_SLOT_VALUE
@@ -350,6 +398,95 @@ class TheSched(models.Model):
             group_count += school.ag_num
         
         self.sched = sched
+
+        def split_diagnostic_names(value):
+            if not value:
+                return []
+            return [name.strip() for name in value.split(',') if name.strip()]
+
+        def root_cause_for_unscheduled(school_name, activity_name, feasibility_diagnostics):
+            root_cause_priority = (
+                ('activity_no_eligible_locations', 'no_eligible_locations'),
+                ('activity_capacity_insufficient', 'capacity_shortfall'),
+                ('activity_total_capacity_insufficient', 'capacity_shortfall'),
+                ('location_bottleneck_insufficient', 'location_bottleneck'),
+                ('school_night_capacity_insufficient', 'day_night_constraint'),
+                ('school_daytime_capacity_insufficient', 'day_night_constraint'),
+                ('school_two_block_footprint_capacity_insufficient', 'trip_window_shortfall'),
+                ('school_trip_window_capacity_insufficient', 'trip_window_shortfall'),
+                ('activity_capacity_tight', 'competing_activity_pressure'),
+                ('activity_total_capacity_tight', 'competing_activity_pressure'),
+            )
+
+            def diagnostic_matches(diagnostic):
+                diagnostic_type = diagnostic.get('type')
+                diagnostic_school = diagnostic.get('school')
+                diagnostic_activity = diagnostic.get('activity')
+                if diagnostic_activity == activity_name:
+                    return diagnostic_school in (None, school_name)
+                if diagnostic_type == 'location_bottleneck_insufficient':
+                    return (
+                        activity_name in split_diagnostic_names(diagnostic.get('activities'))
+                        and school_name in split_diagnostic_names(diagnostic.get('schools'))
+                    )
+                if diagnostic_type.startswith('school_'):
+                    return diagnostic_school == school_name
+                return False
+
+            for diagnostic_type, root_cause in root_cause_priority:
+                for diagnostic in feasibility_diagnostics:
+                    if diagnostic.get('type') == diagnostic_type and diagnostic_matches(diagnostic):
+                        return {
+                            "root_cause": root_cause,
+                            "root_cause_reason": diagnostic["reason"],
+                        }
+
+            return {
+                "root_cause": "search_exhaustion_unknown",
+                "root_cause_reason": (
+                    "No specific capacity, location, or trip-window shortfall was identified "
+                    "before search. The scheduler exhausted available placement combinations "
+                    "without completing this activity."
+                ),
+            }
+
+        def unscheduled_activity_diagnostics(feasibility_diagnostics):
+            diagnostics = []
+            for group_index, group_requirements in enumerate(expected_activities_by_group):
+                expected_counts = Counter(group_requirements["activities"])
+                scheduled_counts = Counter()
+                for activity_name in expected_counts:
+                    activity_len = local_class_len.get(activity_name, 1)
+                    required_cells = 1 if activity_len == 0 else activity_len
+                    scheduled_cells = sum(
+                        1
+                        for slot_key in SCHEDULE_SLOT_KEYS
+                        if self.sched[slot_key][group_index] == activity_name
+                    )
+                    scheduled_counts[activity_name] = scheduled_cells // required_cells
+
+                for activity_name, expected_count in expected_counts.items():
+                    unscheduled_count = expected_count - scheduled_counts[activity_name]
+                    for _index in range(unscheduled_count):
+                        diagnostics.append({
+                            "type": "activity_unscheduled",
+                            "severity": "error",
+                            "school": group_requirements["school"],
+                            "group": group_requirements["group"],
+                            "activity": activity_name,
+                            "reason": (
+                                f"{group_requirements['group']} could not schedule {activity_name}. "
+                                "The scheduler could not place this activity with the current "
+                                "Locations, capacities, trip window, and scheduling constraints."
+                            ),
+                            **root_cause_for_unscheduled(
+                                group_requirements["school"],
+                                activity_name,
+                                feasibility_diagnostics,
+                            ),
+                        })
+            return diagnostics
+
         feasibility_audit = audit_schedule_feasibility(
             self.schools.all(),
             local_class_locs,
@@ -360,6 +497,9 @@ class TheSched(models.Model):
         self.generation_runtime_diagnostics.extend(feasibility_audit["diagnostics"])
         if feasibility_audit["blocks_generation"]:
             self.generation_complete = False
+            self.generation_runtime_diagnostics.extend(
+                unscheduled_activity_diagnostics(feasibility_audit["diagnostics"])
+            )
             self.sched.pop('classes_needed', None)
             return self.sched
 
@@ -438,6 +578,15 @@ class TheSched(models.Model):
         
         try:
             self.generation_complete = search_open_slot(locs_open,schedule=self.sched,)
+            if not self.generation_complete:
+                self.generation_runtime_diagnostics.append({
+                    "type": "generation_search_exhausted",
+                    "severity": "error",
+                    "reason": (
+                        "Schedule generation exhausted available placement options before "
+                        "completing the schedule."
+                    ),
+                })
         except GenerationSearchLimitExceeded:
             self.generation_complete = False
             self.generation_runtime_diagnostics.append({
@@ -448,6 +597,10 @@ class TheSched(models.Model):
                     f"search reached the safety limit of {GENERATION_SEARCH_MAX_ATTEMPTS} attempts."
                 ),
             })
+        if not self.generation_complete:
+            self.generation_runtime_diagnostics.extend(
+                unscheduled_activity_diagnostics(feasibility_audit["diagnostics"])
+            )
         self.sched.pop('classes_needed', None)
         # self.sched_data = self.sched.copy()
 

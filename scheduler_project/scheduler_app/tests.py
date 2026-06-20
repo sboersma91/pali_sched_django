@@ -2134,6 +2134,25 @@ class ScheduleWorkflowTests(TestCase):
         )
         self.schedule.schools.add(self.school)
 
+    def store_generated_schedule(
+        self,
+        generated_schedule,
+        generation_complete=True,
+        generation_diagnostics=None,
+        generation_runtime_diagnostics=None,
+    ):
+        sched_data = dict(self.schedule.sched_data or {})
+        sched_data.setdefault("version", 1)
+        sched_data.setdefault("manual_moves", [])
+        sched_data.update({
+            "generated_schedule": generated_schedule,
+            "generation_complete": generation_complete,
+            "generation_diagnostics": generation_diagnostics or [],
+            "generation_runtime_diagnostics": generation_runtime_diagnostics or [],
+        })
+        self.schedule.sched_data = sched_data
+        self.schedule.save(update_fields=["sched_data"])
+
     def test_schedule_list_renders_readable_operational_summary(self):
         response = self.client.get(reverse("sched-list"))
 
@@ -2146,10 +2165,11 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, "1 School")
         self.assertContains(
             response,
-            "Opening a Schedule regenerates output for its selected Schools using their latest Activities and Locations.",
+            "View stored generated output, or intentionally regenerate a Schedule from its selected Schools.",
         )
         self.assertContains(response, "Create Schedule")
-        self.assertContains(response, "Generate / View")
+        self.assertContains(response, "View Schedule")
+        self.assertContains(response, "Generate Schedule")
         self.assertContains(response, "Edit Record")
         self.assertContains(response, "Delete")
         self.assertNotContains(response, "Add New Course")
@@ -2171,7 +2191,9 @@ class ScheduleWorkflowTests(TestCase):
             "mon_pm2": ["empty"],
             "mon_night": ["g_box"],
         }
+        self.store_generated_schedule(generated_schedule)
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+
             create_sched.return_value = generated_schedule
             response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
 
@@ -2199,12 +2221,48 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, "How this Schedule record works")
         self.assertContains(response, 'id="schedule-workspace"', html=False)
 
+    def test_schedule_detail_without_stored_output_never_generates(self):
+        self.schedule.sched_data = {}
+        self.schedule.save(update_fields=["sched_data"])
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.side_effect = AssertionError("Viewing must not generate schedules")
+            response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "No Generated Schedule Yet")
+        self.assertContains(response, "Viewing this page does not generate output.")
+        self.assertEqual(self.schedule.sched_data, {})
+        self.assertEqual(create_sched.call_count, 0)
+
+    def test_generate_schedule_post_runs_scheduler_and_stores_output(self):
+        generated_schedule = {
+            "ags": ["Generated School 0"],
+            "mon_pm1": ["Stored Activity"],
+            "mon_pm2": ["empty"],
+        }
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.return_value = generated_schedule
+            response = self.client.post(reverse("sched-generate", args=[self.schedule.id]))
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], reverse("sched-detail", args=[self.schedule.id]))
+        self.assertEqual(create_sched.call_count, 1)
+        self.assertEqual(self.schedule.sched_data["generated_schedule"], generated_schedule)
+        self.assertEqual(self.schedule.sched_data["manual_moves"], [])
+        self.assertTrue(self.schedule.sched_data["generation_complete"])
+
     def test_schedule_detail_places_operational_workspace_before_secondary_details(self):
         generated_schedule = {
             "ags": ["Example School 0"],
             "mon_pm1": ["Archery"],
             "mon_pm2": ["empty"],
         }
+
+        self.store_generated_schedule(generated_schedule)
 
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
@@ -2223,6 +2281,8 @@ class ScheduleWorkflowTests(TestCase):
             "mon_pm1": ["Archery"],
         }
 
+        self.store_generated_schedule(generated_schedule)
+
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
             response = self.client.post(
@@ -2238,7 +2298,7 @@ class ScheduleWorkflowTests(TestCase):
         content = response.content.decode()
         self.assertContains(response, "The selected source block ID is invalid.")
         self.assertLess(content.index("System messages"), content.index("schedule-table"))
-        self.assertContains(response, "Viewing this page regenerates the current output")
+        self.assertContains(response, "View Schedule loads stored generated output without running the scheduler.")
         self.assertContains(response, "/////</code> = unavailable or not present", html=False)
         self.assertContains(response, "****</code> = unassigned available block", html=False)
         self.assertEqual(response.context["conflict_summary_groups"], [])
@@ -2255,6 +2315,8 @@ class ScheduleWorkflowTests(TestCase):
             "mon_pm1": [activity.course_name],
         }
         url = f'{reverse("sched-detail", args=[self.schedule.id])}?selected_block=0:mon_pm1'
+
+        self.store_generated_schedule(generated_schedule)
 
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
@@ -2292,6 +2354,8 @@ class ScheduleWorkflowTests(TestCase):
         }
         url = f'{reverse("sched-detail", args=[self.schedule.id])}?selected_block=0:mon_pm1'
 
+        self.store_generated_schedule(generated_schedule)
+
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
             response = self.client.get(url)
@@ -2315,6 +2379,8 @@ class ScheduleWorkflowTests(TestCase):
             "mon_pm1": [night.course_name],
             "mon_night": [daytime.course_name],
         }
+
+        self.store_generated_schedule(generated_schedule)
 
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
@@ -2357,6 +2423,8 @@ class ScheduleWorkflowTests(TestCase):
             f'&source_activity_name={activity.course_name}&source_occurrence_id=occurrence:0:mon_pm1'
             '&target_slot=tue_am1&target_group=0'
         )
+
+        self.store_generated_schedule(generated_schedule)
 
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
@@ -2402,6 +2470,8 @@ class ScheduleWorkflowTests(TestCase):
             '&target_slot=invalid_slot&target_group=0'
         )
 
+        self.store_generated_schedule(generated_schedule)
+
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
             response = self.client.get(url)
@@ -2430,6 +2500,8 @@ class ScheduleWorkflowTests(TestCase):
             f'&source_activity_name={activity.course_name}&source_occurrence_id=occurrence:0:tue_am1'
             '&target_slot=wed_am1&target_group=0'
         )
+
+        self.store_generated_schedule(generated_schedule)
 
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
@@ -2462,6 +2534,8 @@ class ScheduleWorkflowTests(TestCase):
             '&target_slot=mon_night&target_group=0'
         )
 
+        self.store_generated_schedule(generated_schedule)
+
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
             response = self.client.get(url)
@@ -2493,6 +2567,8 @@ class ScheduleWorkflowTests(TestCase):
             '&target_slot=tue_am1&target_group=0'
         )
 
+        self.store_generated_schedule(generated_schedule)
+
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
             proposal_response = self.client.get(proposal_url)
@@ -2505,7 +2581,7 @@ class ScheduleWorkflowTests(TestCase):
         self.assertEqual(reload_response.context["schedule_rows"][0]["cells"][3]["raw_value"], "empty")
         self.assertEqual(generated_schedule["mon_pm1"], [activity.course_name])
         self.assertEqual(generated_schedule["tue_am1"], ["empty"])
-        self.assertEqual(self.schedule.sched_data, {"source": "test"})
+        self.assertEqual(self.schedule.sched_data["source"], "test")
 
     def test_post_move_confirmation_recomputes_without_prior_get_state(self):
         activity = Course.objects.create(course_name="Confirmed Proposal", abriviation="CP", course_len=1)
@@ -2514,6 +2590,8 @@ class ScheduleWorkflowTests(TestCase):
             "mon_pm1": [activity.course_name],
             "tue_am1": ["empty"],
         }
+
+        self.store_generated_schedule(generated_schedule)
 
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
@@ -2545,6 +2623,8 @@ class ScheduleWorkflowTests(TestCase):
             "tue_am1": ["empty"],
         }
 
+        self.store_generated_schedule(generated_schedule)
+
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
             post_response = self.client.post(
@@ -2568,6 +2648,8 @@ class ScheduleWorkflowTests(TestCase):
             "mon_pm1": [activity.course_name],
             "tue_am1": ["empty"],
         }
+
+        self.store_generated_schedule(generated_schedule)
 
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
@@ -2602,6 +2684,8 @@ class ScheduleWorkflowTests(TestCase):
             ("occurrence id", {"source_occurrence_id": "occurrence:changed"}),
         ]
 
+        self.store_generated_schedule(generated_schedule)
+
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
             for label, override in mismatch_cases:
@@ -2631,7 +2715,7 @@ class ScheduleWorkflowTests(TestCase):
         self.schedule.refresh_from_db()
         self.assertEqual(generated_schedule["mon_pm1"], [activity.course_name])
         self.assertEqual(generated_schedule["tue_am1"], ["empty"])
-        self.assertEqual(self.schedule.sched_data, {"source": "test"})
+        self.assertEqual(self.schedule.sched_data["source"], "test")
 
     def test_post_move_confirmation_safely_rejects_invalid_requests(self):
         one_block = Course.objects.create(course_name="POST One Block", abriviation="POB", course_len=1)
@@ -2694,6 +2778,8 @@ class ScheduleWorkflowTests(TestCase):
             ),
         ]
 
+        self.store_generated_schedule(generated_schedule)
+
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
             for label, post_data, expected_error in cases:
@@ -2719,6 +2805,8 @@ class ScheduleWorkflowTests(TestCase):
             "tue_am1": ["empty"],
         }
 
+        self.store_generated_schedule(generated_schedule)
+
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
             proposal_response = self.client.post(reverse("sched-move-confirm", args=[self.schedule.id]), {
@@ -2738,7 +2826,7 @@ class ScheduleWorkflowTests(TestCase):
         self.assertEqual(reload_response.context["schedule_rows"][0]["cells"][3]["raw_value"], "empty")
         self.assertEqual(generated_schedule["mon_pm1"], [activity.course_name])
         self.assertEqual(generated_schedule["tue_am1"], ["empty"])
-        self.assertEqual(self.schedule.sched_data, {"source": "test"})
+        self.assertEqual(self.schedule.sched_data["source"], "test")
 
     def test_post_confirmation_renders_same_proposal_state_as_get_preview(self):
         activity = Course.objects.create(course_name="Matching Proposal", abriviation="MP", course_len=1)
@@ -2753,6 +2841,8 @@ class ScheduleWorkflowTests(TestCase):
             f'&source_activity_name={activity.course_name}&source_occurrence_id=occurrence:0:mon_pm1'
             '&target_slot=tue_am1&target_group=0'
         )
+
+        self.store_generated_schedule(generated_schedule)
 
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
@@ -2784,6 +2874,8 @@ class ScheduleWorkflowTests(TestCase):
             "mon_pm1": [activity.course_name],
             "tue_am1": ["empty"],
         }
+
+        self.store_generated_schedule(generated_schedule)
 
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
@@ -2823,6 +2915,8 @@ class ScheduleWorkflowTests(TestCase):
             "tue_am1": ["empty"],
         }
 
+        self.store_generated_schedule(generated_schedule)
+
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
             post_response = self.client.post(
@@ -2848,6 +2942,8 @@ class ScheduleWorkflowTests(TestCase):
             "mon_pm1": [activity.course_name],
             "tue_am1": ["empty"],
         }
+
+        self.store_generated_schedule(generated_schedule)
 
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
@@ -2981,6 +3077,7 @@ class ScheduleWorkflowTests(TestCase):
                 reverse("sched-data-repair", args=[self.schedule.id]),
                 follow=True,
             )
+            self.store_generated_schedule(generated_schedule)
             save_response = self.client.post(
                 reverse("sched-move-save", args=[self.schedule.id]),
                 self.move_post_data(activity),
@@ -3001,6 +3098,8 @@ class ScheduleWorkflowTests(TestCase):
             "tue_am1": ["empty"],
         }
 
+        self.store_generated_schedule(generated_schedule)
+
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
             response = self.client.post(
@@ -3011,7 +3110,7 @@ class ScheduleWorkflowTests(TestCase):
 
         self.schedule.refresh_from_db()
         self.assertEqual(response.context["proposal_result"]["error"], "source_identity_mismatch")
-        self.assertEqual(self.schedule.sched_data, {"source": "test"})
+        self.assertEqual(self.schedule.sched_data["source"], "test")
         self.assertContains(response, "Move was not saved because the source proposal is invalid or stale.")
 
     def test_save_move_endpoint_rejects_unsaveable_proposal(self):
@@ -3021,6 +3120,8 @@ class ScheduleWorkflowTests(TestCase):
             "mon_pm1": [activity.course_name],
             "tue_am1": ["g_box"],
         }
+
+        self.store_generated_schedule(generated_schedule)
 
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
@@ -3033,7 +3134,7 @@ class ScheduleWorkflowTests(TestCase):
         self.schedule.refresh_from_db()
         self.assertEqual(response.context["proposal_result"]["error"], "target_unavailable")
         self.assertFalse(response.context["save_readiness"]["can_save"])
-        self.assertEqual(self.schedule.sched_data, {"source": "test"})
+        self.assertEqual(self.schedule.sched_data["source"], "test")
 
     def test_occupied_target_warning_proposal_renders_and_persists(self):
         source = Course.objects.create(course_name="Rendered Overlap Source", abriviation="ROS", course_len=1)
@@ -3048,6 +3149,8 @@ class ScheduleWorkflowTests(TestCase):
             target_slot="mon_pm2",
             action_type="overlap_move",
         )
+
+        self.store_generated_schedule(generated_schedule)
 
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
@@ -3098,6 +3201,8 @@ class ScheduleWorkflowTests(TestCase):
             action_type="displacement_move",
         )
 
+        self.store_generated_schedule(generated_schedule)
+
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
             confirm_response = self.client.post(
@@ -3133,6 +3238,8 @@ class ScheduleWorkflowTests(TestCase):
             "mon_pm2": [displaced.course_name],
         }
         post_data = self.move_post_data(source, target_slot="mon_pm2", action_type="")
+
+        self.store_generated_schedule(generated_schedule)
 
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
@@ -3190,6 +3297,8 @@ class ScheduleWorkflowTests(TestCase):
             "target_slot": "tue_am1",
             "action_type": "overlap_move",
         }
+
+        self.store_generated_schedule(generated_schedule)
 
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
@@ -3249,6 +3358,8 @@ class ScheduleWorkflowTests(TestCase):
             ),
         ]
 
+        self.store_generated_schedule(generated_schedule)
+
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
             for post_data, expected_error in cases:
@@ -3261,7 +3372,7 @@ class ScheduleWorkflowTests(TestCase):
                     self.assertEqual(response.context["proposal_result"]["error"], expected_error)
 
         self.schedule.refresh_from_db()
-        self.assertEqual(self.schedule.sched_data, {"source": "test"})
+        self.assertEqual(self.schedule.sched_data["source"], "test")
 
     def test_save_move_endpoint_appends_multiple_moves(self):
         activity = Course.objects.create(course_name="Multiple Saved Moves", abriviation="MSM", course_len=1)
@@ -3271,6 +3382,8 @@ class ScheduleWorkflowTests(TestCase):
             "tue_am1": ["empty"],
             "wed_am1": ["empty"],
         }
+
+        self.store_generated_schedule(generated_schedule)
 
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
@@ -3305,6 +3418,8 @@ class ScheduleWorkflowTests(TestCase):
             "mon_pm1": [activity.course_name],
             "tue_am1": ["empty"],
         }
+
+        self.store_generated_schedule(generated_schedule)
 
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
@@ -3355,6 +3470,8 @@ class ScheduleWorkflowTests(TestCase):
         }
         self.schedule.save(update_fields=["sched_data"])
 
+        self.store_generated_schedule(generated_schedule)
+
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
             response = self.client.get(
@@ -3399,8 +3516,10 @@ class ScheduleWorkflowTests(TestCase):
                 "status": "active",
             }],
         }
-        stored_before = deepcopy(self.schedule.sched_data)
         self.schedule.save(update_fields=["sched_data"])
+
+        self.store_generated_schedule(generated_schedule)
+        stored_before = deepcopy(self.schedule.sched_data)
 
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
@@ -3458,6 +3577,8 @@ class ScheduleWorkflowTests(TestCase):
         }
         self.schedule.save(update_fields=["sched_data"])
 
+        self.store_generated_schedule(generated_schedule)
+
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
             response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
@@ -3489,6 +3610,8 @@ class ScheduleWorkflowTests(TestCase):
             "target_slot": "tue_am1",
             "target_group": "1",
         }
+
+        self.store_generated_schedule(generated_schedule)
 
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
@@ -3543,6 +3666,8 @@ class ScheduleWorkflowTests(TestCase):
         }
         self.schedule.save(update_fields=["sched_data"])
 
+        self.store_generated_schedule(generated_schedule)
+
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
             response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
@@ -3578,6 +3703,8 @@ class ScheduleWorkflowTests(TestCase):
             }],
         }
         self.schedule.save(update_fields=["sched_data"])
+
+        self.store_generated_schedule(generated_schedule)
 
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
@@ -3631,8 +3758,10 @@ class ScheduleWorkflowTests(TestCase):
                 },
             ],
         }
-        stored_before = deepcopy(self.schedule.sched_data)
         self.schedule.save(update_fields=["sched_data"])
+
+        self.store_generated_schedule(generated_schedule)
+        stored_before = deepcopy(self.schedule.sched_data)
 
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
@@ -3675,6 +3804,8 @@ class ScheduleWorkflowTests(TestCase):
         }
         url = f'{reverse("sched-detail", args=[self.schedule.id])}?selected_block=0:tue_am1'
 
+        self.store_generated_schedule(generated_schedule)
+
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
             response = self.client.get(url)
@@ -3699,6 +3830,8 @@ class ScheduleWorkflowTests(TestCase):
             "tue_am2": [activity.course_name],
         }
         url = f'{reverse("sched-detail", args=[self.schedule.id])}?selected_block=0:tue_am2'
+
+        self.store_generated_schedule(generated_schedule)
 
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
@@ -3727,7 +3860,9 @@ class ScheduleWorkflowTests(TestCase):
         for block_id in ("0:mon_pm1", "0:mon_pm2"):
             with self.subTest(block_id=block_id):
                 url = f'{reverse("sched-detail", args=[self.schedule.id])}?selected_block={block_id}'
+                self.store_generated_schedule(generated_schedule)
                 with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+
                     create_sched.return_value = generated_schedule
                     response = self.client.get(url)
 
@@ -3743,6 +3878,8 @@ class ScheduleWorkflowTests(TestCase):
             "mon_pm1": ["Selectable Activity"],
         }
         url = f'{reverse("sched-detail", args=[self.schedule.id])}?selected_block=invalid'
+
+        self.store_generated_schedule(generated_schedule)
 
         with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
             create_sched.return_value = generated_schedule
@@ -3877,12 +4014,14 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.schedule.schools.add(self.school)
 
     def render_schedule_detail(self):
+        self.schedule.generate_and_store_schedule()
         request = RequestFactory().get(reverse("sched-detail", args=[self.schedule.id]))
         response = SchedDetail.as_view()(request, pk=self.schedule.id)
         response.render()
         return response, response.content.decode()
 
     def export_schedule_csv(self):
+        self.schedule.generate_and_store_schedule()
         request = RequestFactory().get(reverse("sched-export", args=[self.schedule.id]))
         return schedule_csv_export(request, pk=self.schedule.id)
 
@@ -4084,6 +4223,22 @@ class ScheduleGenerationRegressionTests(TestCase):
             for diagnostic in schedule.generation_runtime_diagnostics
         }
 
+    def assert_runtime_diagnostics_have_required_fields(self, schedule):
+        self.assertTrue(schedule.generation_runtime_diagnostics)
+        for diagnostic in schedule.generation_runtime_diagnostics:
+            with self.subTest(diagnostic=diagnostic):
+                self.assertIn("type", diagnostic)
+                self.assertIn("severity", diagnostic)
+                self.assertIn("reason", diagnostic)
+                self.assertTrue(diagnostic["type"])
+                self.assertTrue(diagnostic["severity"])
+                self.assertTrue(diagnostic["reason"])
+                if diagnostic["type"] == "activity_unscheduled":
+                    self.assertIn("root_cause", diagnostic)
+                    self.assertIn("root_cause_reason", diagnostic)
+                    self.assertTrue(diagnostic["root_cause"])
+                    self.assertTrue(diagnostic["root_cause_reason"])
+
     def test_location_valid_schedule_that_cannot_fit_reports_incomplete_generation(self):
         self.make_location_valid_schedule_unassignable()
 
@@ -4092,6 +4247,38 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.assertFalse(self.schedule.generation_complete)
         self.assertEqual(self.schedule.generation_diagnostics, [])
         self.assertEqual(generated_schedule["ags"], ["Balanced Regression School 0"])
+
+    def test_incomplete_generation_reports_unscheduled_activities(self):
+        self.make_location_valid_schedule_unassignable()
+
+        with patch("scheduler_app.models.audit_schedule_feasibility", return_value={
+            "diagnostics": [],
+            "errors": [],
+            "warnings": [],
+            "info": [],
+            "blocks_generation": False,
+        }):
+            self.schedule.create_sched
+
+        diagnostics = self.schedule.generation_runtime_diagnostics
+        unscheduled = [
+            diagnostic
+            for diagnostic in diagnostics
+            if diagnostic["type"] == "activity_unscheduled"
+        ]
+        self.assertIn("generation_search_exhausted", self.diagnostic_types(self.schedule))
+        self.assertTrue(unscheduled)
+        self.assertTrue(any(
+            diagnostic["school"] == "Balanced Regression School"
+            and diagnostic["group"] == "Balanced Regression School 0"
+            and diagnostic["activity"] == "Competing Two Block"
+            and diagnostic["severity"] == "error"
+            and diagnostic["root_cause"] == "search_exhaustion_unknown"
+            and "could not place this activity" in diagnostic["reason"]
+            and "No specific capacity, location, or trip-window shortfall" in diagnostic["root_cause_reason"]
+            for diagnostic in unscheduled
+        ))
+        self.assert_runtime_diagnostics_have_required_fields(self.schedule)
 
     def test_schedule_detail_marks_unassignable_location_valid_output_incomplete(self):
         self.make_location_valid_schedule_unassignable()
@@ -4116,8 +4303,11 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.assertEqual(schedule.generation_diagnostics, [])
         self.assertEqual(generated_schedule["ags"], ["Limited Night School 0", "Limited Night School 1"])
         self.assertNotIn("classes_needed", generated_schedule)
-        self.assertEqual(len(schedule.generation_runtime_diagnostics), 1)
-        diagnostic = schedule.generation_runtime_diagnostics[0]
+        diagnostic = next(
+            diagnostic
+            for diagnostic in schedule.generation_runtime_diagnostics
+            if diagnostic["type"] == "activity_capacity_insufficient"
+        )
         self.assertEqual(diagnostic["type"], "activity_capacity_insufficient")
         self.assertEqual(diagnostic["school"], "Limited Night School")
         self.assertEqual(diagnostic["activity"], "Limited Night Activity")
@@ -4125,6 +4315,26 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.assertEqual(diagnostic["capacity"], 1)
         self.assertIn("Limited Night School — Limited Night Activity needs 2 placements", diagnostic["reason"])
         self.assertIn("only 1 is available", diagnostic["reason"])
+
+    def test_capacity_insufficiency_adds_unscheduled_root_cause_attribution(self):
+        schedule = self.make_insufficient_night_capacity_schedule()
+
+        with patch("scheduler_app.models.GENERATION_SEARCH_MAX_ATTEMPTS", 0):
+            schedule.create_sched
+
+        unscheduled = [
+            diagnostic
+            for diagnostic in schedule.generation_runtime_diagnostics
+            if diagnostic["type"] == "activity_unscheduled"
+        ]
+        self.assertEqual(len(unscheduled), 2)
+        for diagnostic in unscheduled:
+            self.assertEqual(diagnostic["root_cause"], "capacity_shortfall")
+            self.assertEqual(diagnostic["school"], "Limited Night School")
+            self.assertEqual(diagnostic["activity"], "Limited Night Activity")
+            self.assertIn("needs 2 placements", diagnostic["root_cause_reason"])
+            self.assertIn("only 1 is available", diagnostic["root_cause_reason"])
+        self.assert_runtime_diagnostics_have_required_fields(schedule)
 
     def test_insufficient_total_school_blocks_is_caught_before_recursive_search(self):
         broad_location = Locations.objects.create(loc_name="Various", loc_short="VAR")
@@ -4227,11 +4437,14 @@ class ScheduleGenerationRegressionTests(TestCase):
 
         self.assertFalse(self.schedule.generation_complete)
         self.assertEqual(generated_schedule["ags"], ["Balanced Regression School 0"])
-        self.assertEqual(len(self.schedule.generation_runtime_diagnostics), 1)
-        self.assertEqual(
-            self.schedule.generation_runtime_diagnostics[0]["type"],
-            "search_limit_exceeded",
-        )
+        self.assertIn("search_limit_exceeded", self.diagnostic_types(self.schedule))
+        self.assertIn("activity_unscheduled", self.diagnostic_types(self.schedule))
+        self.assertTrue(any(
+            diagnostic["type"] == "activity_unscheduled"
+            and diagnostic["root_cause"] == "search_exhaustion_unknown"
+            for diagnostic in self.schedule.generation_runtime_diagnostics
+        ))
+        self.assert_runtime_diagnostics_have_required_fields(self.schedule)
 
     def test_schedule_detail_renders_activity_capacity_diagnostic(self):
         self.schedule = self.make_insufficient_night_capacity_schedule()
@@ -4254,17 +4467,31 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.assertEqual(self.schedule.generation_diagnostics, [])
         self.assertEqual(generated_schedule["ags"], ["Balanced Regression School 0"])
         self.assertNotIn("classes_needed", generated_schedule)
-        self.assertEqual(
-            self.schedule.generation_runtime_diagnostics,
-            [{
+        self.assertIn(
+            {
                 "type": "search_limit_exceeded",
                 "severity": "warning",
                 "reason": (
                     "Schedule generation stopped because the recursive assignment "
                     "search reached the safety limit of 1 attempts."
                 ),
-            }],
+            },
+            self.schedule.generation_runtime_diagnostics,
         )
+        self.assertIn("activity_unscheduled", self.diagnostic_types(self.schedule))
+        self.assertTrue(any(
+            diagnostic["type"] == "activity_unscheduled"
+            and diagnostic["school"] == "Balanced Regression School"
+            and diagnostic["group"] == "Balanced Regression School 0"
+            and diagnostic["root_cause"] == "search_exhaustion_unknown"
+            and diagnostic["activity"] in {
+                "Regression Two Block",
+                "Regression One Block",
+                "Regression Night",
+            }
+            for diagnostic in self.schedule.generation_runtime_diagnostics
+        ))
+        self.assert_runtime_diagnostics_have_required_fields(self.schedule)
 
     def test_schedule_detail_renders_when_generation_search_limit_is_exceeded(self):
         with patch("scheduler_app.models.GENERATION_SEARCH_MAX_ATTEMPTS", 1):
@@ -4332,7 +4559,7 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.assertIn("Regression Night", rendered_content)
         self.assertIn("<table", rendered_content)
         self.assertIn("Export CSV", rendered_content)
-        self.assertIn("Download generated schedule for spreadsheet review", rendered_content)
+        self.assertIn("Download stored generated schedule for spreadsheet review", rendered_content)
         self.assertIn(reverse("sched-export", args=[self.schedule.id]), rendered_content)
 
     def test_successful_schedule_csv_export_contains_operational_table_rows(self):

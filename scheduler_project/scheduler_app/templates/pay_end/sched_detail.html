@@ -5,11 +5,15 @@
     <div>
       <p class="text-uppercase text-muted small mb-1">Generated Schedule</p>
       <h1 class="mb-1">{{ sched.sched_name }}</h1>
-      <p class="text-muted mb-0">Current operational output generated when this page was opened.</p>
+      <p class="text-muted mb-0">Stored operational output from the most recent intentional generation.</p>
     </div>
     <div class="d-flex flex-wrap gap-2">
-      {% if not generation_blocked %}
-        <a href="{% url 'sched-export' sched.id %}" class="btn btn-primary">Export CSV</a>
+      <form method="post" action="{% url 'sched-generate' sched.id %}">
+        {% csrf_token %}
+        <button type="submit" class="btn btn-primary">Generate Schedule</button>
+      </form>
+      {% if has_generated_schedule and not generation_blocked %}
+        <a href="{% url 'sched-export' sched.id %}" class="btn btn-outline-success">Export CSV</a>
       {% endif %}
       <a href="{% url 'sched-update' sched.id %}" class="btn btn-secondary">Edit Schedule Record</a>
       <a href="{% url 'sched-delete' sched.id %}" class="btn btn-outline-danger">Delete Schedule</a>
@@ -17,7 +21,14 @@
     </div>
   </div>
 
-  {% if not generation_blocked %}
+  {% if not has_generated_schedule %}
+    <section class="mb-4" aria-labelledby="empty-schedule-heading">
+      <div class="alert alert-info" role="status">
+        <h2 id="empty-schedule-heading" class="h4 alert-heading">No Generated Schedule Yet</h2>
+        <p class="mb-0">This Schedule record has not stored generated output yet. Use Generate Schedule when you are ready to create one.</p>
+      </div>
+    </section>
+  {% elif not generation_blocked %}
   <section id="schedule-workspace" class="mb-4" aria-labelledby="generated-schedule-heading" tabindex="-1">
     <div class="mb-3">
       <h2 id="generated-schedule-heading" class="h3 mb-1">{% if generation_incomplete %}Incomplete Schedule Output{% else %}Generated Schedule{% endif %}</h2>
@@ -381,8 +392,8 @@
     </div>
     <div class="alert alert-info mb-0" role="alert">
       <h3 class="h5 alert-heading">How this Schedule record works</h3>
-      <p>Generated output uses this Schedule’s selected Schools and their current Activities and Locations. Viewing this page regenerates the current output, then replays saved manual overrides onto the normalized operational schedule.</p>
-      {% if not generation_blocked %}<p class="mb-0"><strong>Export CSV:</strong> Download generated schedule for spreadsheet review.</p>{% endif %}
+      <p>View Schedule loads stored generated output without running the scheduler. Generate Schedule intentionally runs the scheduler from scratch and replaces the stored output.</p>
+      {% if has_generated_schedule and not generation_blocked %}<p class="mb-0"><strong>Export CSV:</strong> Download stored generated schedule for spreadsheet review.</p>{% endif %}
     </div>
   </section>
 
@@ -408,7 +419,12 @@
     {% endif %}
     <div aria-labelledby="generation-status-heading">
       <h3 id="generation-status-heading" class="h4 mb-3">Generation Status</h3>
-      {% if generation_succeeded %}
+      {% if not has_generated_schedule %}
+        <div class="alert alert-info mb-0" role="status">
+          <h4 class="h5 alert-heading">No stored generated schedule</h4>
+          <p class="mb-0">Viewing this page does not generate output. Use Generate Schedule to create stored output for this Schedule record.</p>
+        </div>
+      {% elif generation_succeeded %}
         <div class="alert alert-success mb-0" role="status">
           <h4 class="h5 alert-heading">Schedule generated successfully{% if generation_runtime_diagnostics %} with feasibility notes{% endif %}</h4>
           <p class="mb-0">All selected Activities have available scheduling Locations and were fully assigned.</p>

@@ -147,8 +147,16 @@ CSV_ACTIVITY_VALUES = {'g_box': 'Unavailable / Not present', 'empty': 'Unassigne
 
 def schedule_csv_export(request, pk):
     schedule_record = get_object_or_404(TheSched, pk=pk)
-    generated_schedule = schedule_record.create_sched
-    diagnostics = getattr(schedule_record, 'generation_diagnostics', [])
+    stored_generation = schedule_record.get_stored_generation_result()
+    if not stored_generation['has_generated_schedule']:
+        return HttpResponse(
+            'Schedule CSV export is unavailable because no generated schedule has been stored yet.',
+            status=409,
+            content_type='text/plain',
+        )
+
+    generated_schedule = stored_generation['generated_schedule']
+    diagnostics = stored_generation['generation_diagnostics']
     if diagnostics:
         diagnostic_text = '; '.join(
             f"{diagnostic['school']} — {diagnostic['activity']}: {diagnostic['reason']}"
@@ -160,7 +168,7 @@ def schedule_csv_export(request, pk):
             content_type='text/plain',
         )
 
-    generation_status = 'Complete' if getattr(schedule_record, 'generation_complete', True) else 'Incomplete'
+    generation_status = 'Complete' if stored_generation['generation_complete'] else 'Incomplete'
     filename = slugify(schedule_record.sched_name) or f'schedule-{schedule_record.pk}'
     response = HttpResponse(content_type='text/csv')
     response['Content-Disposition'] = f'attachment; filename="{filename}.csv"'
@@ -220,7 +228,48 @@ class SchedDetail(DetailView):
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
-        schedule = self.object.create_sched
+        stored_generation = self.object.get_stored_generation_result()
+        generation_diagnostics = stored_generation['generation_diagnostics']
+        generation_runtime_diagnostics = stored_generation['generation_runtime_diagnostics']
+        generation_complete = stored_generation['generation_complete']
+
+        context['selected_schools'] = self.object.schools.order_by('school_name')
+        context['schedule_days'] = SCHEDULE_DAYS
+        context['schedule_legend'] = SCHEDULE_LEGEND
+        context['schedule_rows'] = []
+        context['selected_block'] = None
+        context['selected_holding'] = None
+        context['selected_occurrence_id'] = None
+        context['proposal_result'] = None
+        context['override_replay_result'] = {'applied_overrides': [], 'replay_conflicts': [], 'holding_area': []}
+        context['displacement_preview'] = context['override_replay_result']
+        context['holding_area_preview'] = []
+        context['save_readiness'] = None
+        context['proposal_recomputed_server_side'] = False
+        context['conflict_summaries'] = []
+        context['conflict_summary_groups'] = []
+        context['has_blocking_conflicts'] = False
+        context['sched_data_diagnostic'] = diagnose_sched_data_structure(self.object.sched_data)
+        context['has_generated_schedule'] = stored_generation['has_generated_schedule']
+        context['generation_diagnostics'] = generation_diagnostics
+        context['generation_runtime_diagnostics'] = generation_runtime_diagnostics
+        context['generation_blocked'] = bool(generation_diagnostics)
+        context['generation_complete'] = generation_complete
+        context['generation_succeeded'] = (
+            stored_generation['has_generated_schedule']
+            and not context['generation_blocked']
+            and generation_complete
+        )
+        context['generation_incomplete'] = (
+            stored_generation['has_generated_schedule']
+            and not context['generation_blocked']
+            and not generation_complete
+        )
+
+        if not stored_generation['has_generated_schedule']:
+            return context
+
+        schedule = stored_generation['generated_schedule']
         schedule_days = SCHEDULE_DAYS
         schedule_rows = build_schedule_blocks(schedule)
         replay_result = apply_persisted_overrides(self.object, schedule_rows)
@@ -336,9 +385,6 @@ class SchedDetail(DetailView):
             None,
         )
 
-        context['selected_schools'] = self.object.schools.order_by('school_name')
-        context['schedule_days'] = schedule_days
-        context['schedule_legend'] = SCHEDULE_LEGEND
         context['schedule_rows'] = schedule_rows
         context['selected_block'] = selected_block
         context['selected_holding'] = selected_holding
@@ -355,14 +401,30 @@ class SchedDetail(DetailView):
             group['severity'] == 'error'
             for group in conflict_summary_groups
         )
-        context['sched_data_diagnostic'] = diagnose_sched_data_structure(self.object.sched_data)
-        context['generation_diagnostics'] = getattr(self.object, 'generation_diagnostics', [])
-        context['generation_runtime_diagnostics'] = getattr(self.object, 'generation_runtime_diagnostics', [])
-        context['generation_blocked'] = bool(context['generation_diagnostics'])
-        context['generation_complete'] = getattr(self.object, 'generation_complete', True)
-        context['generation_succeeded'] = not context['generation_blocked'] and context['generation_complete']
-        context['generation_incomplete'] = not context['generation_blocked'] and not context['generation_complete']
         return context
+
+
+class SchedGenerate(DetailView):
+    model = TheSched
+    http_method_names = ['post']
+
+    def post(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        self.object.generate_and_store_schedule()
+        stored_generation = self.object.get_stored_generation_result()
+        if stored_generation['generation_diagnostics']:
+            messages.error(
+                request,
+                'Schedule generation could not continue. Review diagnostics before trying again.',
+            )
+        elif stored_generation['generation_complete']:
+            messages.success(request, 'Schedule generated and stored for later viewing.')
+        else:
+            messages.warning(
+                request,
+                'Schedule generation finished with incomplete output. Review diagnostics.',
+            )
+        return HttpResponseRedirect(reverse('sched-detail', args=[self.object.pk]))
 
 
 class SchedMoveConfirm(SchedDetail):
@@ -427,6 +489,11 @@ class SchedMoveConfirm(SchedDetail):
 class SchedMoveSave(SchedMoveConfirm):
     def post(self, request, *args, **kwargs):
         self.object = self.get_object()
+        sched_data_diagnostic = diagnose_sched_data_structure(self.object.sched_data)
+        if sched_data_diagnostic['status'] == 'malformed':
+            messages.error(request, sched_data_diagnostic['message'])
+            return HttpResponseRedirect(reverse('sched-detail', args=[self.object.pk]))
+
         context = self.get_context_data(object=self.object)
         proposal_result = context['proposal_result']
         save_readiness = context['save_readiness']
