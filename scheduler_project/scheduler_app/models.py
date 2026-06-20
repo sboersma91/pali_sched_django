@@ -94,6 +94,7 @@ def create_class_locs_dict():
 
 scheduling_data_initialized = False
 GENERATION_SEARCH_MAX_ATTEMPTS = 100000
+LOCALIZED_FAILURE_COMPLETION_THRESHOLD = 80.0
 
 
 class GenerationSearchLimitExceeded(Exception):
@@ -108,6 +109,61 @@ def location_capacity_for_generation(location_name, class_locs_lookup):
     if location_name in class_locs_lookup.get('Ropes', []):
         return 3
     return 1
+
+
+def summarize_generation_completion(schedule, expected_activities_by_group, class_len_lookup):
+    expected_assignments = 0
+    successful_assignments = 0
+    affected_activity_counts = Counter()
+    unscheduled_by_group = []
+
+    for group_index, group_requirements in enumerate(expected_activities_by_group):
+        expected_counts = Counter(group_requirements["activities"])
+        expected_assignments += sum(expected_counts.values())
+        for activity_name, expected_count in expected_counts.items():
+            activity_len = class_len_lookup.get(activity_name, 1)
+            required_cells = 1 if activity_len == 0 else activity_len
+            scheduled_cells = sum(
+                1
+                for slot_key in SCHEDULE_SLOT_KEYS
+                if group_index < len(schedule.get(slot_key, []))
+                and schedule[slot_key][group_index] == activity_name
+            )
+            scheduled_count = min(expected_count, scheduled_cells // required_cells)
+            successful_assignments += scheduled_count
+            unscheduled_count = expected_count - scheduled_count
+            if unscheduled_count <= 0:
+                continue
+            affected_activity_counts[activity_name] += unscheduled_count
+            unscheduled_by_group.append({
+                "school": group_requirements["school"],
+                "group": group_requirements["group"],
+                "activity": activity_name,
+                "unscheduled_count": unscheduled_count,
+            })
+
+    unscheduled_assignments = expected_assignments - successful_assignments
+    completion_percentage = (
+        round((successful_assignments / expected_assignments) * 100, 1)
+        if expected_assignments
+        else 100.0
+    )
+    if unscheduled_assignments == 0:
+        outcome_severity = "complete"
+    elif completion_percentage >= LOCALIZED_FAILURE_COMPLETION_THRESHOLD:
+        outcome_severity = "localized_failure"
+    else:
+        outcome_severity = "widespread_failure"
+
+    return {
+        "expected_assignments": expected_assignments,
+        "successful_assignments": successful_assignments,
+        "unscheduled_assignments": unscheduled_assignments,
+        "completion_percentage": completion_percentage,
+        "outcome_severity": outcome_severity,
+        "affected_activity_counts": dict(affected_activity_counts),
+        "unscheduled_by_group": unscheduled_by_group,
+    }
 
 
 def initialize_scheduling_data(force=False):
@@ -450,6 +506,67 @@ class TheSched(models.Model):
                 ),
             }
 
+        def first_bottleneck_diagnostic(feasibility_diagnostics):
+            bottleneck_types = {
+                "activity_no_eligible_locations",
+                "activity_capacity_insufficient",
+                "activity_total_capacity_insufficient",
+                "location_bottleneck_insufficient",
+                "school_night_capacity_insufficient",
+                "school_daytime_capacity_insufficient",
+                "school_two_block_footprint_capacity_insufficient",
+                "school_trip_window_capacity_insufficient",
+            }
+            return next(
+                (
+                    diagnostic
+                    for diagnostic in feasibility_diagnostics
+                    if diagnostic.get("type") in bottleneck_types
+                ),
+                None,
+            )
+
+        def generation_outcome_diagnostic(feasibility_diagnostics, search_limit_hit=False, search_exhausted=False):
+            summary = summarize_generation_completion(
+                self.sched,
+                expected_activities_by_group,
+                local_class_len,
+            )
+            first_bottleneck = first_bottleneck_diagnostic(feasibility_diagnostics)
+            completion = summary["completion_percentage"]
+            if summary["outcome_severity"] == "localized_failure":
+                reason = (
+                    f"Schedule generation is mostly complete: {summary['successful_assignments']} of "
+                    f"{summary['expected_assignments']} expected assignments were scheduled "
+                    f"({completion}% complete)."
+                )
+            else:
+                reason = (
+                    f"Schedule generation has widespread failure: only {summary['successful_assignments']} of "
+                    f"{summary['expected_assignments']} expected assignments were scheduled "
+                    f"({completion}% complete)."
+                )
+            diagnostic = {
+                "type": "generation_outcome_summary",
+                "severity": "error",
+                "outcome_severity": summary["outcome_severity"],
+                "expected_assignments": summary["expected_assignments"],
+                "successful_assignments": summary["successful_assignments"],
+                "unscheduled_assignments": summary["unscheduled_assignments"],
+                "completion_percentage": completion,
+                "search_limit_exceeded": search_limit_hit,
+                "search_exhausted": search_exhausted,
+                "reason": reason,
+            }
+            if first_bottleneck:
+                diagnostic.update({
+                    "first_bottleneck_type": first_bottleneck.get("type"),
+                    "first_bottleneck_activity": first_bottleneck.get("activity"),
+                    "first_bottleneck_location": first_bottleneck.get("location"),
+                    "first_bottleneck_reason": first_bottleneck.get("reason"),
+                })
+            return diagnostic
+
         def unscheduled_activity_diagnostics(feasibility_diagnostics):
             diagnostics = []
             for group_index, group_requirements in enumerate(expected_activities_by_group):
@@ -500,6 +617,9 @@ class TheSched(models.Model):
             self.generation_runtime_diagnostics.extend(
                 unscheduled_activity_diagnostics(feasibility_audit["diagnostics"])
             )
+            self.generation_runtime_diagnostics.append(
+                generation_outcome_diagnostic(feasibility_audit["diagnostics"])
+            )
             self.sched.pop('classes_needed', None)
             return self.sched
 
@@ -510,6 +630,8 @@ class TheSched(models.Model):
         locs_open['Various'] = {slot:100 for slot in time_slots}
         locs_open['Manz'] = {slot:10 for slot in time_slots}
         search_attempts = {"count": 0}
+        search_limit_hit = False
+        search_exhausted = False
         
         def search_open_slot(locs_open, n=0, slots=time_slots,schedule=self.sched,):
             search_attempts["count"] += 1
@@ -579,6 +701,7 @@ class TheSched(models.Model):
         try:
             self.generation_complete = search_open_slot(locs_open,schedule=self.sched,)
             if not self.generation_complete:
+                search_exhausted = True
                 self.generation_runtime_diagnostics.append({
                     "type": "generation_search_exhausted",
                     "severity": "error",
@@ -589,6 +712,7 @@ class TheSched(models.Model):
                 })
         except GenerationSearchLimitExceeded:
             self.generation_complete = False
+            search_limit_hit = True
             self.generation_runtime_diagnostics.append({
                 "type": "search_limit_exceeded",
                 "severity": "warning",
@@ -600,6 +724,13 @@ class TheSched(models.Model):
         if not self.generation_complete:
             self.generation_runtime_diagnostics.extend(
                 unscheduled_activity_diagnostics(feasibility_audit["diagnostics"])
+            )
+            self.generation_runtime_diagnostics.append(
+                generation_outcome_diagnostic(
+                    feasibility_audit["diagnostics"],
+                    search_limit_hit=search_limit_hit,
+                    search_exhausted=search_exhausted,
+                )
             )
         self.sched.pop('classes_needed', None)
         # self.sched_data = self.sched.copy()

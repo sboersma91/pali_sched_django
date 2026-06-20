@@ -9,7 +9,12 @@ from django.test import Client, RequestFactory, TestCase, override_settings
 from django.urls import reverse
 
 from .forms import SchoolsForm, SchedForm, suggest_activity_group_count
-from .views import SchedDetail, SchedList, schedule_csv_export
+from .views import (
+    SchedDetail,
+    SchedList,
+    build_generation_collapse_explanation,
+    schedule_csv_export,
+)
 from .school_accounting import school_slot_accounting_summary
 from .schedule_operations import (
     apply_holding_reassignment_proposal,
@@ -35,6 +40,7 @@ from .models import (
     class_locs,
     initialize_scheduling_data,
     master_locs,
+    summarize_generation_completion,
 )
 
 
@@ -4239,6 +4245,103 @@ class ScheduleGenerationRegressionTests(TestCase):
                     self.assertTrue(diagnostic["root_cause"])
                     self.assertTrue(diagnostic["root_cause_reason"])
 
+    def test_generation_completion_summary_classifies_localized_failure(self):
+        summary = summarize_generation_completion(
+            {
+                "mon_pm1": ["Activity 1"],
+                "mon_pm2": ["Activity 2"],
+                "mon_night": ["Activity 3"],
+                "tue_am1": ["Activity 4"],
+            },
+            [{
+                "school": "Summary School",
+                "group": "Summary School 0",
+                "activities": ["Activity 1", "Activity 2", "Activity 3", "Activity 4", "Activity 5"],
+            }],
+            {
+                "Activity 1": 1,
+                "Activity 2": 1,
+                "Activity 3": 0,
+                "Activity 4": 1,
+                "Activity 5": 1,
+            },
+        )
+
+        self.assertEqual(summary["expected_assignments"], 5)
+        self.assertEqual(summary["successful_assignments"], 4)
+        self.assertEqual(summary["unscheduled_assignments"], 1)
+        self.assertEqual(summary["completion_percentage"], 80.0)
+        self.assertEqual(summary["outcome_severity"], "localized_failure")
+
+    def test_generation_completion_summary_classifies_widespread_failure(self):
+        summary = summarize_generation_completion(
+            {
+                "mon_pm1": ["Activity 1"],
+                "mon_pm2": ["empty"],
+                "mon_night": ["empty"],
+                "tue_am1": ["empty"],
+            },
+            [{
+                "school": "Summary School",
+                "group": "Summary School 0",
+                "activities": ["Activity 1", "Activity 2", "Activity 3", "Activity 4", "Activity 5"],
+            }],
+            {
+                "Activity 1": 1,
+                "Activity 2": 1,
+                "Activity 3": 0,
+                "Activity 4": 1,
+                "Activity 5": 1,
+            },
+        )
+
+        self.assertEqual(summary["expected_assignments"], 5)
+        self.assertEqual(summary["successful_assignments"], 1)
+        self.assertEqual(summary["unscheduled_assignments"], 4)
+        self.assertEqual(summary["completion_percentage"], 20.0)
+        self.assertEqual(summary["outcome_severity"], "widespread_failure")
+
+    def test_generation_collapse_explanation_uses_proven_capacity_bottleneck(self):
+        explanation = build_generation_collapse_explanation(
+            {
+                "outcome_severity": "widespread_failure",
+                "completion_percentage": 0.0,
+            },
+            [{
+                "type": "capacity",
+                "activity": "Games Games Games",
+                "demand": 7,
+                "capacity": 2,
+            }],
+        )
+
+        self.assertIsNotNone(explanation)
+        self.assertEqual(
+            explanation["heading"],
+            "Generation-wide failure was caused by an unschedulable required activity.",
+        )
+        self.assertEqual(
+            explanation["bottleneck_reason"],
+            "Games Games Games requires 7 placements but only 2 are available.",
+        )
+        self.assertIn("requires a complete solution", explanation["scheduler_reason"])
+
+    def test_generation_collapse_explanation_ignores_localized_failure(self):
+        explanation = build_generation_collapse_explanation(
+            {
+                "outcome_severity": "localized_failure",
+                "completion_percentage": 80.0,
+            },
+            [{
+                "type": "capacity",
+                "activity": "Astronomy",
+                "demand": 7,
+                "capacity": 6,
+            }],
+        )
+
+        self.assertIsNone(explanation)
+
     def test_location_valid_schedule_that_cannot_fit_reports_incomplete_generation(self):
         self.make_location_valid_schedule_unassignable()
 
@@ -4455,8 +4558,49 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.context_data["generation_complete"])
         self.assertContains(response, "Schedule generation is incomplete")
+        self.assertContains(response, "Generation-wide failure")
+        self.assertContains(response, "only 0 of 2 expected assignments were scheduled")
+        self.assertContains(
+            response,
+            "Generation-wide failure was caused by an unschedulable required activity.",
+        )
+        self.assertContains(
+            response,
+            "Limited Night Activity requires 2 placements but only 1 is available.",
+        )
+        self.assertContains(
+            response,
+            "Because the scheduler requires a complete solution, this shortage prevented a schedule from being generated.",
+        )
+        self.assertContains(response, "Primary Bottlenecks:")
+        self.assertContains(response, "Limited Night Activity Capacity Bottleneck")
+        self.assertContains(response, "Total demand: 2 placements")
+        self.assertContains(response, "Total available capacity: 1 placements")
+        self.assertContains(response, "Shortfall: 1 placements")
+        self.assertContains(response, "Affected Activities:")
+        self.assertContains(response, "Limited Night Activity")
+        self.assertContains(response, "2 unscheduled assignments")
+        self.assertIn("Eligible locations:", rendered_content)
+        self.assertIn("Limited Night Location", rendered_content)
         self.assertIn("Limited Night School — Limited Night Activity needs 2 placements", rendered_content)
         self.assertIn("only 1 is available", rendered_content)
+        self.assertIn("Technical diagnostics:", rendered_content)
+        self.assertLess(
+            rendered_content.index("Generation-wide failure"),
+            rendered_content.index("Generation-wide failure was caused by an unschedulable required activity."),
+        )
+        self.assertLess(
+            rendered_content.index("Generation-wide failure was caused by an unschedulable required activity."),
+            rendered_content.index("Primary Bottlenecks:"),
+        )
+        self.assertLess(
+            rendered_content.index("Primary Bottlenecks:"),
+            rendered_content.index("Affected Activities:"),
+        )
+        self.assertLess(
+            rendered_content.index("Affected Activities:"),
+            rendered_content.index("Technical diagnostics:"),
+        )
         self.assertIn("<table", rendered_content)
 
     def test_generation_search_limit_returns_incomplete_schedule(self):
@@ -4500,7 +4644,13 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.context_data["generation_complete"])
         self.assertContains(response, "Schedule generation is incomplete")
+        self.assertContains(response, "Generation-wide failure")
+        self.assertIn("1 of 3 expected assignments were scheduled", rendered_content)
+        self.assertContains(response, "Affected Activities:")
+        self.assertContains(response, "Regression One Block")
+        self.assertContains(response, "1 unscheduled assignment")
         self.assertIn("search reached the safety limit of 1 attempts", rendered_content)
+        self.assertIn("Technical diagnostics:", rendered_content)
         self.assertIn("Incomplete Schedule Output", rendered_content)
         self.assertIn("<table", rendered_content)
 
@@ -4561,6 +4711,9 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.assertIn("Export CSV", rendered_content)
         self.assertIn("Download stored generated schedule for spreadsheet review", rendered_content)
         self.assertIn(reverse("sched-export", args=[self.schedule.id]), rendered_content)
+        self.assertNotIn("Primary Bottlenecks:", rendered_content)
+        self.assertNotIn("Affected Activities:", rendered_content)
+        self.assertNotIn("Eligible Regression Two Block locations:", rendered_content)
 
     def test_successful_schedule_csv_export_contains_operational_table_rows(self):
         response = self.export_schedule_csv()

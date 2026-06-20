@@ -1,4 +1,5 @@
 import csv
+from collections import Counter
 from urllib.parse import urlencode
 
 from django.contrib import messages
@@ -8,6 +9,7 @@ from .forms import CourseForm, InstructorForm, LocationsForm, SchedForm, Schools
 from django.http import HttpResponse, HttpResponseRedirect
 from django.urls import reverse, reverse_lazy
 from django.utils.text import slugify
+from django.db.models.functions import Lower
 
 from .school_accounting import school_slot_accounting_summary
 from .schedule_blocks import SCHEDULE_LEGEND
@@ -143,6 +145,142 @@ class SchoolDelete(DeleteView):
     context_object_name = "school"
 
 CSV_ACTIVITY_VALUES = {'g_box': 'Unavailable / Not present', 'empty': 'Unassigned'}
+GENERATION_COLLAPSE_COMPLETION_THRESHOLD = 10.0
+
+
+def build_generation_collapse_explanation(outcome_summary, bottlenecks):
+    if not outcome_summary:
+        return None
+    if outcome_summary.get('outcome_severity') != 'widespread_failure':
+        return None
+    completion = outcome_summary.get('completion_percentage')
+    if not isinstance(completion, (int, float)) or completion > GENERATION_COLLAPSE_COMPLETION_THRESHOLD:
+        return None
+
+    proven_bottleneck = next(
+        (
+            bottleneck
+            for bottleneck in bottlenecks
+            if bottleneck.get('type') == 'capacity'
+            and isinstance(bottleneck.get('demand'), int)
+            and isinstance(bottleneck.get('capacity'), int)
+            and bottleneck['demand'] > bottleneck['capacity']
+        ),
+        None,
+    )
+    if not proven_bottleneck:
+        return None
+
+    demand_label = 'placement' if proven_bottleneck['demand'] == 1 else 'placements'
+    capacity_label = 'is' if proven_bottleneck['capacity'] == 1 else 'are'
+
+    return {
+        'heading': 'Generation-wide failure was caused by an unschedulable required activity.',
+        'bottleneck_reason': (
+            f"{proven_bottleneck['activity']} requires {proven_bottleneck['demand']} {demand_label} "
+            f"but only {proven_bottleneck['capacity']} {capacity_label} available."
+        ),
+        'scheduler_reason': (
+            'Because the scheduler requires a complete solution, this shortage prevented '
+            'a schedule from being generated.'
+        ),
+    }
+
+
+def build_generation_bottleneck_presentations(diagnostics):
+    unscheduled = [
+        diagnostic
+        for diagnostic in diagnostics
+        if diagnostic.get('type') == 'activity_unscheduled'
+    ]
+    unscheduled_counts = Counter(
+        diagnostic.get('activity')
+        for diagnostic in unscheduled
+        if diagnostic.get('activity')
+    )
+    activity_names = set(unscheduled_counts)
+    for diagnostic in diagnostics:
+        if diagnostic.get('activity'):
+            activity_names.add(diagnostic['activity'])
+        for activity_name in (diagnostic.get('activities') or '').split(','):
+            activity_name = activity_name.strip()
+            if activity_name:
+                activity_names.add(activity_name)
+
+    eligible_locations_by_activity = {
+        activity.course_name: [
+            location.loc_name
+            for location in activity.primary_locs.filter(availible=True).order_by(Lower('loc_name'))
+        ]
+        for activity in Course.objects.filter(course_name__in=activity_names).prefetch_related('primary_locs')
+    }
+
+    bottlenecks = []
+    seen = set()
+    for diagnostic in diagnostics:
+        diagnostic_type = diagnostic.get('type')
+        if diagnostic_type in {'activity_capacity_insufficient', 'activity_total_capacity_insufficient'}:
+            activity_name = diagnostic.get('activity')
+            if not activity_name:
+                continue
+            key = ('capacity', activity_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            demand = diagnostic.get('demand')
+            capacity = diagnostic.get('capacity')
+            shortfall = (
+                demand - capacity
+                if isinstance(demand, int) and isinstance(capacity, int)
+                else unscheduled_counts.get(activity_name)
+            )
+            bottlenecks.append({
+                'type': 'capacity',
+                'title': f'{activity_name} Capacity Bottleneck',
+                'activity': activity_name,
+                'demand': demand,
+                'capacity': capacity,
+                'shortfall': shortfall,
+                'eligible_locations': eligible_locations_by_activity.get(activity_name, []),
+            })
+        elif diagnostic_type == 'location_bottleneck_insufficient':
+            location_name = diagnostic.get('location')
+            key = ('location', location_name, diagnostic.get('activities'))
+            if key in seen:
+                continue
+            seen.add(key)
+            bottlenecks.append({
+                'type': 'location',
+                'title': f'{location_name} Location Bottleneck',
+                'location': location_name,
+                'activities': [
+                    activity.strip()
+                    for activity in (diagnostic.get('activities') or '').split(',')
+                    if activity.strip()
+                ],
+                'demand': diagnostic.get('demand'),
+                'capacity': diagnostic.get('capacity'),
+                'shortfall': (
+                    diagnostic.get('demand') - diagnostic.get('capacity')
+                    if isinstance(diagnostic.get('demand'), int)
+                    and isinstance(diagnostic.get('capacity'), int)
+                    else None
+                ),
+                'reason': diagnostic.get('reason'),
+            })
+
+    affected_activities = [
+        {
+            'activity': activity,
+            'unscheduled_count': count,
+            'eligible_locations': eligible_locations_by_activity.get(activity, []),
+        }
+        for activity, count in sorted(unscheduled_counts.items())
+    ]
+    return {
+        'bottlenecks': bottlenecks,
+        'affected_activities': affected_activities,
+    }
 
 
 def schedule_csv_export(request, pk):
@@ -253,6 +391,21 @@ class SchedDetail(DetailView):
         context['has_generated_schedule'] = stored_generation['has_generated_schedule']
         context['generation_diagnostics'] = generation_diagnostics
         context['generation_runtime_diagnostics'] = generation_runtime_diagnostics
+        bottleneck_summary = build_generation_bottleneck_presentations(generation_runtime_diagnostics)
+        context['generation_bottlenecks'] = bottleneck_summary['bottlenecks']
+        context['generation_affected_activities'] = bottleneck_summary['affected_activities']
+        context['generation_outcome_summary'] = next(
+            (
+                diagnostic
+                for diagnostic in generation_runtime_diagnostics
+                if diagnostic.get('type') == 'generation_outcome_summary'
+            ),
+            None,
+        )
+        context['generation_collapse_explanation'] = build_generation_collapse_explanation(
+            context['generation_outcome_summary'],
+            context['generation_bottlenecks'],
+        )
         context['generation_blocked'] = bool(generation_diagnostics)
         context['generation_complete'] = generation_complete
         context['generation_succeeded'] = (
