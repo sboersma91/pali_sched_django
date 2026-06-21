@@ -63,6 +63,12 @@ HOLDING_MOVE_REQUIRED_FIELDS = (
     'target_group_index',
     'target_slot_key',
 )
+MANUAL_MOVE_OPTIONAL_LOCATION_FIELDS = (
+    'source_location_id',
+    'source_location_name',
+    'target_location_id',
+    'target_location_name',
+)
 LEGACY_SCHED_DATA_OPERATOR_MESSAGE = (
     'This schedule contains legacy operational data that must be repaired '
     'before schedule edits can be saved.'
@@ -1349,6 +1355,9 @@ def persist_manual_move(schedule_obj, proposal_result):
         'created_at': timezone.now().isoformat().replace('+00:00', 'Z'),
         'status': 'active',
     })
+    for field in MANUAL_MOVE_OPTIONAL_LOCATION_FIELDS:
+        if proposal_result.get(field) not in (None, ''):
+            move_record[field] = proposal_result[field]
 
     with transaction.atomic():
         locked_schedule = type(schedule_obj).objects.select_for_update().get(pk=schedule_obj.pk)

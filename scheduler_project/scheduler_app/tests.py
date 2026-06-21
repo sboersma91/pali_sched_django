@@ -1,4 +1,5 @@
 import csv
+import json
 from copy import deepcopy
 from io import StringIO
 from unittest.mock import PropertyMock, patch
@@ -1815,6 +1816,24 @@ class ManualMovePersistenceTests(TestCase):
         self.assertEqual(move_record["status"], "active")
         self.assertTrue(move_record["created_at"].endswith("Z"))
 
+    def test_persists_optional_location_metadata_for_future_location_moves(self):
+        proposal_result = self.build_saveable_result()
+        proposal_result.update({
+            "source_location_id": 11,
+            "source_location_name": "Original Range",
+            "target_location_id": 12,
+            "target_location_name": "Backup Range",
+        })
+
+        move_record = persist_manual_move(self.schedule, proposal_result)
+
+        self.assertEqual(move_record["source_location_id"], 11)
+        self.assertEqual(move_record["source_location_name"], "Original Range")
+        self.assertEqual(move_record["target_location_id"], 12)
+        self.assertEqual(move_record["target_location_name"], "Backup Range")
+        self.schedule.refresh_from_db()
+        self.assertEqual(self.schedule.sched_data["manual_moves"][0], move_record)
+
     def test_normalizes_none_sched_data(self):
         self.assertEqual(
             normalize_sched_data_structure(None),
@@ -2043,6 +2062,26 @@ class ManualMovePersistenceTests(TestCase):
 
         self.assertEqual(generated_schedule, generated_schedule_before)
 
+    def test_display_schedule_result_applies_manual_moves_to_stored_generation_copy(self):
+        generated_schedule = {
+            "ags": ["Persistence School 0"],
+            "mon_pm1": [self.activity.course_name],
+            "tue_am1": ["empty"],
+        }
+        self.schedule.store_generated_schedule(generated_schedule)
+        persist_manual_move(self.schedule, self.build_saveable_result())
+        stored_before = deepcopy(self.schedule.sched_data["generated_schedule"])
+
+        result = self.schedule.get_display_schedule_result()
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(self.schedule.sched_data["generated_schedule"], stored_before)
+        self.assertEqual(result["generated_schedule"], stored_before)
+        self.assertEqual(result["manual_moves"], self.schedule.sched_data["manual_moves"])
+        self.assertEqual(len(result["override_replay_result"]["applied_overrides"]), 1)
+        self.assertEqual(result["schedule_rows"][0]["cells"][0]["raw_value"], "empty")
+        self.assertEqual(result["schedule_rows"][0]["cells"][3]["raw_value"], self.activity.course_name)
+
 
 class MoveProposalSavePolicyTests(TestCase):
     def conflict(self, conflict_type, severity="error"):
@@ -2164,6 +2203,31 @@ class ScheduleWorkflowTests(TestCase):
         self.schedule.sched_data = sched_data
         self.schedule.save(update_fields=["sched_data"])
 
+    def manual_move_payload(self, activity, **overrides):
+        payload = {
+            "schedule_id": self.schedule.id,
+            "source_schedule_id": self.schedule.id,
+            "target_schedule_id": self.schedule.id,
+            "source_block_id": "0:mon_pm1",
+            "source_activity_id": activity.id,
+            "source_activity_name": activity.course_name,
+            "source_occurrence_id": "occurrence:0:mon_pm1",
+            "source_group_index": 0,
+            "source_slot_key": "mon_pm1",
+            "target_group_index": 0,
+            "target_slot_key": "tue_am1",
+            "action_type": "displacement_move",
+        }
+        payload.update(overrides)
+        return payload
+
+    def post_manual_move(self, payload):
+        return self.client.post(
+            reverse("sched-manual-move", args=[self.schedule.id]),
+            data=json.dumps(payload),
+            content_type="application/json",
+        )
+
     def test_schedule_list_renders_readable_operational_summary(self):
         response = self.client.get(reverse("sched-list"))
 
@@ -2227,8 +2291,10 @@ class ScheduleWorkflowTests(TestCase):
             '<a href="?selected_block=0%3Amon_pm1#schedule-workspace" class="text-reset text-decoration-none d-block">Archery</a>',
             html=True,
         )
-        self.assertContains(response, "<td>****</td>", html=True)
-        self.assertContains(response, "<td>/////</td>", html=True)
+        self.assertContains(response, "****")
+        self.assertContains(response, "/////")
+        self.assertEqual(response.context["schedule_rows"][0]["cells"][1]["display_value"], "****")
+        self.assertEqual(response.context["schedule_rows"][0]["cells"][2]["display_value"], "/////")
         self.assertContains(response, "How this Schedule record works")
         self.assertContains(response, 'id="schedule-workspace"', html=False)
 
@@ -2265,6 +2331,169 @@ class ScheduleWorkflowTests(TestCase):
         self.assertEqual(self.schedule.sched_data["generated_schedule"], generated_schedule)
         self.assertEqual(self.schedule.sched_data["manual_moves"], [])
         self.assertTrue(self.schedule.sched_data["generation_complete"])
+
+    def test_manual_move_endpoint_persists_valid_same_schedule_move(self):
+        activity = Course.objects.create(
+            course_name="Endpoint Move Activity",
+            abriviation="EMA",
+            course_len=1,
+        )
+        generated_schedule = {
+            "ags": ["Endpoint School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+        self.store_generated_schedule(generated_schedule)
+        payload = self.manual_move_payload(
+            activity,
+            source_location_id=1,
+            source_location_name="Original Field",
+            target_location_id=2,
+            target_location_name="Backup Field",
+        )
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.side_effect = AssertionError("Manual move endpoint must not regenerate schedules")
+            response = self.post_manual_move(payload)
+
+        self.schedule.refresh_from_db()
+        response_data = response.json()
+        saved_move = self.schedule.sched_data["manual_moves"][0]
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response_data["ok"])
+        self.assertEqual(len(self.schedule.sched_data["manual_moves"]), 1)
+        self.assertEqual(saved_move["target_slot_key"], "tue_am1")
+        self.assertEqual(saved_move["source_location_name"], "Original Field")
+        self.assertEqual(saved_move["target_location_name"], "Backup Field")
+        self.assertEqual(response_data["manual_move"], saved_move)
+        self.assertEqual(create_sched.call_count, 0)
+
+    def test_manual_move_endpoint_rejects_cross_schedule_move(self):
+        activity = Course.objects.create(
+            course_name="Cross Schedule Activity",
+            abriviation="CSA",
+            course_len=1,
+        )
+        other_schedule = TheSched.objects.create(sched_name="Other Manual Move Schedule", sched_data={})
+        generated_schedule = {
+            "ags": ["Endpoint School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+        self.store_generated_schedule(generated_schedule)
+        payload = self.manual_move_payload(activity, target_schedule_id=other_schedule.id)
+
+        response = self.post_manual_move(payload)
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(response.json()["ok"])
+        self.assertEqual(response.json()["error"]["code"], "cross_schedule_move")
+        self.assertEqual(self.schedule.sched_data["manual_moves"], [])
+
+    def test_manual_move_endpoint_does_not_mutate_generated_schedule(self):
+        activity = Course.objects.create(
+            course_name="Endpoint Immutable Activity",
+            abriviation="EIA",
+            course_len=1,
+        )
+        generated_schedule = {
+            "ags": ["Endpoint School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+        self.store_generated_schedule(generated_schedule)
+        stored_generated_before = deepcopy(self.schedule.sched_data["generated_schedule"])
+
+        response = self.post_manual_move(self.manual_move_payload(activity))
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.schedule.sched_data["generated_schedule"], stored_generated_before)
+
+    def test_manual_move_endpoint_returns_updated_displayed_schedule(self):
+        activity = Course.objects.create(
+            course_name="Endpoint Display Activity",
+            abriviation="EDA",
+            course_len=1,
+        )
+        generated_schedule = {
+            "ags": ["Endpoint School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+        self.store_generated_schedule(generated_schedule)
+
+        response = self.post_manual_move(self.manual_move_payload(activity))
+
+        response_data = response.json()
+        displayed_schedule = response_data["displayed_schedule"]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(displayed_schedule["manual_moves"]), 1)
+        self.assertEqual(len(displayed_schedule["override_replay_result"]["applied_overrides"]), 1)
+        self.assertEqual(displayed_schedule["schedule_rows"][0]["cells"][0]["raw_value"], "empty")
+        self.assertEqual(displayed_schedule["schedule_rows"][0]["cells"][3]["raw_value"], activity.course_name)
+
+    def test_manual_move_endpoint_rejects_missing_payload_fields(self):
+        generated_schedule = {
+            "ags": ["Endpoint School 0"],
+            "mon_pm1": ["Missing Payload Activity"],
+            "tue_am1": ["empty"],
+        }
+        self.store_generated_schedule(generated_schedule)
+
+        response = self.post_manual_move({})
+
+        response_data = response.json()
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response_data["ok"])
+        self.assertEqual(response_data["error"]["code"], "missing_field")
+        self.assertIn("source_block_id", response_data["error"]["fields"])
+        self.assertIn("target_slot_key", response_data["error"]["fields"])
+
+    def test_schedule_detail_renders_drag_and_drop_hooks_for_activity_cells(self):
+        activity = Course.objects.create(
+            course_name="Draggable Activity",
+            abriviation="DA",
+            course_len=1,
+        )
+        generated_schedule = {
+            "ags": ["Endpoint School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+        self.store_generated_schedule(generated_schedule)
+
+        response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
+
+        self.assertContains(response, 'draggable="true"', html=False)
+        self.assertContains(response, 'data-draggable-activity="true"', html=False)
+        self.assertContains(response, f'data-activity-id="{activity.id}"', html=False)
+        self.assertContains(response, 'data-source-group-index="0"', html=False)
+        self.assertContains(response, 'data-source-slot-key="mon_pm1"', html=False)
+        self.assertContains(response, 'data-drop-target="true"', html=False)
+        self.assertContains(response, 'data-slot-key="tue_am1"', html=False)
+
+    def test_schedule_detail_renders_manual_move_fetch_workflow(self):
+        activity = Course.objects.create(
+            course_name="Fetch Workflow Activity",
+            abriviation="FWA",
+            course_len=1,
+        )
+        generated_schedule = {
+            "ags": ["Endpoint School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+        self.store_generated_schedule(generated_schedule)
+
+        response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
+
+        self.assertContains(response, reverse("sched-manual-move", args=[self.schedule.id]))
+        self.assertContains(response, "fetch(manualMoveUrl", html=False)
+        self.assertContains(response, "'X-CSRFToken': getCookie('csrftoken')", html=False)
+        self.assertContains(response, "targetCell.dataset.groupIndex === draggedCell.dataset.sourceGroupIndex", html=False)
+        self.assertContains(response, "window.location.reload()", html=False)
 
     def test_schedule_detail_places_operational_workspace_before_secondary_details(self):
         generated_schedule = {
@@ -2341,7 +2570,7 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, "mon_pm1")
         self.assertContains(response, "Selectable Activity")
         self.assertContains(response, str(activity.id))
-        self.assertContains(response, '<td class="table-primary">', count=1, html=False)
+        self.assertContains(response, 'class="table-primary"', count=1, html=False)
         self.assertNotContains(response, "Multi-block activity occurrence")
         self.assertContains(response, 'method="get"', html=False)
         self.assertContains(response, f'name="source_activity_id" value="{activity.id}"', html=False)
@@ -3831,7 +4060,7 @@ class ScheduleWorkflowTests(TestCase):
         self.assertEqual(selected_block["occurrence_length"], 2)
         self.assertEqual(selected_block["occurrence_position"], 1)
         self.assertTrue(selected_block["is_multi_block"])
-        self.assertContains(response, '<td class="table-primary">', count=2, html=False)
+        self.assertContains(response, 'class="table-primary"', count=2, html=False)
 
     def test_selecting_second_half_of_multi_block_occurrence_highlights_both_cells_and_shows_metadata(self):
         activity = Course.objects.create(course_name="Selectable Two Block", abriviation="S2B", course_len=2)
@@ -3852,7 +4081,7 @@ class ScheduleWorkflowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(selected_block["block_id"], "0:tue_am2")
         self.assertEqual(response.context["selected_occurrence_id"], "occurrence:0:tue_am1")
-        self.assertContains(response, '<td class="table-primary">', count=2, html=False)
+        self.assertContains(response, 'class="table-primary"', count=2, html=False)
         self.assertContains(response, "Multi-block activity occurrence")
         self.assertContains(response, "Occurrence Length")
         self.assertContains(response, "2 blocks")

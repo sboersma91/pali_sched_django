@@ -39,6 +39,26 @@
         <span><strong>(persisted)</strong> = saved manual override</span>
         <span><strong>(proposed)</strong> = temporary move proposal</span>
       </div>
+      <style>
+        .schedule-table td[data-drop-target="true"] {
+          transition: background-color 0.15s ease, outline-color 0.15s ease;
+        }
+        .schedule-table td[data-draggable-activity="true"] {
+          cursor: grab;
+        }
+        .schedule-table td[data-draggable-activity="true"]:active,
+        .schedule-table td.schedule-dragging {
+          cursor: grabbing;
+        }
+        .schedule-table td.schedule-dragging {
+          opacity: 0.55;
+        }
+        .schedule-table td.schedule-drop-active {
+          background-color: #d1e7dd;
+          outline: 2px solid #198754;
+          outline-offset: -2px;
+        }
+      </style>
     </div>
     {% if override_replay_result.applied_overrides %}
       <div class="alert alert-secondary mb-3" role="status">
@@ -130,7 +150,24 @@
             <tr>
               <th scope="row">{{ row.ag }}</th>
               {% for cell in row.cells %}
-                <td{% if cell.conflicts %} class="{% if has_blocking_conflicts %}table-danger{% else %}table-warning{% endif %}{% if selected_occurrence_id and selected_occurrence_id == cell.occurrence_id %} border border-primary border-2{% endif %}"{% elif cell.is_proposed_target %} class="table-success border border-primary border-2"{% elif cell.is_proposed_source %} class="table-warning"{% elif cell.is_persisted_override and cell.is_activity %} class="table-info"{% elif cell.is_persisted_override %} class="table-secondary"{% elif selected_occurrence_id and selected_occurrence_id == cell.occurrence_id %} class="table-primary"{% endif %}>
+                <td
+                  data-drop-target="true"
+                  data-schedule-id="{{ sched.id }}"
+                  data-group-index="{{ cell.group_index }}"
+                  data-slot-key="{{ cell.slot_key }}"
+                  data-block-id="{{ cell.block_id }}"
+                  data-unavailable="{% if cell.is_unavailable %}true{% else %}false{% endif %}"
+                  {% if cell.is_activity %}
+                    draggable="true"
+                    data-draggable-activity="true"
+                    data-activity-id="{{ cell.activity_id }}"
+                    data-activity-name="{{ cell.raw_value }}"
+                    data-occurrence-id="{{ cell.occurrence_id }}"
+                    data-source-group-index="{{ cell.group_index }}"
+                    data-source-slot-key="{{ cell.slot_key }}"
+                    aria-label="Drag {{ cell.display_value }} from {{ cell.group_label }} {{ cell.slot_label }}"
+                  {% endif %}
+                  {% if cell.conflicts %} class="{% if has_blocking_conflicts %}table-danger{% else %}table-warning{% endif %}{% if selected_occurrence_id and selected_occurrence_id == cell.occurrence_id %} border border-primary border-2{% endif %}"{% elif cell.is_proposed_target %} class="table-success border border-primary border-2"{% elif cell.is_proposed_source %} class="table-warning"{% elif cell.is_persisted_override and cell.is_activity %} class="table-info"{% elif cell.is_persisted_override %} class="table-secondary"{% elif selected_occurrence_id and selected_occurrence_id == cell.occurrence_id %} class="table-primary"{% endif %}>
                   {% if cell.is_activity %}
                     {% if proposal_result %}
                       <span class="d-block">{{ cell.display_value }}{% if cell.is_proposed_target %} <span class="small">(proposed)</span>{% elif cell.is_persisted_override %} <span class="small">(persisted)</span>{% endif %}</span>
@@ -368,6 +405,132 @@
       </div>
     {% endif %}
   </section>
+  {% endif %}
+  {% if has_generated_schedule and not generation_blocked %}
+    <script>
+      (function () {
+        const workspace = document.getElementById('schedule-workspace');
+        if (!workspace) {
+          return;
+        }
+
+        const manualMoveUrl = "{% url 'sched-manual-move' sched.id %}";
+        const scheduleId = Number("{{ sched.id }}");
+        let draggedCell = null;
+
+        function getCookie(name) {
+          const cookies = document.cookie ? document.cookie.split(';') : [];
+          for (const cookie of cookies) {
+            const trimmed = cookie.trim();
+            if (trimmed.startsWith(name + '=')) {
+              return decodeURIComponent(trimmed.slice(name.length + 1));
+            }
+          }
+          return '';
+        }
+
+        function clearDropHighlights() {
+          workspace.querySelectorAll('.schedule-drop-active').forEach((cell) => {
+            cell.classList.remove('schedule-drop-active');
+          });
+        }
+
+        function canDropOn(targetCell) {
+          return (
+            draggedCell &&
+            targetCell &&
+            targetCell.dataset.dropTarget === 'true' &&
+            targetCell.dataset.unavailable !== 'true' &&
+            targetCell.dataset.groupIndex === draggedCell.dataset.sourceGroupIndex &&
+            targetCell.dataset.slotKey !== draggedCell.dataset.sourceSlotKey
+          );
+        }
+
+        workspace.addEventListener('dragstart', function (event) {
+          const cell = event.target.closest('td[data-draggable-activity="true"]');
+          if (!cell) {
+            return;
+          }
+          draggedCell = cell;
+          cell.classList.add('schedule-dragging');
+          event.dataTransfer.effectAllowed = 'move';
+          event.dataTransfer.setData('text/plain', cell.dataset.blockId);
+        });
+
+        workspace.addEventListener('dragend', function () {
+          if (draggedCell) {
+            draggedCell.classList.remove('schedule-dragging');
+          }
+          draggedCell = null;
+          clearDropHighlights();
+        });
+
+        workspace.addEventListener('dragover', function (event) {
+          const targetCell = event.target.closest('td[data-drop-target="true"]');
+          if (!canDropOn(targetCell)) {
+            return;
+          }
+          event.preventDefault();
+          event.dataTransfer.dropEffect = 'move';
+          clearDropHighlights();
+          targetCell.classList.add('schedule-drop-active');
+        });
+
+        workspace.addEventListener('dragleave', function (event) {
+          const targetCell = event.target.closest('td[data-drop-target="true"]');
+          if (targetCell) {
+            targetCell.classList.remove('schedule-drop-active');
+          }
+        });
+
+        workspace.addEventListener('drop', async function (event) {
+          const targetCell = event.target.closest('td[data-drop-target="true"]');
+          if (!canDropOn(targetCell)) {
+            return;
+          }
+          event.preventDefault();
+          clearDropHighlights();
+
+          const payload = {
+            schedule_id: scheduleId,
+            source_schedule_id: scheduleId,
+            target_schedule_id: scheduleId,
+            source_block_id: draggedCell.dataset.blockId,
+            source_activity_id: Number(draggedCell.dataset.activityId),
+            source_activity_name: draggedCell.dataset.activityName,
+            source_occurrence_id: draggedCell.dataset.occurrenceId,
+            source_group_index: Number(draggedCell.dataset.sourceGroupIndex),
+            source_slot_key: draggedCell.dataset.sourceSlotKey,
+            target_group_index: Number(targetCell.dataset.groupIndex),
+            target_slot_key: targetCell.dataset.slotKey,
+            action_type: 'displacement_move',
+          };
+
+          try {
+            const response = await fetch(manualMoveUrl, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCookie('csrftoken'),
+              },
+              body: JSON.stringify(payload),
+            });
+            const result = await response.json();
+            if (!response.ok || !result.ok) {
+              const message = result.error && result.error.message
+                ? result.error.message
+                : 'Manual move could not be saved.';
+              window.alert(message);
+              return;
+            }
+            window.location.href = "{% url 'sched-detail' sched.id %}#schedule-workspace";
+            window.location.reload();
+          } catch (error) {
+            window.alert('Manual move could not be saved. Check your connection and try again.');
+          }
+        });
+      }());
+    </script>
   {% endif %}
 
   <section class="mb-4" aria-labelledby="schedule-details-heading">

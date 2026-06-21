@@ -305,6 +305,36 @@ class TheSched(models.Model):
             "generation_complete": self.sched_data.get("generation_complete", True),
         }
 
+    def get_manual_moves(self):
+        if not isinstance(self.sched_data, dict):
+            return []
+        manual_moves = self.sched_data.get("manual_moves")
+        if not isinstance(manual_moves, list):
+            return []
+        return deepcopy(manual_moves)
+
+    def get_display_schedule_result(self):
+        stored_generation = self.get_stored_generation_result()
+        if not stored_generation["has_generated_schedule"]:
+            return {
+                **stored_generation,
+                "schedule_rows": [],
+                "override_replay_result": None,
+            }
+
+        from .schedule_operations import apply_persisted_overrides, build_schedule_blocks
+
+        generated_schedule = deepcopy(stored_generation["generated_schedule"])
+        schedule_rows = build_schedule_blocks(generated_schedule)
+        replay_result = apply_persisted_overrides(self, schedule_rows)
+        return {
+            **stored_generation,
+            "generated_schedule": generated_schedule,
+            "manual_moves": self.get_manual_moves(),
+            "schedule_rows": schedule_rows,
+            "override_replay_result": replay_result,
+        }
+
     def store_generated_schedule(self, generated_schedule):
         self.sched_data = {
             "version": 1,

@@ -1,4 +1,5 @@
 import csv
+import json
 from collections import Counter
 from urllib.parse import urlencode
 
@@ -6,7 +7,7 @@ from django.contrib import messages
 from django.shortcuts import get_object_or_404, render
 from .models import Locations, Course, Schools, TheSched
 from .forms import CourseForm, InstructorForm, LocationsForm, SchedForm, SchoolsForm
-from django.http import HttpResponse, HttpResponseRedirect
+from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
 from django.urls import reverse, reverse_lazy
 from django.utils.text import slugify
 from django.db.models.functions import Lower
@@ -720,6 +721,189 @@ class SchedMoveSave(SchedMoveConfirm):
                 return HttpResponseRedirect(f'{reverse("sched-detail", args=[self.object.pk])}#schedule-workspace')
 
         return HttpResponseRedirect(self.get_proposal_redirect_url(confirmed=True))
+
+
+class SchedManualMoveEndpoint(DetailView):
+    model = TheSched
+    http_method_names = ['post']
+
+    required_payload_fields = (
+        'source_block_id',
+        'source_activity_id',
+        'source_activity_name',
+        'source_occurrence_id',
+        'source_group_index',
+        'source_slot_key',
+        'target_group_index',
+        'target_slot_key',
+    )
+    optional_location_fields = (
+        'source_location_id',
+        'source_location_name',
+        'target_location_id',
+        'target_location_name',
+    )
+
+    def post(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        payload, error_response = self.get_json_payload(request)
+        if error_response:
+            return error_response
+
+        stored_generation = self.object.get_stored_generation_result()
+        if not stored_generation['has_generated_schedule']:
+            return self.error_response(
+                'missing_generated_schedule',
+                'Manual moves require stored generated schedule output.',
+                status=409,
+            )
+
+        sched_data_diagnostic = diagnose_sched_data_structure(self.object.sched_data)
+        if sched_data_diagnostic['status'] == 'malformed':
+            return self.error_response(
+                'malformed_sched_data',
+                sched_data_diagnostic['message'],
+                status=400,
+            )
+
+        missing_fields = [
+            field
+            for field in self.required_payload_fields
+            if payload.get(field) in (None, '')
+        ]
+        if missing_fields:
+            return self.error_response(
+                'missing_field',
+                'Manual move payload is missing required fields.',
+                status=400,
+                fields=missing_fields,
+            )
+
+        ownership_error = self.validate_payload_ownership(payload)
+        if ownership_error:
+            return ownership_error
+
+        source_group_index = self.parse_int(payload.get('source_group_index'))
+        target_group_index = self.parse_int(payload.get('target_group_index'))
+        source_activity_id = self.parse_int(payload.get('source_activity_id'))
+        if None in (source_group_index, target_group_index, source_activity_id):
+            return self.error_response(
+                'invalid_payload',
+                'Manual move payload contains invalid numeric identity fields.',
+                status=400,
+            )
+
+        display_result = self.object.get_display_schedule_result()
+        schedule_rows = display_result['schedule_rows']
+        proposal_result = apply_move_proposal(schedule_rows, {
+            'source_block_id': payload.get('source_block_id'),
+            'source_activity_id': source_activity_id,
+            'source_activity_name': payload.get('source_activity_name'),
+            'source_occurrence_id': payload.get('source_occurrence_id'),
+            'source_group_index': source_group_index,
+            'source_slot_key': payload.get('source_slot_key'),
+            'target_slot_key': payload.get('target_slot_key'),
+            'target_group_index': target_group_index,
+            'action_type': payload.get('action_type') or DEFAULT_NEW_MOVE_ACTION,
+        })
+        conflict_summaries = validate_schedule_blocks(schedule_rows)
+        proposal_result['conflicts'] = conflict_summaries
+        save_readiness = evaluate_move_proposal_for_save(proposal_result)
+
+        if not proposal_result.get('applied'):
+            return self.error_response(
+                proposal_result.get('error') or 'invalid_move',
+                proposal_result.get('message') or 'Manual move could not be applied.',
+                status=400,
+                save_readiness=save_readiness,
+            )
+        if not save_readiness['can_save']:
+            return self.error_response(
+                'unsaveable_move',
+                save_readiness['operator_message'],
+                status=400,
+                save_readiness=save_readiness,
+            )
+
+        for field in self.optional_location_fields:
+            if payload.get(field) not in (None, ''):
+                proposal_result[field] = payload[field]
+
+        try:
+            move_record = persist_manual_move(self.object, proposal_result)
+        except MalformedSchedDataError as error:
+            return self.error_response('malformed_sched_data', error.operator_message, status=400)
+        except ValueError as error:
+            return self.error_response('invalid_move', str(error), status=400)
+
+        return JsonResponse({
+            'ok': True,
+            'manual_move': move_record,
+            'displayed_schedule': self.serialize_display_schedule(
+                self.object.get_display_schedule_result()
+            ),
+        })
+
+    def get_json_payload(self, request):
+        if request.content_type == 'application/json':
+            try:
+                return json.loads(request.body.decode('utf-8') or '{}'), None
+            except json.JSONDecodeError:
+                return None, self.error_response(
+                    'invalid_json',
+                    'Request body must be valid JSON.',
+                    status=400,
+                )
+        return request.POST.dict(), None
+
+    def validate_payload_ownership(self, payload):
+        for field in ('schedule_id', 'source_schedule_id', 'target_schedule_id'):
+            if payload.get(field) in (None, ''):
+                continue
+            if self.parse_int(payload.get(field)) != self.object.pk:
+                return self.error_response(
+                    'cross_schedule_move',
+                    'Manual moves must stay within the selected Schedule record.',
+                    status=403,
+                )
+
+        source_group_index = self.parse_int(payload.get('source_group_index'))
+        target_group_index = self.parse_int(payload.get('target_group_index'))
+        if source_group_index is not None and target_group_index is not None:
+            if source_group_index != target_group_index:
+                return self.error_response(
+                    'cross_group_move',
+                    'Manual moves must stay within the same school/group schedule.',
+                    status=403,
+                )
+        return None
+
+    def serialize_display_schedule(self, display_result):
+        return {
+            'has_generated_schedule': display_result['has_generated_schedule'],
+            'generation_complete': display_result['generation_complete'],
+            'generation_diagnostics': display_result['generation_diagnostics'],
+            'generation_runtime_diagnostics': display_result['generation_runtime_diagnostics'],
+            'manual_moves': display_result.get('manual_moves', []),
+            'schedule_rows': display_result.get('schedule_rows', []),
+            'override_replay_result': display_result.get('override_replay_result'),
+        }
+
+    def parse_int(self, value):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def error_response(self, code, message, status=400, **extra):
+        return JsonResponse({
+            'ok': False,
+            'error': {
+                'code': code,
+                'message': message,
+                **extra,
+            },
+        }, status=status)
 
 
 class SchedDataRepair(DetailView):
