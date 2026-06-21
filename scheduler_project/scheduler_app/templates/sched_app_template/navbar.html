@@ -11,14 +11,14 @@
             <a class="nav-link" href="{% url 'home-paid' %}">Open Dashboard</a>
           </li>
           <li class="nav-item">
-            <a class="nav-link" href="{% url 'logout' %}">Log Out</a>
+            <form action="{% url 'logout' %}" method="post">
+              {% csrf_token %}
+              <button type="submit" class="nav-link btn btn-link">Log Out</button>
+            </form>
           </li>
         {% else %}
           <li class="nav-item">
             <a class="nav-link" href="{% url 'login' %}">Log In</a>
-          </li>
-          <li class="nav-item">
-            <a class="nav-link" href="{% url 'register_user' %}">Create Account</a>
           </li>
         {% endif %}
       </ul>

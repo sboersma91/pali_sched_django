@@ -50,6 +50,12 @@ from .models import (
 )
 
 
+def force_login_operator(client):
+    user = get_user_model().objects.create_user(username="operator", password="password")
+    client.force_login(user)
+    return user
+
+
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
 class PublicLandingPageTests(TestCase):
     def setUp(self):
@@ -93,8 +99,8 @@ class PublicLandingPageTests(TestCase):
         response = self.client.get(reverse("home"))
 
         self.assertContains(response, f'<a href="{reverse("login")}" class="btn btn-primary btn-lg">Log In</a>', html=True)
-        self.assertContains(response, f'<a href="{reverse("register_user")}" class="btn btn-outline-primary btn-lg">Create Account</a>', html=True)
         self.assertNotContains(response, "Open Operational Dashboard")
+        self.assertNotContains(response, "Create Account")
 
     def test_public_home_shows_dashboard_action_for_authenticated_user(self):
         user = get_user_model().objects.create_user(username="operator", password="password")
@@ -119,7 +125,7 @@ class PublicShellPresentationTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, f'<a class="navbar-brand" href="{reverse("home")}">FlowLine</a>', html=True)
         self.assertContains(response, f'<a class="nav-link" href="{reverse("login")}">Log In</a>', html=True)
-        self.assertContains(response, f'<a class="nav-link" href="{reverse("register_user")}">Create Account</a>', html=True)
+        self.assertNotContains(response, "Create Account")
         for removed_content in ("Plans", "Contact", "Payed", "Search Venues"):
             with self.subTest(content=removed_content):
                 self.assertNotContains(response, removed_content)
@@ -133,18 +139,17 @@ class PublicShellPresentationTests(TestCase):
         response = self.client.get(reverse("home"))
 
         self.assertContains(response, f'<a class="nav-link" href="{reverse("home-paid")}">Open Dashboard</a>', html=True)
-        self.assertContains(response, f'<a class="nav-link" href="{reverse("logout")}">Log Out</a>', html=True)
+        self.assertContains(response, f'<form action="{reverse("logout")}" method="post">', html=False)
+        self.assertContains(response, 'type="submit" class="nav-link btn btn-link">Log Out</button>', html=False)
         self.assertNotContains(response, f'<a class="nav-link" href="{reverse("login")}">Log In</a>', html=True)
-        self.assertNotContains(response, f'<a class="nav-link" href="{reverse("register_user")}">Create Account</a>', html=True)
+        self.assertNotContains(response, "Create Account")
 
     def test_public_base_renders_default_and_page_specific_titles(self):
         home_response = self.client.get(reverse("home"))
         login_response = self.client.get(reverse("login"))
-        register_response = self.client.get(reverse("register_user"))
 
         self.assertContains(home_response, "<title>FlowLine</title>", html=True)
         self.assertContains(login_response, "<title>Log In | FlowLine</title>", html=True)
-        self.assertContains(register_response, "<title>Create Account | FlowLine</title>", html=True)
         self.assertNotContains(home_response, "Hello, world!")
 
     def test_login_page_renders_improved_presentation_and_existing_form_action(self):
@@ -154,29 +159,79 @@ class PublicShellPresentationTests(TestCase):
         self.assertContains(response, '<h1 class="h3 mb-2">Log In</h1>', html=True)
         self.assertContains(response, "Access the operational dashboard to prepare and review schedules.")
         self.assertContains(response, f'<form action="{reverse("login")}" method="post">', html=False)
-        self.assertContains(response, '<label for="username" class="form-label">Username</label>', html=True)
+        self.assertContains(response, '<label for="id_username" class="form-label">Username</label>', html=True)
         self.assertContains(response, '<button type="submit" class="btn btn-primary w-100">Log In</button>', html=True)
         self.assertNotContains(response, ">Submit</button>", html=False)
         self.assertNotContains(response, "Email address")
 
-    def test_registration_page_renders_improved_presentation_and_existing_form_action(self):
-        response = self.client.get(reverse("register_user"))
+@override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
+class AuthenticationFlowTests(TestCase):
+    def setUp(self):
+        self.client = Client(HTTP_HOST="localhost")
+        self.user = get_user_model().objects.create_user(
+            username="operator",
+            password="correct-password",
+        )
+        self.schedule = TheSched.objects.create(sched_name="Protected Schedule", sched_data={})
+
+    def test_anonymous_users_are_redirected_to_login_for_protected_pages(self):
+        protected_urls = (
+            reverse("home-paid"),
+            reverse("sched-list"),
+            reverse("sched-detail", args=[self.schedule.id]),
+            reverse("sched-create"),
+            reverse("sched-export", args=[self.schedule.id]),
+            reverse("course-list"),
+            reverse("school-list"),
+            reverse("location-list"),
+        )
+
+        for url in protected_urls:
+            with self.subTest(url=url):
+                response = self.client.get(url)
+                self.assertRedirects(response, f"{reverse('login')}?next={url}")
+
+    def test_authenticated_users_can_access_protected_pages(self):
+        self.client.force_login(self.user)
+
+        response = self.client.get(reverse("home-paid"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, '<h1 class="h3 mb-2">Create Account</h1>', html=True)
-        self.assertContains(response, "Create an account to access the FlowLine operational tools.")
-        self.assertContains(response, f'<form action="{reverse("register_user")}" method="post">', html=False)
-        self.assertContains(response, '<button type="submit" class="btn btn-primary">Create Account</button>', html=True)
-        self.assertContains(response, "Back to Log In")
-        self.assertNotContains(response, "User Registratioon")
-        self.assertNotContains(response, "Something went wrong??")
+        self.assertContains(response, "Operational Dashboard")
 
+    def test_login_succeeds_with_valid_credentials(self):
+        response = self.client.post(
+            reverse("login"),
+            {"username": "operator", "password": "correct-password"},
+        )
+
+        self.assertRedirects(response, reverse("home-paid"))
+        self.assertIn("_auth_user_id", self.client.session)
+
+    def test_login_displays_authentication_errors(self):
+        response = self.client.post(
+            reverse("login"),
+            {"username": "operator", "password": "wrong-password"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Please enter a correct username and password.")
+        self.assertNotIn("_auth_user_id", self.client.session)
+
+    def test_logout_terminates_the_session(self):
+        self.client.force_login(self.user)
+
+        response = self.client.post(reverse("logout"))
+
+        self.assertRedirects(response, reverse("login"))
+        self.assertNotIn("_auth_user_id", self.client.session)
 
 
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
 class PresentationTerminologyTests(TestCase):
     def setUp(self):
         self.client = Client(HTTP_HOST="localhost")
+        force_login_operator(self.client)
 
     def test_public_and_operational_navigation_use_flowline_branding(self):
         for route in ("home", "home-paid"):
@@ -199,6 +254,7 @@ class PresentationTerminologyTests(TestCase):
 class OperationalNavigationTests(TestCase):
     def setUp(self):
         self.client = Client(HTTP_HOST="localhost")
+        force_login_operator(self.client)
 
     def test_operational_navbar_renders_canonical_links(self):
         response = self.client.get(reverse("home-paid"))
@@ -235,19 +291,17 @@ class OperationalNavigationTests(TestCase):
         self.assertNotContains(response, ">Link</a>", html=False)
         self.assertNotContains(response, 'type="search"', html=False)
 
-    def test_operational_navbar_shows_log_in_for_anonymous_user(self):
-        response = self.client.get(reverse("home-paid"))
+    def test_operational_dashboard_redirects_anonymous_user_to_login(self):
+        anonymous_client = Client(HTTP_HOST="localhost")
+        response = anonymous_client.get(reverse("home-paid"))
 
-        self.assertContains(response, f'href="{reverse("login")}">Log In</a>', html=False)
-        self.assertNotContains(response, "Log Out")
+        self.assertRedirects(response, f'{reverse("login")}?next={reverse("home-paid")}')
 
     def test_operational_navbar_shows_log_out_for_authenticated_user(self):
-        user = get_user_model().objects.create_user(username="operator", password="password")
-        self.client.force_login(user)
-
         response = self.client.get(reverse("home-paid"))
 
-        self.assertContains(response, f'href="{reverse("logout")}">Log Out</a>', html=False)
+        self.assertContains(response, f'<form action="{reverse("logout")}" method="post">', html=False)
+        self.assertContains(response, 'type="submit" class="nav-link btn btn-link">Log Out</button>', html=False)
         self.assertNotContains(response, "Log In")
 
 
@@ -255,6 +309,7 @@ class OperationalNavigationTests(TestCase):
 class OperationalDashboardTests(TestCase):
     def setUp(self):
         self.client = Client(HTTP_HOST="localhost")
+        force_login_operator(self.client)
 
     def test_dashboard_replaces_placeholder_with_operational_orientation(self):
         response = self.client.get(reverse("home-paid"))
@@ -2171,6 +2226,7 @@ class MoveProposalSavePolicyTests(TestCase):
 class ScheduleWorkflowTests(TestCase):
     def setUp(self):
         self.client = Client(HTTP_HOST="localhost")
+        force_login_operator(self.client)
         self.school = Schools.schools_list.create(
             school_name="Existing Schedule School",
             arrive="Thur",
@@ -5328,6 +5384,7 @@ class PublicLandingPageTests(TestCase):
         self.archery = Course.objects.create(course_name="Archery", abriviation="ARCH", course_len=1)
         self.archery.primary_locs.add(range_location)
         self.client = Client(HTTP_HOST="localhost")
+        force_login_operator(self.client)
 
     def school_form_data(self, name, subjects, arrive="Mon", depart="Wed"):
         return {
@@ -5741,6 +5798,7 @@ class SchoolActivityBlockValidationTests(TestCase):
         for course in (self.two_block, self.one_block, self.extra_daytime, self.night, self.extra_night):
             course.primary_locs.add(location)
         self.client = Client(HTTP_HOST="localhost")
+        force_login_operator(self.client)
 
     def form_data(self, name, subjects):
         return {
@@ -5825,6 +5883,7 @@ class SchoolActivityBlockValidationTests(TestCase):
 class SchedulingLookupRefreshTests(TestCase):
     def setUp(self):
         self.client = Client(HTTP_HOST="localhost")
+        force_login_operator(self.client)
         self.first_location = Locations.objects.create(loc_name="Training Room", loc_short="TR")
         self.second_location = Locations.objects.create(loc_name="Conference Hall", loc_short="CH")
         self.support_daytime = Course.objects.create(course_name="Support Daytime", abriviation="SD", course_len=2)
@@ -5914,6 +5973,7 @@ class CourseFormWorkflowTests(TestCase):
         )
         self.course.primary_locs.set([self.available_location, self.unavailable_location])
         self.client = Client(HTTP_HOST="localhost")
+        force_login_operator(self.client)
 
     def course_form_data(self, name, abbreviation, course_len, locations):
         return {
@@ -6130,6 +6190,7 @@ class LocationFormWorkflowTests(TestCase):
             availible=True,
         )
         self.client = Client(HTTP_HOST="localhost")
+        force_login_operator(self.client)
 
     def location_form_data(self, name, abbreviation, description, available=True):
         data = {
