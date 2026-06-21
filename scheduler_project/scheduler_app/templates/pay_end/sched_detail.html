@@ -44,23 +44,28 @@
           min-width: 5.75rem;
           vertical-align: middle;
         }
-        .schedule-table tbody tr {
+        .schedule-table tbody tr,
+        .holding-area-item {
           --group-accent: #6c757d;
           --group-soft: #f8f9fa;
         }
-        .schedule-table tbody tr.schedule-row-accent-1 {
+        .schedule-table tbody tr.schedule-row-accent-1,
+        .holding-area-item.schedule-row-accent-1 {
           --group-accent: #0d6efd;
           --group-soft: #eef5ff;
         }
-        .schedule-table tbody tr.schedule-row-accent-2 {
+        .schedule-table tbody tr.schedule-row-accent-2,
+        .holding-area-item.schedule-row-accent-2 {
           --group-accent: #198754;
           --group-soft: #edf8f2;
         }
-        .schedule-table tbody tr.schedule-row-accent-3 {
+        .schedule-table tbody tr.schedule-row-accent-3,
+        .holding-area-item.schedule-row-accent-3 {
           --group-accent: #6f42c1;
           --group-soft: #f3effb;
         }
-        .schedule-table tbody tr.schedule-row-accent-4 {
+        .schedule-table tbody tr.schedule-row-accent-4,
+        .holding-area-item.schedule-row-accent-4 {
           --group-accent: #fd7e14;
           --group-soft: #fff4e8;
         }
@@ -222,7 +227,8 @@
           text-decoration: none;
         }
         .holding-area-item {
-          border-left: 0.35rem solid #ffc107;
+          background: var(--group-soft);
+          border-left: 0.35rem solid var(--group-accent);
           padding: 0.75rem 0 0.85rem 0.75rem;
         }
         .holding-area-status {
@@ -231,16 +237,16 @@
         }
         .holding-activity-card {
           background: #ffffff;
-          border-color: #ffc107;
-          border-left-color: #ffc107;
+          border-color: var(--group-accent);
+          border-left-color: var(--group-accent);
           box-shadow: 0 1px 2px rgba(255, 193, 7, 0.22);
           cursor: grab;
           margin-bottom: 0.45rem;
           max-width: 28rem;
         }
         .holding-activity-card .schedule-activity-code {
-          background: #ffc107;
-          color: #212529;
+          background: var(--group-accent);
+          color: #ffffff;
         }
         .holding-card-meta {
           color: #495057;
@@ -283,7 +289,7 @@
           <p class="mb-3">These activities were pushed out by saved displacement moves. They stay visible here until an operator assigns them back into the schedule grid.</p>
           <ul class="list-group list-group-flush">
             {% for item in holding_area_preview %}
-              <li class="list-group-item px-0 holding-area-item">
+              <li class="list-group-item px-0 holding-area-item {{ item.group_accent_class }}">
                 <div
                   class="schedule-activity-card holding-activity-card"
                   title="{{ item.display_value }}"

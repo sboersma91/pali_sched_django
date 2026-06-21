@@ -835,6 +835,8 @@ def build_holding_area_item(block_or_blocks, override_index, displacement_positi
     )
     block = occurrence_blocks[0]
     occurrence_length = block.get('occurrence_length') or len(occurrence_blocks)
+    origin_group_index = block.get('group_index')
+    group_accent_number = ((origin_group_index or 0) % 4) + 1
     return {
         'holding_id': (
             f'holding:override:{override_index}:{block["group_index"]}:'
@@ -850,10 +852,11 @@ def build_holding_area_item(block_or_blocks, override_index, displacement_positi
         'source_block_ids': [occurrence_block.get('block_id') for occurrence_block in occurrence_blocks],
         'source_slot_keys': [occurrence_block.get('slot_key') for occurrence_block in occurrence_blocks],
         'origin_block_id': block.get('block_id'),
-        'origin_group_index': block.get('group_index'),
+        'origin_group_index': origin_group_index,
         'origin_group_label': block.get('group_label'),
         'origin_slot_key': block.get('slot_key'),
         'origin_slot_label': block.get('slot_label'),
+        'group_accent_class': f'schedule-row-accent-{group_accent_number}',
         'displaced_by_override_index': override_index,
         'holding_status': 'awaiting_assignment',
         'is_holding': True,

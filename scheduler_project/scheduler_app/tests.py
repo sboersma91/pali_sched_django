@@ -3934,7 +3934,7 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, "Supporting Workspace")
         self.assertContains(response, "Displaced Activities Awaiting Reassignment")
         self.assertContains(response, "Displaced")
-        self.assertContains(response, 'class="list-group-item px-0 holding-area-item"', html=False)
+        self.assertContains(response, 'class="list-group-item px-0 holding-area-item schedule-row-accent-1"', html=False)
         self.assertContains(response, 'class="schedule-activity-card holding-activity-card"', html=False)
         self.assertContains(response, 'draggable="true"', html=False)
         self.assertContains(response, 'data-source-kind="holding"', html=False)
@@ -3960,6 +3960,7 @@ class ScheduleWorkflowTests(TestCase):
         self.assertEqual(main_target["overlapping_blocks"], [])
         self.assertEqual(holding_item["activity_name"], displaced.course_name)
         self.assertEqual(holding_item["activity_id"], displaced.id)
+        self.assertEqual(holding_item["group_accent_class"], "schedule-row-accent-1")
         displacement_applied = response.context["displacement_preview"]["applied_overrides"][0]
         self.assertEqual(displacement_applied["moved_activity_id"], source.id)
         self.assertEqual(displacement_applied["displaced_activity_ids"], [displaced.id])
