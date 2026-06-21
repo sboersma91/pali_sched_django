@@ -2439,6 +2439,115 @@ class ScheduleWorkflowTests(TestCase):
         self.assertEqual(displayed_schedule["schedule_rows"][0]["cells"][0]["raw_value"], "empty")
         self.assertEqual(displayed_schedule["schedule_rows"][0]["cells"][3]["raw_value"], activity.course_name)
 
+    def test_manual_move_endpoint_persists_holding_source_reassignment_with_displacement(self):
+        source = Course.objects.create(course_name="Endpoint Holding Source", abriviation="EHS", course_len=1)
+        displaced = Course.objects.create(course_name="Endpoint Holding Displaced", abriviation="EHD", course_len=1)
+        occupied = Course.objects.create(course_name="Endpoint Holding Occupied", abriviation="EHO", course_len=1)
+        generated_schedule = {
+            "ags": ["Endpoint School 0"],
+            "mon_pm1": [source.course_name],
+            "mon_pm2": [displaced.course_name],
+            "tue_am1": [occupied.course_name],
+        }
+        self.schedule.sched_data = {
+            "version": 1,
+            "manual_moves": [{
+                "source_block_id": "0:mon_pm1",
+                "source_activity_id": source.id,
+                "source_activity_name": source.course_name,
+                "source_occurrence_id": "occurrence:0:mon_pm1",
+                "source_group_index": 0,
+                "source_slot_key": "mon_pm1",
+                "target_group_index": 0,
+                "target_slot_key": "mon_pm2",
+                "move_type": "single_block",
+                "action_type": "displacement_move",
+                "created_at": "2026-06-14T12:00:00Z",
+                "status": "active",
+            }],
+            "generated_schedule": generated_schedule,
+            "generation_complete": True,
+            "generation_diagnostics": [],
+            "generation_runtime_diagnostics": [],
+        }
+        self.schedule.save(update_fields=["sched_data"])
+        payload = {
+            "schedule_id": self.schedule.id,
+            "source_schedule_id": self.schedule.id,
+            "target_schedule_id": self.schedule.id,
+            "source_kind": "holding",
+            "source_holding_id": "holding:override:0:0:mon_pm2:1",
+            "source_activity_id": displaced.id,
+            "source_activity_name": displaced.course_name,
+            "source_occurrence_id": "occurrence:0:mon_pm2",
+            "target_group_index": 0,
+            "target_slot_key": "tue_am1",
+            "action_type": "displacement_move",
+        }
+
+        response = self.post_manual_move(payload)
+
+        self.schedule.refresh_from_db()
+        response_data = response.json()
+        saved_move = self.schedule.sched_data["manual_moves"][1]
+        holding_area = response_data["displayed_schedule"]["override_replay_result"]["holding_area"]
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response_data["ok"])
+        self.assertEqual(saved_move["source_kind"], "holding")
+        self.assertEqual(saved_move["source_holding_id"], "holding:override:0:0:mon_pm2:1")
+        self.assertEqual(saved_move["action_type"], "displacement_move")
+        self.assertEqual(response_data["displayed_schedule"]["schedule_rows"][0]["cells"][3]["activity_id"], displaced.id)
+        self.assertEqual(holding_area[0]["activity_id"], occupied.id)
+
+    def test_manual_move_endpoint_rejects_holding_source_cross_group_move(self):
+        source = Course.objects.create(course_name="Endpoint Holding Cross Source", abriviation="EHCS", course_len=1)
+        displaced = Course.objects.create(course_name="Endpoint Holding Cross Displaced", abriviation="EHCD", course_len=1)
+        generated_schedule = {
+            "ags": ["Endpoint School 0", "Endpoint School 1"],
+            "mon_pm1": [source.course_name, "empty"],
+            "mon_pm2": [displaced.course_name, "empty"],
+            "tue_am1": ["empty", "empty"],
+        }
+        self.schedule.sched_data = {
+            "version": 1,
+            "manual_moves": [{
+                "source_block_id": "0:mon_pm1",
+                "source_activity_id": source.id,
+                "source_activity_name": source.course_name,
+                "source_occurrence_id": "occurrence:0:mon_pm1",
+                "source_group_index": 0,
+                "source_slot_key": "mon_pm1",
+                "target_group_index": 0,
+                "target_slot_key": "mon_pm2",
+                "move_type": "single_block",
+                "action_type": "displacement_move",
+                "created_at": "2026-06-14T12:00:00Z",
+                "status": "active",
+            }],
+            "generated_schedule": generated_schedule,
+            "generation_complete": True,
+            "generation_diagnostics": [],
+            "generation_runtime_diagnostics": [],
+        }
+        self.schedule.save(update_fields=["sched_data"])
+        payload = {
+            "schedule_id": self.schedule.id,
+            "source_kind": "holding",
+            "source_holding_id": "holding:override:0:0:mon_pm2:1",
+            "source_activity_id": displaced.id,
+            "source_activity_name": displaced.course_name,
+            "source_occurrence_id": "occurrence:0:mon_pm2",
+            "target_group_index": 1,
+            "target_slot_key": "tue_am1",
+        }
+
+        response = self.post_manual_move(payload)
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "cross_group_move")
+        self.assertEqual(len(self.schedule.sched_data["manual_moves"]), 1)
+
     def test_manual_move_endpoint_rejects_missing_payload_fields(self):
         generated_schedule = {
             "ags": ["Endpoint School 0"],
@@ -2537,7 +2646,9 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, reverse("sched-manual-move", args=[self.schedule.id]))
         self.assertContains(response, "fetch(manualMoveUrl", html=False)
         self.assertContains(response, "'X-CSRFToken': getCookie('csrftoken')", html=False)
-        self.assertContains(response, "targetCell.dataset.groupIndex === draggedCell.dataset.sourceGroupIndex", html=False)
+        self.assertContains(response, "targetCell.dataset.groupIndex === draggedSource.dataset.sourceGroupIndex", html=False)
+        self.assertContains(response, "source_kind: draggedSource.dataset.sourceKind || 'grid'", html=False)
+        self.assertContains(response, "source_holding_id: draggedSource.dataset.sourceHoldingId", html=False)
         self.assertContains(response, "showEligibleDropTargets()", html=False)
         self.assertContains(response, "cell.classList.add('schedule-drop-eligible')", html=False)
         self.assertContains(response, "window.location.reload()", html=False)
@@ -3824,6 +3935,17 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, "Displaced Activities Awaiting Reassignment")
         self.assertContains(response, "Displaced")
         self.assertContains(response, 'class="list-group-item px-0 holding-area-item"', html=False)
+        self.assertContains(response, 'class="schedule-activity-card holding-activity-card"', html=False)
+        self.assertContains(response, 'draggable="true"', html=False)
+        self.assertContains(response, 'data-source-kind="holding"', html=False)
+        self.assertContains(response, 'data-source-holding-id="holding:override:0:0:mon_pm2:1"', html=False)
+        self.assertContains(response, 'aria-label="Drag Preview Holding Displaced from displaced activities to a schedule slot"', html=False)
+        self.assertContains(response, '<span class="schedule-drag-handle" aria-hidden="true"></span>', html=False)
+        self.assertContains(response, 'class="holding-card-meta small"', html=False)
+        self.assertContains(response, 'class="holding-fallback-controls"', html=False)
+        self.assertContains(response, "Fallback reassignment form")
+        self.assertContains(response, 'class="row g-2 align-items-end holding-reassign-form"', html=False)
+        self.assertContains(response, "PHD")
         self.assertContains(
             response,
             "These activities were pushed out by saved displacement moves",
@@ -3831,7 +3953,7 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, displaced.course_name)
         self.assertContains(response, "Proposal School 0")
         self.assertContains(response, "PM2")
-        self.assertContains(response, "displaced by saved override 1")
+        self.assertContains(response, "Saved override 1")
         self.assertEqual(response.context["override_replay_result"]["replay_mode"], "overlap")
         self.assertEqual(response.context["displacement_preview"]["replay_mode"], "overlap")
         self.assertEqual(main_target["raw_value"], source.course_name)

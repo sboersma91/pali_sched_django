@@ -16,6 +16,10 @@ from .school_accounting import school_slot_accounting_summary
 from .schedule_blocks import SCHEDULE_LEGEND
 from .schedule_operations import (
     DEFAULT_NEW_MOVE_ACTION,
+    GRID_SOURCE_KIND,
+    HOLDING_MOVE_REQUIRED_FIELDS,
+    HOLDING_SOURCE_KIND,
+    MANUAL_MOVE_REQUIRED_FIELDS,
     MalformedSchedDataError,
     MOVE_CONFLICT_SEVERITY,
     SCHEDULE_DAYS,
@@ -727,16 +731,8 @@ class SchedManualMoveEndpoint(DetailView):
     model = TheSched
     http_method_names = ['post']
 
-    required_payload_fields = (
-        'source_block_id',
-        'source_activity_id',
-        'source_activity_name',
-        'source_occurrence_id',
-        'source_group_index',
-        'source_slot_key',
-        'target_group_index',
-        'target_slot_key',
-    )
+    required_payload_fields = MANUAL_MOVE_REQUIRED_FIELDS
+    holding_required_payload_fields = HOLDING_MOVE_REQUIRED_FIELDS
     optional_location_fields = (
         'source_location_id',
         'source_location_name',
@@ -766,11 +762,13 @@ class SchedManualMoveEndpoint(DetailView):
                 status=400,
             )
 
-        missing_fields = [
-            field
-            for field in self.required_payload_fields
-            if payload.get(field) in (None, '')
-        ]
+        source_kind = payload.get('source_kind') or GRID_SOURCE_KIND
+        required_fields = (
+            self.holding_required_payload_fields
+            if source_kind == HOLDING_SOURCE_KIND
+            else self.required_payload_fields
+        )
+        missing_fields = [field for field in required_fields if payload.get(field) in (None, '')]
         if missing_fields:
             return self.error_response(
                 'missing_field',
@@ -778,15 +776,27 @@ class SchedManualMoveEndpoint(DetailView):
                 status=400,
                 fields=missing_fields,
             )
+        if source_kind not in (GRID_SOURCE_KIND, HOLDING_SOURCE_KIND):
+            return self.error_response(
+                'unsupported_source_kind',
+                'The requested operational move source is not supported.',
+                status=400,
+            )
 
         ownership_error = self.validate_payload_ownership(payload)
         if ownership_error:
             return ownership_error
 
-        source_group_index = self.parse_int(payload.get('source_group_index'))
         target_group_index = self.parse_int(payload.get('target_group_index'))
         source_activity_id = self.parse_int(payload.get('source_activity_id'))
-        if None in (source_group_index, target_group_index, source_activity_id):
+        source_group_index = self.parse_int(payload.get('source_group_index'))
+        if source_kind == GRID_SOURCE_KIND and source_group_index is None:
+            return self.error_response(
+                'invalid_payload',
+                'Manual move payload contains invalid numeric identity fields.',
+                status=400,
+            )
+        if None in (target_group_index, source_activity_id):
             return self.error_response(
                 'invalid_payload',
                 'Manual move payload contains invalid numeric identity fields.',
@@ -795,17 +805,43 @@ class SchedManualMoveEndpoint(DetailView):
 
         display_result = self.object.get_display_schedule_result()
         schedule_rows = display_result['schedule_rows']
-        proposal_result = apply_move_proposal(schedule_rows, {
-            'source_block_id': payload.get('source_block_id'),
-            'source_activity_id': source_activity_id,
-            'source_activity_name': payload.get('source_activity_name'),
-            'source_occurrence_id': payload.get('source_occurrence_id'),
-            'source_group_index': source_group_index,
-            'source_slot_key': payload.get('source_slot_key'),
-            'target_slot_key': payload.get('target_slot_key'),
-            'target_group_index': target_group_index,
-            'action_type': payload.get('action_type') or DEFAULT_NEW_MOVE_ACTION,
-        })
+        if source_kind == HOLDING_SOURCE_KIND:
+            holding_area = display_result['override_replay_result']['holding_area']
+            source_holding = next(
+                (
+                    item
+                    for item in holding_area
+                    if item.get('holding_id') == payload.get('source_holding_id')
+                ),
+                None,
+            )
+            if source_holding and source_holding.get('origin_group_index') != target_group_index:
+                return self.error_response(
+                    'cross_group_move',
+                    'Manual moves must stay within the same school/group schedule.',
+                    status=403,
+                )
+            proposal_result = apply_holding_reassignment_proposal(schedule_rows, holding_area, {
+                'source_holding_id': payload.get('source_holding_id'),
+                'source_activity_id': source_activity_id,
+                'source_activity_name': payload.get('source_activity_name'),
+                'source_occurrence_id': payload.get('source_occurrence_id'),
+                'target_slot_key': payload.get('target_slot_key'),
+                'target_group_index': target_group_index,
+                'action_type': payload.get('action_type') or DEFAULT_NEW_MOVE_ACTION,
+            })
+        else:
+            proposal_result = apply_move_proposal(schedule_rows, {
+                'source_block_id': payload.get('source_block_id'),
+                'source_activity_id': source_activity_id,
+                'source_activity_name': payload.get('source_activity_name'),
+                'source_occurrence_id': payload.get('source_occurrence_id'),
+                'source_group_index': source_group_index,
+                'source_slot_key': payload.get('source_slot_key'),
+                'target_slot_key': payload.get('target_slot_key'),
+                'target_group_index': target_group_index,
+                'action_type': payload.get('action_type') or DEFAULT_NEW_MOVE_ACTION,
+            })
         conflict_summaries = validate_schedule_blocks(schedule_rows)
         proposal_result['conflicts'] = conflict_summaries
         save_readiness = evaluate_move_proposal_for_save(proposal_result)

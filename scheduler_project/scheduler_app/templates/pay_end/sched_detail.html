@@ -152,6 +152,14 @@
           cursor: grabbing;
           transform: scale(0.98);
         }
+        .schedule-activity-card.schedule-dragging {
+          background: #cfe2ff;
+          border-color: #0d6efd;
+          box-shadow: 0 0.25rem 0.75rem rgba(13, 110, 253, 0.3);
+          cursor: grabbing;
+          opacity: 0.65;
+          transform: scale(0.98);
+        }
         .schedule-drag-handle {
           flex: 0 0 auto;
           height: 0.95rem;
@@ -215,11 +223,50 @@
         }
         .holding-area-item {
           border-left: 0.35rem solid #ffc107;
-          padding-left: 0.75rem;
+          padding: 0.75rem 0 0.85rem 0.75rem;
         }
         .holding-area-status {
           font-size: 0.7rem;
           letter-spacing: 0.02em;
+        }
+        .holding-activity-card {
+          background: #ffffff;
+          border-color: #ffc107;
+          border-left-color: #ffc107;
+          box-shadow: 0 1px 2px rgba(255, 193, 7, 0.22);
+          cursor: grab;
+          margin-bottom: 0.45rem;
+          max-width: 28rem;
+        }
+        .holding-activity-card .schedule-activity-code {
+          background: #ffc107;
+          color: #212529;
+        }
+        .holding-card-meta {
+          color: #495057;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 0.35rem 0.75rem;
+          margin: 0.15rem 0 0.35rem;
+        }
+        .holding-card-meta span {
+          white-space: nowrap;
+        }
+        .holding-reassign-form {
+          border-top: 1px solid #ffe69c;
+          margin-top: 0.6rem;
+          padding-top: 0.65rem;
+        }
+        .holding-fallback-controls {
+          margin-top: 0.5rem;
+        }
+        .holding-fallback-controls summary {
+          color: #6c757d;
+          cursor: pointer;
+          font-size: 0.85rem;
+        }
+        .holding-fallback-controls[open] summary {
+          margin-bottom: 0.35rem;
         }
       </style>
     </div>
@@ -237,55 +284,73 @@
           <ul class="list-group list-group-flush">
             {% for item in holding_area_preview %}
               <li class="list-group-item px-0 holding-area-item">
-                <span class="badge bg-warning text-dark holding-area-status me-2">Displaced</span>
-                <strong>{{ item.display_value }}</strong>
-                {% if item.occurrence_length and item.occurrence_length > 1 %}
-                  <span class="badge bg-warning text-dark ms-2">{{ item.occurrence_length }}-block occurrence</span>
-                {% endif %}
-                <span class="d-block small">
-                  Source: {{ item.origin_group_label }} — {{ item.origin_slot_label }}
-                  (<code>{{ item.origin_slot_key }}</code>)
-                </span>
-                <span class="d-block small">
-                  Reason: displaced by saved override {{ item.displaced_by_override_index|add:"1" }}.
-                </span>
-                <form method="get" action="{% url 'sched-detail' sched.id %}#schedule-workspace" class="row g-2 align-items-end mt-2">
-                  <input type="hidden" name="source_kind" value="holding">
-                  <input type="hidden" name="selected_holding" value="{{ item.holding_id }}">
-                  <input type="hidden" name="source_activity_id" value="{{ item.activity_id }}">
-                  <input type="hidden" name="source_activity_name" value="{{ item.activity_name }}">
-                  <input type="hidden" name="source_occurrence_id" value="{{ item.occurrence_id }}">
-                  <div class="col-md-3">
-                    <label for="holding-target-group-{{ forloop.counter }}" class="form-label">Target Group</label>
-                    <select id="holding-target-group-{{ forloop.counter }}" name="target_group" class="form-select" required>
-                      {% for row in schedule_rows %}
-                        <option value="{{ row.group_index }}"{% if row.group_index == item.origin_group_index %} selected{% endif %}>{{ row.ag }}</option>
-                      {% endfor %}
-                    </select>
-                  </div>
-                  <div class="col-md-3">
-                    <label for="holding-target-slot-{{ forloop.counter }}" class="form-label">Target Time</label>
-                    <select id="holding-target-slot-{{ forloop.counter }}" name="target_slot" class="form-select" required>
-                      {% for day in schedule_days %}
-                        <optgroup label="{{ day.name }}">
-                          {% for slot in day.slots %}
-                            <option value="{{ slot.key }}">{{ slot.label }} — {{ slot.key }}</option>
-                          {% endfor %}
-                        </optgroup>
-                      {% endfor %}
-                    </select>
-                  </div>
-                  <div class="col-md-4">
-                    <label for="holding-action-type-{{ forloop.counter }}" class="form-label">Occupied Target Behavior</label>
-                    <select id="holding-action-type-{{ forloop.counter }}" name="action_type" class="form-select" required>
-                      <option value="displacement_move" selected>Replace activity and move current activity to holding</option>
-                      <option value="overlap_move">Advanced: allow overlap / double-book warning</option>
-                    </select>
-                  </div>
-                  <div class="col-md-2">
-                    <button type="submit" class="btn btn-outline-primary w-100">Preview Reassign</button>
-                  </div>
-                </form>
+                <div
+                  class="schedule-activity-card holding-activity-card"
+                  title="{{ item.display_value }}"
+                  draggable="true"
+                  data-draggable-activity="true"
+                  data-source-kind="holding"
+                  data-source-holding-id="{{ item.holding_id }}"
+                  data-activity-id="{{ item.activity_id }}"
+                  data-activity-name="{{ item.activity_name }}"
+                  data-occurrence-id="{{ item.occurrence_id }}"
+                  data-occurrence-length="{{ item.occurrence_length|default:1 }}"
+                  data-source-group-index="{{ item.origin_group_index }}"
+                  data-source-slot-key=""
+                  aria-label="Drag {{ item.display_value }} from displaced activities to a schedule slot"
+                >
+                  <span class="schedule-drag-handle" aria-hidden="true"></span>
+                  {% if item.activity_abbreviation %}<span class="schedule-activity-code">{{ item.activity_abbreviation }}</span>{% endif %}
+                  <span class="schedule-activity-name">{{ item.display_value }}</span>
+                  <span class="badge bg-warning text-dark holding-area-status">Displaced</span>
+                </div>
+                <div class="holding-card-meta small">
+                  <span>From {{ item.origin_group_label }} — {{ item.origin_slot_label }}</span>
+                  <span>Saved override {{ item.displaced_by_override_index|add:"1" }}</span>
+                  {% if item.occurrence_length and item.occurrence_length > 1 %}
+                    <span>{{ item.occurrence_length }}-block occurrence</span>
+                  {% endif %}
+                </div>
+                <details class="holding-fallback-controls">
+                  <summary>Fallback reassignment form</summary>
+                  <form method="get" action="{% url 'sched-detail' sched.id %}#schedule-workspace" class="row g-2 align-items-end holding-reassign-form">
+                    <input type="hidden" name="source_kind" value="holding">
+                    <input type="hidden" name="selected_holding" value="{{ item.holding_id }}">
+                    <input type="hidden" name="source_activity_id" value="{{ item.activity_id }}">
+                    <input type="hidden" name="source_activity_name" value="{{ item.activity_name }}">
+                    <input type="hidden" name="source_occurrence_id" value="{{ item.occurrence_id }}">
+                    <div class="col-md-3">
+                      <label for="holding-target-group-{{ forloop.counter }}" class="form-label">Target Group</label>
+                      <select id="holding-target-group-{{ forloop.counter }}" name="target_group" class="form-select" required>
+                        {% for row in schedule_rows %}
+                          <option value="{{ row.group_index }}"{% if row.group_index == item.origin_group_index %} selected{% endif %}>{{ row.ag }}</option>
+                        {% endfor %}
+                      </select>
+                    </div>
+                    <div class="col-md-3">
+                      <label for="holding-target-slot-{{ forloop.counter }}" class="form-label">Target Time</label>
+                      <select id="holding-target-slot-{{ forloop.counter }}" name="target_slot" class="form-select" required>
+                        {% for day in schedule_days %}
+                          <optgroup label="{{ day.name }}">
+                            {% for slot in day.slots %}
+                              <option value="{{ slot.key }}">{{ slot.label }} — {{ slot.key }}</option>
+                            {% endfor %}
+                          </optgroup>
+                        {% endfor %}
+                      </select>
+                    </div>
+                    <div class="col-md-4">
+                      <label for="holding-action-type-{{ forloop.counter }}" class="form-label">Occupied Target Behavior</label>
+                      <select id="holding-action-type-{{ forloop.counter }}" name="action_type" class="form-select" required>
+                        <option value="displacement_move" selected>Replace activity and move current activity to holding</option>
+                        <option value="overlap_move">Advanced: allow overlap / double-book warning</option>
+                      </select>
+                    </div>
+                    <div class="col-md-2">
+                      <button type="submit" class="btn btn-outline-primary w-100">Preview Reassign</button>
+                    </div>
+                  </form>
+                </details>
               </li>
             {% endfor %}
           </ul>
@@ -601,7 +666,7 @@
 
         const manualMoveUrl = "{% url 'sched-manual-move' sched.id %}";
         const scheduleId = Number("{{ sched.id }}");
-        let draggedCell = null;
+        let draggedSource = null;
 
         function getCookie(name) {
           const cookies = document.cookie ? document.cookie.split(';') : [];
@@ -624,7 +689,7 @@
         }
 
         function showEligibleDropTargets() {
-          if (!draggedCell) {
+          if (!draggedSource) {
             return;
           }
           workspace.querySelectorAll('td[data-drop-target="true"]').forEach((cell) => {
@@ -636,32 +701,32 @@
 
         function canDropOn(targetCell) {
           return (
-            draggedCell &&
+            draggedSource &&
             targetCell &&
             targetCell.dataset.dropTarget === 'true' &&
             targetCell.dataset.unavailable !== 'true' &&
-            targetCell.dataset.groupIndex === draggedCell.dataset.sourceGroupIndex &&
-            targetCell.dataset.slotKey !== draggedCell.dataset.sourceSlotKey
+            targetCell.dataset.groupIndex === draggedSource.dataset.sourceGroupIndex &&
+            targetCell.dataset.slotKey !== draggedSource.dataset.sourceSlotKey
           );
         }
 
         workspace.addEventListener('dragstart', function (event) {
-          const cell = event.target.closest('td[data-draggable-activity="true"]');
-          if (!cell) {
+          const source = event.target.closest('[data-draggable-activity="true"]');
+          if (!source) {
             return;
           }
-          draggedCell = cell;
-          cell.classList.add('schedule-dragging');
+          draggedSource = source;
+          source.classList.add('schedule-dragging');
           showEligibleDropTargets();
           event.dataTransfer.effectAllowed = 'move';
-          event.dataTransfer.setData('text/plain', cell.dataset.blockId);
+          event.dataTransfer.setData('text/plain', source.dataset.blockId || source.dataset.sourceHoldingId);
         });
 
         workspace.addEventListener('dragend', function () {
-          if (draggedCell) {
-            draggedCell.classList.remove('schedule-dragging');
+          if (draggedSource) {
+            draggedSource.classList.remove('schedule-dragging');
           }
-          draggedCell = null;
+          draggedSource = null;
           clearDropHighlights();
         });
 
@@ -697,12 +762,14 @@
             schedule_id: scheduleId,
             source_schedule_id: scheduleId,
             target_schedule_id: scheduleId,
-            source_block_id: draggedCell.dataset.blockId,
-            source_activity_id: Number(draggedCell.dataset.activityId),
-            source_activity_name: draggedCell.dataset.activityName,
-            source_occurrence_id: draggedCell.dataset.occurrenceId,
-            source_group_index: Number(draggedCell.dataset.sourceGroupIndex),
-            source_slot_key: draggedCell.dataset.sourceSlotKey,
+            source_kind: draggedSource.dataset.sourceKind || 'grid',
+            source_block_id: draggedSource.dataset.blockId,
+            source_holding_id: draggedSource.dataset.sourceHoldingId,
+            source_activity_id: Number(draggedSource.dataset.activityId),
+            source_activity_name: draggedSource.dataset.activityName,
+            source_occurrence_id: draggedSource.dataset.occurrenceId,
+            source_group_index: Number(draggedSource.dataset.sourceGroupIndex),
+            source_slot_key: draggedSource.dataset.sourceSlotKey,
             target_group_index: Number(targetCell.dataset.groupIndex),
             target_slot_key: targetCell.dataset.slotKey,
             action_type: 'displacement_move',
