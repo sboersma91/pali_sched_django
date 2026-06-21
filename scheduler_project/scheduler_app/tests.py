@@ -326,6 +326,7 @@ class ScheduleOperationsTests(TestCase):
             "display_value": "Adapter Activity",
             "activity_id": activity.id,
             "activity_length": 1,
+            "activity_abbreviation": "AA",
             "is_activity": True,
             "is_empty": False,
             "is_unavailable": False,
@@ -2285,12 +2286,16 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, "Activity Group")
         self.assertContains(response, "Monday")
         self.assertContains(response, "Example School 0")
+        self.assertContains(response, 'class="schedule-row-accent-1"', html=False)
+        self.assertContains(response, 'class="schedule-row-header"', html=False)
+        self.assertContains(response, "Group 1")
         self.assertContains(response, "Archery")
         self.assertContains(
             response,
-            '<a href="?selected_block=0%3Amon_pm1#schedule-workspace" class="text-reset text-decoration-none d-block">Archery</a>',
-            html=True,
+            '<a href="?selected_block=0%3Amon_pm1#schedule-workspace" class="schedule-activity-card" draggable="false" title="Archery">',
+            html=False,
         )
+        self.assertContains(response, '<span class="schedule-drag-handle" aria-hidden="true"></span>', html=False)
         self.assertContains(response, "****")
         self.assertContains(response, "/////")
         self.assertEqual(response.context["schedule_rows"][0]["cells"][1]["display_value"], "****")
@@ -2468,11 +2473,51 @@ class ScheduleWorkflowTests(TestCase):
 
         self.assertContains(response, 'draggable="true"', html=False)
         self.assertContains(response, 'data-draggable-activity="true"', html=False)
+        self.assertContains(response, 'class="schedule-activity-card"', html=False)
+        self.assertContains(response, 'class="schedule-drag-handle"', html=False)
+        self.assertContains(response, 'class="schedule-activity-code"', html=False)
+        self.assertContains(response, "DA")
+        self.assertContains(response, "text-overflow: ellipsis", html=False)
+        self.assertContains(response, "white-space: nowrap", html=False)
+        self.assertContains(response, "border-left-width: 0.35rem", html=False)
+        self.assertContains(response, ".schedule-group-badge", html=False)
+        self.assertContains(response, 'cursor: grab', html=False)
+        self.assertContains(response, '.schedule-table td.schedule-drop-eligible', html=False)
         self.assertContains(response, f'data-activity-id="{activity.id}"', html=False)
         self.assertContains(response, 'data-source-group-index="0"', html=False)
         self.assertContains(response, 'data-source-slot-key="mon_pm1"', html=False)
         self.assertContains(response, 'data-drop-target="true"', html=False)
         self.assertContains(response, 'data-slot-key="tue_am1"', html=False)
+
+    def test_schedule_detail_renders_multi_block_occurrence_as_single_draggable_object(self):
+        activity = Course.objects.create(
+            course_name="Draggable Two Block",
+            abriviation="D2B",
+            course_len=2,
+        )
+        generated_schedule = {
+            "ags": ["Endpoint School 0"],
+            "tue_am1": [activity.course_name],
+            "tue_am2": [activity.course_name],
+            "wed_am1": ["empty"],
+            "wed_am2": ["empty"],
+        }
+        self.store_generated_schedule(generated_schedule)
+
+        response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
+
+        first_block, second_block = response.context["schedule_rows"][0]["cells"][3:5]
+        self.assertTrue(first_block["is_multi_block"])
+        self.assertEqual(first_block["occurrence_position"], 1)
+        self.assertEqual(second_block["occurrence_position"], 2)
+        self.assertContains(response, 'data-block-id="0:tue_am1"', html=False)
+        self.assertContains(response, 'data-source-slot-key="tue_am1"', html=False)
+        self.assertContains(response, 'data-occurrence-length="2"', html=False)
+        self.assertContains(response, 'draggable="true"', count=1, html=False)
+        self.assertContains(response, 'class="schedule-activity-card schedule-activity-card-continuation"', html=False)
+        self.assertContains(response, 'title="Draggable Two Block"', html=False)
+        self.assertNotContains(response, 'class="schedule-activity-length"', html=False)
+        self.assertNotContains(response, "(continues)")
 
     def test_schedule_detail_renders_manual_move_fetch_workflow(self):
         activity = Course.objects.create(
@@ -2493,6 +2538,8 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, "fetch(manualMoveUrl", html=False)
         self.assertContains(response, "'X-CSRFToken': getCookie('csrftoken')", html=False)
         self.assertContains(response, "targetCell.dataset.groupIndex === draggedCell.dataset.sourceGroupIndex", html=False)
+        self.assertContains(response, "showEligibleDropTargets()", html=False)
+        self.assertContains(response, "cell.classList.add('schedule-drop-eligible')", html=False)
         self.assertContains(response, "window.location.reload()", html=False)
 
     def test_schedule_detail_places_operational_workspace_before_secondary_details(self):
@@ -3419,6 +3466,9 @@ class ScheduleWorkflowTests(TestCase):
         self.assertEqual(duplicate["severity"], "warning")
         self.assertContains(confirm_response, source.course_name)
         self.assertContains(confirm_response, target.course_name)
+        self.assertContains(confirm_response, 'class="schedule-overlap-card"', html=False)
+        self.assertContains(confirm_response, 'class="schedule-overlap-badge"', html=False)
+        self.assertContains(confirm_response, "Overlap")
         self.assertContains(confirm_response, "(proposed overlap)")
         self.assertContains(confirm_response, "Overlap Warning")
         self.assertContains(confirm_response, "This proposed move would save with warnings.")
@@ -3727,6 +3777,8 @@ class ScheduleWorkflowTests(TestCase):
             )
 
         self.assertContains(response, "(persisted overlap)")
+        self.assertContains(response, 'class="schedule-overlap-card"', html=False)
+        self.assertContains(response, 'class="schedule-overlap-badge"', html=False)
         self.assertContains(response, "(proposed)")
         self.assertContains(response, "duplicate_group_slot")
         self.assertTrue(response.context["proposal_result"]["applied"])
@@ -3768,10 +3820,13 @@ class ScheduleWorkflowTests(TestCase):
         self.schedule.refresh_from_db()
         main_target = response.context["schedule_rows"][0]["cells"][1]
         holding_item = response.context["holding_area_preview"][0]
-        self.assertContains(response, "Operational Holding Area")
+        self.assertContains(response, "Supporting Workspace")
+        self.assertContains(response, "Displaced Activities Awaiting Reassignment")
+        self.assertContains(response, "Displaced")
+        self.assertContains(response, 'class="list-group-item px-0 holding-area-item"', html=False)
         self.assertContains(
             response,
-            "These activities were displaced by saved displacement moves",
+            "These activities were pushed out by saved displacement moves",
         )
         self.assertContains(response, displaced.course_name)
         self.assertContains(response, "Proposal School 0")
@@ -3824,10 +3879,10 @@ class ScheduleWorkflowTests(TestCase):
             response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
 
         self.assertEqual(response.context["holding_area_preview"], [])
-        self.assertNotContains(response, "Operational Holding Area")
+        self.assertNotContains(response, "Displaced Activities Awaiting Reassignment")
         self.assertNotContains(
             response,
-            "These activities were displaced by saved displacement moves",
+            "These activities were pushed out by saved displacement moves",
         )
         self.assertEqual(response.context["schedule_rows"][0]["cells"][3]["raw_value"], activity.course_name)
         self.assertEqual(response.context["conflict_summaries"], [])

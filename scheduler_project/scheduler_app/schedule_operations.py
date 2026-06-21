@@ -91,10 +91,18 @@ def build_schedule_blocks(schedule):
         if value not in SCHEDULE_DISPLAY_VALUES and value
     }
     activities = {
-        course_name: {'id': activity_id, 'length': course_len}
-        for course_name, activity_id, course_len in Course.objects.filter(
+        course_name: {
+            'id': activity_id,
+            'length': course_len,
+            'abbreviation': (
+                abbreviation
+                if abbreviation and abbreviation != '5 character max'
+                else None
+            ),
+        }
+        for course_name, activity_id, course_len, abbreviation in Course.objects.filter(
             course_name__in=activity_names
-        ).values_list('course_name', 'id', 'course_len')
+        ).values_list('course_name', 'id', 'course_len', 'abriviation')
     }
 
     schedule_rows = []
@@ -119,6 +127,7 @@ def build_schedule_blocks(schedule):
                     'display_value': SCHEDULE_DISPLAY_VALUES.get(raw_value, raw_value),
                     'activity_id': activity.get('id'),
                     'activity_length': activity.get('length'),
+                    'activity_abbreviation': activity.get('abbreviation'),
                     'is_activity': is_activity,
                     'is_empty': is_empty,
                     'is_unavailable': is_unavailable,
@@ -273,6 +282,7 @@ def clear_block_activity(block, empty_metadata=None):
         'display_value': SCHEDULE_DISPLAY_VALUES['empty'],
         'activity_id': None,
         'activity_length': None,
+        'activity_abbreviation': None,
         'is_activity': False,
         'is_empty': True,
         'is_unavailable': False,
@@ -303,10 +313,14 @@ def build_activity_values_from_source(source):
             'display_value': source['display_value'],
             'activity_id': source['activity_id'],
             'activity_length': source['activity_length'],
+            'activity_abbreviation': source.get('activity_abbreviation'),
         }
     return {
-        key: source[key]
-        for key in ('raw_value', 'display_value', 'activity_id', 'activity_length')
+        'raw_value': source.get('raw_value'),
+        'display_value': source.get('display_value'),
+        'activity_id': source.get('activity_id'),
+        'activity_length': source.get('activity_length'),
+        'activity_abbreviation': source.get('activity_abbreviation'),
     }
 
 
@@ -504,12 +518,13 @@ def remove_activity_from_operational_blocks(blocks, source, empty_metadata=None)
                     remaining_overlaps = primary['overlapping_blocks']
                     primary.update({
                         **{
-                            key: promoted[key]
+                            key: promoted.get(key)
                             for key in (
                                 'raw_value',
                                 'display_value',
                                 'activity_id',
                                 'activity_length',
+                                'activity_abbreviation',
                                 'is_activity',
                                 'is_empty',
                                 'is_unavailable',
@@ -534,6 +549,7 @@ def remove_activity_from_operational_blocks(blocks, source, empty_metadata=None)
                     'display_value': SCHEDULE_DISPLAY_VALUES['empty'],
                     'activity_id': None,
                     'activity_length': None,
+                    'activity_abbreviation': None,
                     'is_activity': False,
                     'is_empty': True,
                     'is_unavailable': False,
@@ -828,6 +844,7 @@ def build_holding_area_item(block_or_blocks, override_index, displacement_positi
         'activity_name': block.get('raw_value'),
         'display_value': block.get('display_value'),
         'activity_length': block.get('activity_length'),
+        'activity_abbreviation': block.get('activity_abbreviation'),
         'occurrence_id': block.get('occurrence_id'),
         'occurrence_length': occurrence_length,
         'source_block_ids': [occurrence_block.get('block_id') for occurrence_block in occurrence_blocks],
