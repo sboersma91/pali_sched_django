@@ -223,23 +223,25 @@ class Schools(models.Model):
 
         self.subjects = [sub.course_name for sub in self.subject.all()]
 
-        for c in range(len(self.subjects)):
-            if self.subjects[c] in ["WM",'LCR','SLIDE']:
-                ropes.append(self.subjects[c])
-            elif class_len_lookup[self.subjects[c]] == 2 and class_locs_lookup[self.subjects[c]] == 'Various':
-                various_two.append(self.subjects[c])
-            elif class_len_lookup[self.subjects[c]] == 2:
-                two_block.append(self.subjects[c])
-            elif class_len_lookup[self.subjects[c]] == 1 and class_locs_lookup[self.subjects[c]]== 'Various' :
-                various_one.append(self.subjects[c])
-            elif class_len_lookup[self.subjects[c]] == 1:
-                one_block.append(self.subjects[c])
-            elif class_len_lookup[self.subjects[c]] == 0:
+        for activity_name in self.subjects:
+            activity_len = class_len_lookup.get(activity_name)
+            activity_locs = class_locs_lookup.get(activity_name)
+
+            if activity_name in ["WM",'LCR','SLIDE']:
+                ropes.append(activity_name)
+            elif activity_len == 2 and activity_locs == 'Various':
+                various_two.append(activity_name)
+            elif activity_len == 2:
+                two_block.append(activity_name)
+            elif activity_len == 1 and activity_locs == 'Various' :
+                various_one.append(activity_name)
+            elif activity_len == 1:
+                one_block.append(activity_name)
+            elif activity_len == 0:
                 # 'N' = 0 now.
-                night.append(self.subjects[c])
+                night.append(activity_name)
             else:
-                print(c)
-                print(self.subjects[c])
+                print(activity_name)
                 raise ValueError("There is no length for said class" )
         
         self.sorted_subjects.extend(ropes)

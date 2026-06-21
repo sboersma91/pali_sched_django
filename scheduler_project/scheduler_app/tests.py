@@ -16,7 +16,11 @@ from .views import (
     build_localized_failure_explanations,
     schedule_csv_export,
 )
-from .school_accounting import school_slot_accounting_summary
+from .school_accounting import (
+    calculate_school_slot_accounting,
+    school_slot_accounting_summary,
+    school_validation_slot_blocks,
+)
 from .schedule_operations import (
     apply_holding_reassignment_proposal,
     apply_move_proposal,
@@ -4184,6 +4188,34 @@ class ScheduleGenerationRegressionTests(TestCase):
             "reason": "Activity has no available scheduling Locations.",
         }])
 
+    def test_school_save_keeps_activity_with_no_available_locations(self):
+        unavailable_location = Locations.objects.create(
+            loc_name="Unavailable Save Location",
+            loc_short="USL",
+            availible=False,
+        )
+        activity = Course.objects.create(
+            course_name="Unavailable Save Activity",
+            abriviation="USA",
+            course_len=1,
+        )
+        activity.primary_locs.add(unavailable_location)
+        self.school.subject.set([self.two_block, activity, self.night])
+        initialize_scheduling_data(force=True)
+
+        self.school.save()
+
+        self.school.refresh_from_db()
+        self.assertEqual(
+            list(self.school.subject.order_by("course_name")),
+            [self.night, self.two_block, activity],
+        )
+        self.assertEqual(
+            self.school.sorted_subject_lst,
+            "Regression Two Block,Unavailable Save Activity,Regression Night",
+        )
+        self.assertNotIn("Unavailable Save Activity", class_locs)
+
     def make_location_valid_schedule_unassignable(self):
         location = Locations.objects.get(loc_name="Schedule Regression Location")
         extra_two_block = Course.objects.create(course_name="Competing Two Block", abriviation="C2", course_len=2)
@@ -5121,6 +5153,43 @@ class PublicLandingPageTests(TestCase):
         self.assertIn("Not ready to save: selected Activities must exactly match required blocks.", rendered_summary)
         self.assertIn("border-warning", rendered_summary)
 
+    def test_validation_summary_counts_monday_to_wednesday_trip_window(self):
+        summary = calculate_school_slot_accounting("Mon", "Wed", [])
+
+        self.assertEqual(summary["required_daytime"], 7)
+        self.assertEqual(summary["required_night"], 2)
+        self.assertEqual(summary["required_total"], 9)
+
+    def test_validation_summary_counts_monday_to_thursday_trip_window(self):
+        summary = calculate_school_slot_accounting("Mon", "Thur", [])
+
+        self.assertEqual(summary["required_daytime"], 11)
+        self.assertEqual(summary["required_night"], 3)
+        self.assertEqual(summary["required_total"], 14)
+
+    def test_validation_summary_counts_tuesday_to_friday_trip_window(self):
+        summary = calculate_school_slot_accounting("Tue", "Fri", [])
+
+        self.assertEqual(summary["required_daytime"], 11)
+        self.assertEqual(summary["required_night"], 3)
+        self.assertEqual(summary["required_total"], 14)
+
+    def test_validation_summary_counts_match_trip_window_capacity(self):
+        for arrive, depart in (("Mon", "Wed"), ("Mon", "Thur"), ("Tue", "Fri")):
+            with self.subTest(arrive=arrive, depart=depart):
+                slot_blocks = school_validation_slot_blocks(arrive, depart)
+                summary = calculate_school_slot_accounting(arrive, depart, [])
+
+                self.assertEqual(
+                    summary["required_daytime"],
+                    sum(1 for _slot_key, slot_kind in slot_blocks if slot_kind == "daytime"),
+                )
+                self.assertEqual(
+                    summary["required_night"],
+                    sum(1 for _slot_key, slot_kind in slot_blocks if slot_kind == "night"),
+                )
+                self.assertEqual(summary["required_total"], len(slot_blocks))
+
     def test_school_update_checks_existing_activity_selections(self):
         school = Schools(
             school_name="Selected Activities School",
@@ -5223,12 +5292,12 @@ class PublicLandingPageTests(TestCase):
         self.assertContains(response, "Schedule Block Summary")
         self.assertNotContains(response, "sorted_subject_lst")
         self.assertNotContains(response, "Sorted Subject")
-        self.assertContains(response, 'data-summary-value="required-daytime">8</span>', html=False)
+        self.assertContains(response, 'data-summary-value="required-daytime">7</span>', html=False)
         self.assertContains(response, 'data-summary-value="required-night">2</span>', html=False)
-        self.assertContains(response, 'data-summary-value="required-total">10</span>', html=False)
+        self.assertContains(response, 'data-summary-value="required-total">9</span>', html=False)
         self.assertContains(response, "data-summary-value=\"selected-daytime\">2</span>")
         self.assertContains(response, "data-summary-value=\"selected-night\">1</span>")
-        self.assertContains(response, "data-summary-status=\"daytime\">under by 6</span>")
+        self.assertContains(response, "data-summary-status=\"daytime\">under by 5</span>")
         self.assertContains(response, "data-summary-status=\"night\">under by 1</span>")
 
     def test_invalid_school_create_post_recalculates_slot_summary_from_selection(self):
@@ -5244,12 +5313,12 @@ class PublicLandingPageTests(TestCase):
         self.assertContains(response, "Schedule Block Summary")
         self.assertNotContains(response, "sorted_subject_lst")
         self.assertNotContains(response, "Sorted Subject")
-        self.assertContains(response, 'data-summary-value="required-daytime">8</span>', html=False)
+        self.assertContains(response, 'data-summary-value="required-daytime">7</span>', html=False)
         self.assertContains(response, 'data-summary-value="required-night">2</span>', html=False)
-        self.assertContains(response, 'data-summary-value="required-total">10</span>', html=False)
+        self.assertContains(response, 'data-summary-value="required-total">9</span>', html=False)
         self.assertContains(response, "data-summary-value=\"selected-daytime\">1</span>")
         self.assertContains(response, "data-summary-value=\"selected-night\">1</span>")
-        self.assertContains(response, "data-summary-status=\"daytime\">under by 7</span>")
+        self.assertContains(response, "data-summary-status=\"daytime\">under by 6</span>")
         self.assertContains(response, "data-summary-status=\"night\">under by 1</span>")
 
 
