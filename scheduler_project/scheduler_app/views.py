@@ -187,6 +187,43 @@ def build_generation_collapse_explanation(outcome_summary, bottlenecks):
     }
 
 
+def build_localized_failure_explanations(outcome_summary, diagnostics, affected_activities):
+    if not outcome_summary or outcome_summary.get('outcome_severity') != 'localized_failure':
+        return []
+
+    eligible_locations_by_activity = {
+        activity['activity']: activity.get('eligible_locations', [])
+        for activity in affected_activities
+    }
+    search_exhausted = any(
+        diagnostic.get('type') in {'generation_search_exhausted', 'search_limit_exceeded'}
+        for diagnostic in diagnostics
+    )
+    explanations = []
+    seen = set()
+    for diagnostic in diagnostics:
+        if diagnostic.get('type') != 'activity_unscheduled':
+            continue
+        root_cause_reason = diagnostic.get('root_cause_reason')
+        if not root_cause_reason:
+            continue
+        activity = diagnostic.get('activity')
+        group = diagnostic.get('group') or diagnostic.get('school')
+        key = (activity, group, root_cause_reason)
+        if key in seen:
+            continue
+        seen.add(key)
+        explanations.append({
+            'activity': activity,
+            'group': group,
+            'heading': f'{activity} could not be scheduled for {group}.',
+            'root_cause_reason': root_cause_reason,
+            'eligible_locations': eligible_locations_by_activity.get(activity, []),
+            'search_exhausted': search_exhausted,
+        })
+    return explanations
+
+
 def build_generation_bottleneck_presentations(diagnostics):
     unscheduled = [
         diagnostic
@@ -405,6 +442,11 @@ class SchedDetail(DetailView):
         context['generation_collapse_explanation'] = build_generation_collapse_explanation(
             context['generation_outcome_summary'],
             context['generation_bottlenecks'],
+        )
+        context['generation_localized_failure_explanations'] = build_localized_failure_explanations(
+            context['generation_outcome_summary'],
+            generation_runtime_diagnostics,
+            context['generation_affected_activities'],
         )
         context['generation_blocked'] = bool(generation_diagnostics)
         context['generation_complete'] = generation_complete

@@ -13,6 +13,7 @@ from .views import (
     SchedDetail,
     SchedList,
     build_generation_collapse_explanation,
+    build_localized_failure_explanations,
     schedule_csv_export,
 )
 from .school_accounting import school_slot_accounting_summary
@@ -4342,6 +4343,45 @@ class ScheduleGenerationRegressionTests(TestCase):
 
         self.assertIsNone(explanation)
 
+    def test_localized_failure_explanation_uses_unscheduled_root_cause(self):
+        explanations = build_localized_failure_explanations(
+            {
+                "outcome_severity": "localized_failure",
+                "completion_percentage": 98.6,
+            },
+            [
+                {
+                    "type": "generation_search_exhausted",
+                    "severity": "error",
+                    "reason": "Schedule generation exhausted available placement options.",
+                },
+                {
+                    "type": "activity_unscheduled",
+                    "severity": "error",
+                    "school": "Hallz",
+                    "group": "Hallz 5",
+                    "activity": "Astronomy",
+                    "reason": "Hallz 5 could not schedule Astronomy.",
+                    "root_cause": "capacity_shortfall",
+                    "root_cause_reason": "Astronomy is operating at maximum available capacity.",
+                },
+            ],
+            [{
+                "activity": "Astronomy",
+                "unscheduled_count": 1,
+                "eligible_locations": ["Acct", "Overlook", "Pond"],
+            }],
+        )
+
+        self.assertEqual(explanations, [{
+            "activity": "Astronomy",
+            "group": "Hallz 5",
+            "heading": "Astronomy could not be scheduled for Hallz 5.",
+            "root_cause_reason": "Astronomy is operating at maximum available capacity.",
+            "eligible_locations": ["Acct", "Overlook", "Pond"],
+            "search_exhausted": True,
+        }])
+
     def test_location_valid_schedule_that_cannot_fit_reports_incomplete_generation(self):
         self.make_location_valid_schedule_unassignable()
 
@@ -4395,6 +4435,80 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.assertIn("Incomplete Schedule Output", rendered_content)
         self.assertIn("must not be treated as a fully generated Schedule", rendered_content)
         self.assertIn("<table", rendered_content)
+
+    def test_schedule_detail_renders_localized_root_cause_before_generic_message(self):
+        generated_schedule = self.schedule.create_sched
+        self.schedule.generation_complete = False
+        self.schedule.generation_diagnostics = []
+        self.schedule.generation_runtime_diagnostics = [
+            {
+                "type": "generation_search_exhausted",
+                "severity": "error",
+                "reason": "Schedule generation exhausted available placement options before completing the schedule.",
+            },
+            {
+                "type": "activity_unscheduled",
+                "severity": "error",
+                "school": "Balanced Regression School",
+                "group": "Balanced Regression School 0",
+                "activity": "Regression One Block",
+                "reason": "Balanced Regression School 0 could not schedule Regression One Block.",
+                "root_cause": "capacity_shortfall",
+                "root_cause_reason": "Regression One Block is operating at maximum available capacity.",
+            },
+            {
+                "type": "generation_outcome_summary",
+                "severity": "error",
+                "outcome_severity": "localized_failure",
+                "expected_assignments": 69,
+                "successful_assignments": 68,
+                "unscheduled_assignments": 1,
+                "completion_percentage": 98.6,
+                "search_limit_exceeded": False,
+                "search_exhausted": True,
+                "reason": "Schedule generation is mostly complete: 68 of 69 expected assignments were scheduled (98.6% complete).",
+            },
+        ]
+        self.schedule.store_generated_schedule(generated_schedule)
+
+        request = RequestFactory().get(reverse("sched-detail", args=[self.schedule.id]))
+        response = SchedDetail.as_view()(request, pk=self.schedule.id)
+        response.render()
+        rendered_content = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Localized generation failure")
+        self.assertContains(response, "Regression One Block could not be scheduled for Balanced Regression School 0.")
+        self.assertContains(response, "Eligible locations:")
+        self.assertContains(response, "Schedule Regression Location")
+        self.assertContains(response, "Regression One Block is operating at maximum available capacity.")
+        self.assertContains(
+            response,
+            "The scheduler exhausted available placement options while attempting to place this activity.",
+        )
+        self.assertIn("<details", rendered_content)
+        self.assertNotIn("<details open", rendered_content)
+        self.assertIn("Additional Diagnostic Details", rendered_content)
+        self.assertIn("Affected Activities:", rendered_content)
+        self.assertIn("Regression One Block", rendered_content)
+        self.assertIn("Technical diagnostics:", rendered_content)
+        self.assertNotIn("This may be due to Location capacity", rendered_content)
+        self.assertLess(
+            rendered_content.index("Localized generation failure"),
+            rendered_content.index("Regression One Block could not be scheduled"),
+        )
+        self.assertLess(
+            rendered_content.index("Regression One Block is operating at maximum available capacity."),
+            rendered_content.index("Additional Diagnostic Details"),
+        )
+        self.assertLess(
+            rendered_content.index("Additional Diagnostic Details"),
+            rendered_content.index("Affected Activities:"),
+        )
+        self.assertLess(
+            rendered_content.index("Affected Activities:"),
+            rendered_content.index("Technical diagnostics:"),
+        )
 
     def test_insufficient_activity_capacity_is_caught_before_recursive_search(self):
         schedule = self.make_insufficient_night_capacity_schedule()
@@ -4580,11 +4694,16 @@ class ScheduleGenerationRegressionTests(TestCase):
         self.assertContains(response, "Affected Activities:")
         self.assertContains(response, "Limited Night Activity")
         self.assertContains(response, "2 unscheduled assignments")
+        self.assertIn("<details", rendered_content)
+        self.assertNotIn("<details open", rendered_content)
+        self.assertIn("Additional Diagnostic Details", rendered_content)
         self.assertIn("Eligible locations:", rendered_content)
         self.assertIn("Limited Night Location", rendered_content)
         self.assertIn("Limited Night School — Limited Night Activity needs 2 placements", rendered_content)
         self.assertIn("only 1 is available", rendered_content)
         self.assertIn("Technical diagnostics:", rendered_content)
+        self.assertNotIn("Activity and Location configuration passed initial checks", rendered_content)
+        self.assertNotIn("This may be due to Location capacity", rendered_content)
         self.assertLess(
             rendered_content.index("Generation-wide failure"),
             rendered_content.index("Generation-wide failure was caused by an unschedulable required activity."),
@@ -4595,6 +4714,10 @@ class ScheduleGenerationRegressionTests(TestCase):
         )
         self.assertLess(
             rendered_content.index("Primary Bottlenecks:"),
+            rendered_content.index("Additional Diagnostic Details"),
+        )
+        self.assertLess(
+            rendered_content.index("Additional Diagnostic Details"),
             rendered_content.index("Affected Activities:"),
         )
         self.assertLess(

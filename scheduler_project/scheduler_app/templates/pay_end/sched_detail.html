@@ -459,6 +459,27 @@
               <p class="mb-0">{{ generation_collapse_explanation.scheduler_reason }}</p>
             </div>
           {% endif %}
+          {% if generation_localized_failure_explanations %}
+            <div class="mb-3">
+              {% for explanation in generation_localized_failure_explanations %}
+                <div class="mb-2">
+                  <p class="fw-bold mb-1">{{ explanation.heading }}</p>
+                  {% if explanation.eligible_locations %}
+                    <span class="d-block">Eligible locations:</span>
+                    <ul class="mb-2">
+                      {% for location in explanation.eligible_locations %}
+                        <li>{{ location }}</li>
+                      {% endfor %}
+                    </ul>
+                  {% endif %}
+                  <p class="mb-1">{{ explanation.root_cause_reason }}</p>
+                  {% if explanation.search_exhausted %}
+                    <p class="mb-0">The scheduler exhausted available placement options while attempting to place this activity.</p>
+                  {% endif %}
+                </div>
+              {% endfor %}
+            </div>
+          {% endif %}
           {% if generation_bottlenecks %}
             <p class="fw-bold mb-2">Primary Bottlenecks:</p>
             <ul class="mb-3">
@@ -492,29 +513,36 @@
               {% endfor %}
             </ul>
           {% endif %}
-          {% if generation_affected_activities %}
-            <p class="fw-bold mb-2">Affected Activities:</p>
-            <ul class="mb-3">
-              {% for activity in generation_affected_activities %}
-                <li>
-                  <strong>{{ activity.activity }}</strong>
-                  ({{ activity.unscheduled_count }} unscheduled assignment{{ activity.unscheduled_count|pluralize }})
-                  {% if activity.eligible_locations %}
-                    <span class="d-block">Eligible locations: {{ activity.eligible_locations|join:", " }}</span>
-                  {% endif %}
-                </li>
-              {% endfor %}
-            </ul>
+          {% if not generation_localized_failure_explanations and not generation_collapse_explanation %}
+            <p>Activity and Location configuration passed initial checks, but the complete Schedule could not be fully assigned.</p>
+            <p>This may be due to Location capacity, timing constraints, or Activity combinations. Review School activity selections, Activity lengths, and available Locations.</p>
           {% endif %}
-          <p>Activity and Location configuration passed initial checks, but the complete Schedule could not be fully assigned.</p>
-          <p>This may be due to Location capacity, timing constraints, or Activity combinations. Review School activity selections, Activity lengths, and available Locations.</p>
-          {% if generation_runtime_diagnostics %}
-            <p class="fw-bold mb-1">Technical diagnostics:</p>
-            <ul class="mb-0">
-              {% for diagnostic in generation_runtime_diagnostics %}
-                <li>{{ diagnostic.reason }}</li>
-              {% endfor %}
-            </ul>
+          {% if generation_affected_activities or generation_runtime_diagnostics %}
+            <details class="mt-3">
+              <summary class="fw-bold">Additional Diagnostic Details</summary>
+              {% if generation_affected_activities %}
+                <p class="fw-bold mb-2 mt-3">Affected Activities:</p>
+                <ul class="mb-3">
+                  {% for activity in generation_affected_activities %}
+                    <li>
+                      <strong>{{ activity.activity }}</strong>
+                      ({{ activity.unscheduled_count }} unscheduled assignment{{ activity.unscheduled_count|pluralize }})
+                      {% if activity.eligible_locations %}
+                        <span class="d-block">Eligible locations: {{ activity.eligible_locations|join:", " }}</span>
+                      {% endif %}
+                    </li>
+                  {% endfor %}
+                </ul>
+              {% endif %}
+              {% if generation_runtime_diagnostics %}
+                <p class="fw-bold mb-1">Technical diagnostics:</p>
+                <ul class="mb-0">
+                  {% for diagnostic in generation_runtime_diagnostics %}
+                    <li>{{ diagnostic.reason }}</li>
+                  {% endfor %}
+                </ul>
+              {% endif %}
+            </details>
           {% endif %}
         </div>
       {% else %}
