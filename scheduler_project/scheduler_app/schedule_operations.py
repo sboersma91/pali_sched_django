@@ -82,7 +82,7 @@ class MalformedSchedDataError(ValueError):
         super().__init__(f'{self.operator_message} Diagnostic: {debug_detail}')
 
 
-def build_schedule_blocks(schedule):
+def build_schedule_blocks(schedule, organization=None):
     activity_names = {
         value
         for day in SCHEDULE_DAYS
@@ -90,6 +90,10 @@ def build_schedule_blocks(schedule):
         for value in schedule.get(slot['key'], [])
         if value not in SCHEDULE_DISPLAY_VALUES and value
     }
+    activity_queryset = Course.objects.filter(course_name__in=activity_names)
+    if organization is not None:
+        activity_queryset = activity_queryset.filter(organization=organization)
+
     activities = {
         course_name: {
             'id': activity_id,
@@ -100,9 +104,12 @@ def build_schedule_blocks(schedule):
                 else None
             ),
         }
-        for course_name, activity_id, course_len, abbreviation in Course.objects.filter(
-            course_name__in=activity_names
-        ).values_list('course_name', 'id', 'course_len', 'abriviation')
+        for course_name, activity_id, course_len, abbreviation in activity_queryset.values_list(
+            'course_name',
+            'id',
+            'course_len',
+            'abriviation',
+        )
     }
 
     schedule_rows = []

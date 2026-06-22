@@ -69,6 +69,9 @@ def _form_value(form, field_name):
 
 def school_slot_accounting_summary(form):
     selected_courses = Course.objects.filter(pk__in=_form_values(form, 'subject'))
+    organization = getattr(form, 'organization', None)
+    if organization is not None:
+        selected_courses = selected_courses.filter(organization=organization)
     return calculate_school_slot_accounting(
         _form_value(form, 'arrive'),
         _form_value(form, 'depart'),

@@ -5,6 +5,7 @@ from io import StringIO
 from unittest.mock import PropertyMock, patch
 
 from django.contrib.auth import get_user_model
+from django.db import IntegrityError
 from django.template.loader import render_to_string
 from django.test import Client, RequestFactory, TestCase, override_settings
 from django.urls import reverse
@@ -39,6 +40,7 @@ from .schedule_operations import (
 )
 from .models import (
     Course,
+    Instructor,
     Locations,
     Schools,
     TheSched,
@@ -48,6 +50,7 @@ from .models import (
     master_locs,
     summarize_generation_completion,
 )
+from members.models import Organization, OrganizationMembership
 
 
 def force_login_operator(client):
@@ -225,6 +228,342 @@ class AuthenticationFlowTests(TestCase):
 
         self.assertRedirects(response, reverse("login"))
         self.assertNotIn("_auth_user_id", self.client.session)
+
+
+class OrganizationOwnershipModelTests(TestCase):
+    def setUp(self):
+        self.default_organization = Organization.objects.create(name="Default Test Organization")
+        self.other_organization = Organization.objects.create(name="Other Test Organization")
+
+    def test_customer_owned_models_can_be_assigned_to_organizations(self):
+        location = Locations.objects.create(
+            organization=self.default_organization,
+            loc_name="Waterfront",
+            loc_short="WF",
+        )
+        course = Course.objects.create(
+            organization=self.default_organization,
+            course_name="Canoeing",
+            abriviation="CAN",
+            course_len=1,
+        )
+        course.primary_locs.add(location)
+        school = Schools.schools_list.create(
+            organization=self.default_organization,
+            school_name="Lake School",
+            arrive="Thur",
+            depart="Fri",
+            total_students=16,
+            ag_num=1,
+            attending_year="2026-06-04",
+        )
+        school.subject.add(course)
+        schedule = TheSched.objects.create(
+            organization=self.default_organization,
+            sched_name="Lake Schedule",
+            sched_data={},
+        )
+        schedule.schools.add(school)
+        instructor = Instructor.objects.create(
+            organization=self.default_organization,
+            fname="Jordan",
+            lname="River",
+            ropes_lead=False,
+            school_lead=True,
+            cpr=True,
+            firstaid="yes",
+        )
+
+        self.assertEqual(location.organization, self.default_organization)
+        self.assertEqual(course.organization, self.default_organization)
+        self.assertEqual(school.organization, self.default_organization)
+        self.assertEqual(schedule.organization, self.default_organization)
+        self.assertEqual(instructor.organization, self.default_organization)
+
+    def test_customer_owned_models_default_to_default_organization_when_not_explicitly_assigned(self):
+        location = Locations.objects.create(loc_name="Defaulted Location", loc_short="DL")
+        course = Course.objects.create(course_name="Defaulted Course", abriviation="DC", course_len=1)
+        school = Schools.schools_list.create(
+            school_name="Defaulted School",
+            arrive="Thur",
+            depart="Fri",
+            total_students=16,
+            ag_num=1,
+            attending_year="2026-06-04",
+        )
+        schedule = TheSched.objects.create(sched_name="Defaulted Schedule", sched_data={})
+        instructor = Instructor.objects.create(
+            fname="Defaulted",
+            lname="Instructor",
+            ropes_lead=False,
+            school_lead=False,
+            cpr=True,
+            firstaid="yes",
+        )
+
+        default_organization = Organization.objects.get(name="Default Organization")
+        self.assertEqual(location.organization, default_organization)
+        self.assertEqual(course.organization, default_organization)
+        self.assertEqual(school.organization, default_organization)
+        self.assertEqual(schedule.organization, default_organization)
+        self.assertEqual(instructor.organization, default_organization)
+
+    def test_names_can_repeat_across_organizations_but_not_within_one_organization(self):
+        Locations.objects.create(
+            organization=self.default_organization,
+            loc_name="Shared Name",
+            loc_short="SN1",
+        )
+        Locations.objects.create(
+            organization=self.other_organization,
+            loc_name="Shared Name",
+            loc_short="SN2",
+        )
+
+        with self.assertRaises(IntegrityError):
+            Locations.objects.create(
+                organization=self.default_organization,
+                loc_name="Shared Name",
+                loc_short="SN3",
+            )
+
+    def test_activity_abbreviations_can_repeat_across_organizations_but_not_within_one_organization(self):
+        Course.objects.create(
+            organization=self.default_organization,
+            course_name="First Activity",
+            abriviation="DUP",
+            course_len=1,
+        )
+        Course.objects.create(
+            organization=self.other_organization,
+            course_name="Second Activity",
+            abriviation="DUP",
+            course_len=1,
+        )
+
+        with self.assertRaises(IntegrityError):
+            Course.objects.create(
+                organization=self.default_organization,
+                course_name="Third Activity",
+                abriviation="DUP",
+                course_len=1,
+            )
+
+    def test_blank_activity_abbreviations_can_repeat_within_one_organization(self):
+        Course.objects.create(
+            organization=self.default_organization,
+            course_name="Blank Abbreviation One",
+            abriviation="",
+            course_len=1,
+        )
+        Course.objects.create(
+            organization=self.default_organization,
+            course_name="Blank Abbreviation Two",
+            abriviation="",
+            course_len=1,
+        )
+
+
+@override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
+class OrganizationEnforcementTests(TestCase):
+    def setUp(self):
+        self.org_a = Organization.objects.create(name="Organization A")
+        self.org_b = Organization.objects.create(name="Organization B")
+        self.user_a = get_user_model().objects.create_user(username="operator-a", password="password")
+        self.user_b = get_user_model().objects.create_user(username="operator-b", password="password")
+        OrganizationMembership.objects.create(user=self.user_a, organization=self.org_a)
+        OrganizationMembership.objects.create(user=self.user_b, organization=self.org_b)
+        self.client = Client(HTTP_HOST="localhost")
+        self.client.force_login(self.user_a)
+
+        self.location_a = Locations.objects.create(
+            organization=self.org_a,
+            loc_name="Org A Range",
+            loc_short="A",
+        )
+        self.location_b = Locations.objects.create(
+            organization=self.org_b,
+            loc_name="Org B Range",
+            loc_short="B",
+        )
+        self.course_a = Course.objects.create(
+            organization=self.org_a,
+            course_name="Org A Activity",
+            abriviation="OAA",
+            course_len=1,
+        )
+        self.course_a.primary_locs.add(self.location_a)
+        self.course_b = Course.objects.create(
+            organization=self.org_b,
+            course_name="Org B Activity",
+            abriviation="OBB",
+            course_len=1,
+        )
+        self.course_b.primary_locs.add(self.location_b)
+        self.school_a = Schools.schools_list.create(
+            organization=self.org_a,
+            school_name="Org A School",
+            arrive="Thur",
+            depart="Fri",
+            total_students=16,
+            ag_num=1,
+            attending_year="2026-06-04",
+        )
+        self.school_a.subject.add(self.course_a)
+        self.school_b = Schools.schools_list.create(
+            organization=self.org_b,
+            school_name="Org B School",
+            arrive="Thur",
+            depart="Fri",
+            total_students=16,
+            ag_num=1,
+            attending_year="2026-06-04",
+        )
+        self.school_b.subject.add(self.course_b)
+        self.schedule_a = TheSched.objects.create(
+            organization=self.org_a,
+            sched_name="Org A Schedule",
+            sched_data={},
+        )
+        self.schedule_a.schools.add(self.school_a)
+        self.schedule_b = TheSched.objects.create(
+            organization=self.org_b,
+            sched_name="Org B Schedule",
+            sched_data={},
+        )
+        self.schedule_b.schools.add(self.school_b)
+
+    def test_users_cannot_see_another_organizations_records_in_lists(self):
+        list_expectations = (
+            (reverse("location-list"), "Org A Range", "Org B Range"),
+            (reverse("course-list"), "Org A Activity", "Org B Activity"),
+            (reverse("school-list"), "Org A School", "Org B School"),
+            (reverse("sched-list"), "Org A Schedule", "Org B Schedule"),
+        )
+
+        for url, visible_text, hidden_text in list_expectations:
+            with self.subTest(url=url):
+                response = self.client.get(url)
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, visible_text)
+                self.assertNotContains(response, hidden_text)
+
+    def test_url_tampering_cannot_access_another_organizations_schedule(self):
+        response = self.client.get(reverse("sched-detail", args=[self.schedule_b.id]))
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_url_tampering_cannot_access_another_organizations_detail_objects(self):
+        protected_urls = (
+            reverse("location-detail", args=[self.location_b.id]),
+            reverse("course-detail", args=[self.course_b.id]),
+            reverse("school-detail", args=[self.school_b.id]),
+        )
+
+        for url in protected_urls:
+            with self.subTest(url=url):
+                response = self.client.get(url)
+                self.assertEqual(response.status_code, 404)
+
+    def test_users_cannot_edit_another_organizations_records(self):
+        response = self.client.post(
+            reverse("location-update", args=[self.location_b.id]),
+            {
+                "loc_name": "Tampered Location",
+                "loc_short": "TMP",
+                "description": "Should not save.",
+                "availible": "on",
+            },
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.location_b.refresh_from_db()
+        self.assertEqual(self.location_b.loc_name, "Org B Range")
+
+    def test_users_cannot_delete_another_organizations_records(self):
+        response = self.client.post(reverse("course-delete", args=[self.course_b.id]))
+
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(Course.objects.filter(pk=self.course_b.pk).exists())
+
+    def test_authorized_user_can_delete_own_location(self):
+        location = Locations.objects.create(
+            organization=self.org_a,
+            loc_name="Org A Temporary Location",
+            loc_short="TMP",
+        )
+
+        response = self.client.post(reverse("location-delete", args=[location.id]))
+
+        self.assertRedirects(response, reverse("location-list"))
+        self.assertFalse(Locations.objects.filter(pk=location.pk).exists())
+
+    def test_users_cannot_delete_another_organizations_location(self):
+        response = self.client.post(reverse("location-delete", args=[self.location_b.id]))
+
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(Locations.objects.filter(pk=self.location_b.pk).exists())
+
+    def test_create_operations_assign_current_users_organization(self):
+        location_response = self.client.post(
+            reverse("add-loc"),
+            {
+                "loc_name": "Created For A",
+                "loc_short": "CFA",
+                "description": "Created through canonical form.",
+                "availible": "on",
+            },
+        )
+        self.assertRedirects(location_response, reverse("location-list"))
+        location = Locations.objects.get(loc_name="Created For A")
+        self.assertEqual(location.organization, self.org_a)
+
+        schedule_response = self.client.post(
+            reverse("sched-create"),
+            {"sched_name": "Created Schedule For A", "schools": [str(self.school_a.id)]},
+        )
+        self.assertRedirects(schedule_response, reverse("sched-list"))
+        schedule = TheSched.objects.get(sched_name="Created Schedule For A")
+        self.assertEqual(schedule.organization, self.org_a)
+        self.assertEqual(list(schedule.schools.all()), [self.school_a])
+
+    def test_form_choices_only_include_current_users_organization(self):
+        course_response = self.client.get(reverse("course-create"))
+        self.assertContains(course_response, "Org A Range")
+        self.assertNotContains(course_response, "Org B Range")
+
+        schedule_response = self.client.get(reverse("sched-create"))
+        self.assertContains(schedule_response, "Org A School")
+        self.assertNotContains(schedule_response, "Org B School")
+
+    def test_schedule_create_rejects_other_organizations_school_ids(self):
+        response = self.client.post(
+            reverse("sched-create"),
+            {"sched_name": "Tampered Schedule", "schools": [str(self.school_b.id)]},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(TheSched.objects.filter(sched_name="Tampered Schedule").exists())
+        self.assertContains(response, "Select a valid choice")
+
+    def test_schedule_generation_uses_only_current_organization_owned_lookup_data(self):
+        self.course_a.course_name = "Shared Activity"
+        self.course_a.abriviation = "SHA"
+        self.course_a.save(update_fields=["course_name", "abriviation"])
+        self.course_b.course_name = "Shared Activity"
+        self.course_b.abriviation = "SHB"
+        self.course_b.save(update_fields=["course_name", "abriviation"])
+        self.school_a.update_sorted_subject_lst()
+        self.school_a.save(update_fields=["sorted_subject_lst"])
+        self.school_b.update_sorted_subject_lst()
+        self.school_b.save(update_fields=["sorted_subject_lst"])
+
+        response = self.client.post(reverse("sched-generate", args=[self.schedule_a.id]))
+
+        self.assertRedirects(response, reverse("sched-detail", args=[self.schedule_a.id]))
+        self.assertEqual(class_locs["Shared Activity"], ["Org A Range"])
+        self.assertEqual(class_len["Shared Activity"], 1)
+        self.assertEqual(master_locs, ["Org A Range"])
 
 
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
