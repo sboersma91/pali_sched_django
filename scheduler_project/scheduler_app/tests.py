@@ -1,9 +1,11 @@
 import csv
+import json
 from copy import deepcopy
 from io import StringIO
 from unittest.mock import PropertyMock, patch
 
 from django.contrib.auth import get_user_model
+from django.db import IntegrityError
 from django.template.loader import render_to_string
 from django.test import Client, RequestFactory, TestCase, override_settings
 from django.urls import reverse
@@ -38,6 +40,7 @@ from .schedule_operations import (
 )
 from .models import (
     Course,
+    Instructor,
     Locations,
     Schools,
     TheSched,
@@ -47,6 +50,13 @@ from .models import (
     master_locs,
     summarize_generation_completion,
 )
+from members.models import Organization, OrganizationMembership
+
+
+def force_login_operator(client):
+    user = get_user_model().objects.create_user(username="operator", password="password")
+    client.force_login(user)
+    return user
 
 
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
@@ -92,8 +102,8 @@ class PublicLandingPageTests(TestCase):
         response = self.client.get(reverse("home"))
 
         self.assertContains(response, f'<a href="{reverse("login")}" class="btn btn-primary btn-lg">Log In</a>', html=True)
-        self.assertContains(response, f'<a href="{reverse("register_user")}" class="btn btn-outline-primary btn-lg">Create Account</a>', html=True)
         self.assertNotContains(response, "Open Operational Dashboard")
+        self.assertNotContains(response, "Create Account")
 
     def test_public_home_shows_dashboard_action_for_authenticated_user(self):
         user = get_user_model().objects.create_user(username="operator", password="password")
@@ -118,7 +128,7 @@ class PublicShellPresentationTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, f'<a class="navbar-brand" href="{reverse("home")}">FlowLine</a>', html=True)
         self.assertContains(response, f'<a class="nav-link" href="{reverse("login")}">Log In</a>', html=True)
-        self.assertContains(response, f'<a class="nav-link" href="{reverse("register_user")}">Create Account</a>', html=True)
+        self.assertNotContains(response, "Create Account")
         for removed_content in ("Plans", "Contact", "Payed", "Search Venues"):
             with self.subTest(content=removed_content):
                 self.assertNotContains(response, removed_content)
@@ -132,18 +142,17 @@ class PublicShellPresentationTests(TestCase):
         response = self.client.get(reverse("home"))
 
         self.assertContains(response, f'<a class="nav-link" href="{reverse("home-paid")}">Open Dashboard</a>', html=True)
-        self.assertContains(response, f'<a class="nav-link" href="{reverse("logout")}">Log Out</a>', html=True)
+        self.assertContains(response, f'<form action="{reverse("logout")}" method="post">', html=False)
+        self.assertContains(response, 'type="submit" class="nav-link btn btn-link">Log Out</button>', html=False)
         self.assertNotContains(response, f'<a class="nav-link" href="{reverse("login")}">Log In</a>', html=True)
-        self.assertNotContains(response, f'<a class="nav-link" href="{reverse("register_user")}">Create Account</a>', html=True)
+        self.assertNotContains(response, "Create Account")
 
     def test_public_base_renders_default_and_page_specific_titles(self):
         home_response = self.client.get(reverse("home"))
         login_response = self.client.get(reverse("login"))
-        register_response = self.client.get(reverse("register_user"))
 
         self.assertContains(home_response, "<title>FlowLine</title>", html=True)
         self.assertContains(login_response, "<title>Log In | FlowLine</title>", html=True)
-        self.assertContains(register_response, "<title>Create Account | FlowLine</title>", html=True)
         self.assertNotContains(home_response, "Hello, world!")
 
     def test_login_page_renders_improved_presentation_and_existing_form_action(self):
@@ -153,29 +162,415 @@ class PublicShellPresentationTests(TestCase):
         self.assertContains(response, '<h1 class="h3 mb-2">Log In</h1>', html=True)
         self.assertContains(response, "Access the operational dashboard to prepare and review schedules.")
         self.assertContains(response, f'<form action="{reverse("login")}" method="post">', html=False)
-        self.assertContains(response, '<label for="username" class="form-label">Username</label>', html=True)
+        self.assertContains(response, '<label for="id_username" class="form-label">Username</label>', html=True)
         self.assertContains(response, '<button type="submit" class="btn btn-primary w-100">Log In</button>', html=True)
         self.assertNotContains(response, ">Submit</button>", html=False)
         self.assertNotContains(response, "Email address")
 
-    def test_registration_page_renders_improved_presentation_and_existing_form_action(self):
-        response = self.client.get(reverse("register_user"))
+@override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
+class AuthenticationFlowTests(TestCase):
+    def setUp(self):
+        self.client = Client(HTTP_HOST="localhost")
+        self.user = get_user_model().objects.create_user(
+            username="operator",
+            password="correct-password",
+        )
+        self.schedule = TheSched.objects.create(sched_name="Protected Schedule", sched_data={})
+
+    def test_anonymous_users_are_redirected_to_login_for_protected_pages(self):
+        protected_urls = (
+            reverse("home-paid"),
+            reverse("sched-list"),
+            reverse("sched-detail", args=[self.schedule.id]),
+            reverse("sched-create"),
+            reverse("sched-export", args=[self.schedule.id]),
+            reverse("course-list"),
+            reverse("school-list"),
+            reverse("location-list"),
+        )
+
+        for url in protected_urls:
+            with self.subTest(url=url):
+                response = self.client.get(url)
+                self.assertRedirects(response, f"{reverse('login')}?next={url}")
+
+    def test_authenticated_users_can_access_protected_pages(self):
+        self.client.force_login(self.user)
+
+        response = self.client.get(reverse("home-paid"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, '<h1 class="h3 mb-2">Create Account</h1>', html=True)
-        self.assertContains(response, "Create an account to access the FlowLine operational tools.")
-        self.assertContains(response, f'<form action="{reverse("register_user")}" method="post">', html=False)
-        self.assertContains(response, '<button type="submit" class="btn btn-primary">Create Account</button>', html=True)
-        self.assertContains(response, "Back to Log In")
-        self.assertNotContains(response, "User Registratioon")
-        self.assertNotContains(response, "Something went wrong??")
+        self.assertContains(response, "Operational Dashboard")
 
+    def test_login_succeeds_with_valid_credentials(self):
+        response = self.client.post(
+            reverse("login"),
+            {"username": "operator", "password": "correct-password"},
+        )
+
+        self.assertRedirects(response, reverse("home-paid"))
+        self.assertIn("_auth_user_id", self.client.session)
+
+    def test_login_displays_authentication_errors(self):
+        response = self.client.post(
+            reverse("login"),
+            {"username": "operator", "password": "wrong-password"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Please enter a correct username and password.")
+        self.assertNotIn("_auth_user_id", self.client.session)
+
+    def test_logout_terminates_the_session(self):
+        self.client.force_login(self.user)
+
+        response = self.client.post(reverse("logout"))
+
+        self.assertRedirects(response, reverse("login"))
+        self.assertNotIn("_auth_user_id", self.client.session)
+
+
+class OrganizationOwnershipModelTests(TestCase):
+    def setUp(self):
+        self.default_organization = Organization.objects.create(name="Default Test Organization")
+        self.other_organization = Organization.objects.create(name="Other Test Organization")
+
+    def test_customer_owned_models_can_be_assigned_to_organizations(self):
+        location = Locations.objects.create(
+            organization=self.default_organization,
+            loc_name="Waterfront",
+            loc_short="WF",
+        )
+        course = Course.objects.create(
+            organization=self.default_organization,
+            course_name="Canoeing",
+            abriviation="CAN",
+            course_len=1,
+        )
+        course.primary_locs.add(location)
+        school = Schools.schools_list.create(
+            organization=self.default_organization,
+            school_name="Lake School",
+            arrive="Thur",
+            depart="Fri",
+            total_students=16,
+            ag_num=1,
+            attending_year="2026-06-04",
+        )
+        school.subject.add(course)
+        schedule = TheSched.objects.create(
+            organization=self.default_organization,
+            sched_name="Lake Schedule",
+            sched_data={},
+        )
+        schedule.schools.add(school)
+        instructor = Instructor.objects.create(
+            organization=self.default_organization,
+            fname="Jordan",
+            lname="River",
+            ropes_lead=False,
+            school_lead=True,
+            cpr=True,
+            firstaid="yes",
+        )
+
+        self.assertEqual(location.organization, self.default_organization)
+        self.assertEqual(course.organization, self.default_organization)
+        self.assertEqual(school.organization, self.default_organization)
+        self.assertEqual(schedule.organization, self.default_organization)
+        self.assertEqual(instructor.organization, self.default_organization)
+
+    def test_customer_owned_models_default_to_default_organization_when_not_explicitly_assigned(self):
+        location = Locations.objects.create(loc_name="Defaulted Location", loc_short="DL")
+        course = Course.objects.create(course_name="Defaulted Course", abriviation="DC", course_len=1)
+        school = Schools.schools_list.create(
+            school_name="Defaulted School",
+            arrive="Thur",
+            depart="Fri",
+            total_students=16,
+            ag_num=1,
+            attending_year="2026-06-04",
+        )
+        schedule = TheSched.objects.create(sched_name="Defaulted Schedule", sched_data={})
+        instructor = Instructor.objects.create(
+            fname="Defaulted",
+            lname="Instructor",
+            ropes_lead=False,
+            school_lead=False,
+            cpr=True,
+            firstaid="yes",
+        )
+
+        default_organization = Organization.objects.get(name="Default Organization")
+        self.assertEqual(location.organization, default_organization)
+        self.assertEqual(course.organization, default_organization)
+        self.assertEqual(school.organization, default_organization)
+        self.assertEqual(schedule.organization, default_organization)
+        self.assertEqual(instructor.organization, default_organization)
+
+    def test_names_can_repeat_across_organizations_but_not_within_one_organization(self):
+        Locations.objects.create(
+            organization=self.default_organization,
+            loc_name="Shared Name",
+            loc_short="SN1",
+        )
+        Locations.objects.create(
+            organization=self.other_organization,
+            loc_name="Shared Name",
+            loc_short="SN2",
+        )
+
+        with self.assertRaises(IntegrityError):
+            Locations.objects.create(
+                organization=self.default_organization,
+                loc_name="Shared Name",
+                loc_short="SN3",
+            )
+
+    def test_activity_abbreviations_can_repeat_across_organizations_but_not_within_one_organization(self):
+        Course.objects.create(
+            organization=self.default_organization,
+            course_name="First Activity",
+            abriviation="DUP",
+            course_len=1,
+        )
+        Course.objects.create(
+            organization=self.other_organization,
+            course_name="Second Activity",
+            abriviation="DUP",
+            course_len=1,
+        )
+
+        with self.assertRaises(IntegrityError):
+            Course.objects.create(
+                organization=self.default_organization,
+                course_name="Third Activity",
+                abriviation="DUP",
+                course_len=1,
+            )
+
+    def test_blank_activity_abbreviations_can_repeat_within_one_organization(self):
+        Course.objects.create(
+            organization=self.default_organization,
+            course_name="Blank Abbreviation One",
+            abriviation="",
+            course_len=1,
+        )
+        Course.objects.create(
+            organization=self.default_organization,
+            course_name="Blank Abbreviation Two",
+            abriviation="",
+            course_len=1,
+        )
+
+
+@override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
+class OrganizationEnforcementTests(TestCase):
+    def setUp(self):
+        self.org_a = Organization.objects.create(name="Organization A")
+        self.org_b = Organization.objects.create(name="Organization B")
+        self.user_a = get_user_model().objects.create_user(username="operator-a", password="password")
+        self.user_b = get_user_model().objects.create_user(username="operator-b", password="password")
+        OrganizationMembership.objects.create(user=self.user_a, organization=self.org_a)
+        OrganizationMembership.objects.create(user=self.user_b, organization=self.org_b)
+        self.client = Client(HTTP_HOST="localhost")
+        self.client.force_login(self.user_a)
+
+        self.location_a = Locations.objects.create(
+            organization=self.org_a,
+            loc_name="Org A Range",
+            loc_short="A",
+        )
+        self.location_b = Locations.objects.create(
+            organization=self.org_b,
+            loc_name="Org B Range",
+            loc_short="B",
+        )
+        self.course_a = Course.objects.create(
+            organization=self.org_a,
+            course_name="Org A Activity",
+            abriviation="OAA",
+            course_len=1,
+        )
+        self.course_a.primary_locs.add(self.location_a)
+        self.course_b = Course.objects.create(
+            organization=self.org_b,
+            course_name="Org B Activity",
+            abriviation="OBB",
+            course_len=1,
+        )
+        self.course_b.primary_locs.add(self.location_b)
+        self.school_a = Schools.schools_list.create(
+            organization=self.org_a,
+            school_name="Org A School",
+            arrive="Thur",
+            depart="Fri",
+            total_students=16,
+            ag_num=1,
+            attending_year="2026-06-04",
+        )
+        self.school_a.subject.add(self.course_a)
+        self.school_b = Schools.schools_list.create(
+            organization=self.org_b,
+            school_name="Org B School",
+            arrive="Thur",
+            depart="Fri",
+            total_students=16,
+            ag_num=1,
+            attending_year="2026-06-04",
+        )
+        self.school_b.subject.add(self.course_b)
+        self.schedule_a = TheSched.objects.create(
+            organization=self.org_a,
+            sched_name="Org A Schedule",
+            sched_data={},
+        )
+        self.schedule_a.schools.add(self.school_a)
+        self.schedule_b = TheSched.objects.create(
+            organization=self.org_b,
+            sched_name="Org B Schedule",
+            sched_data={},
+        )
+        self.schedule_b.schools.add(self.school_b)
+
+    def test_users_cannot_see_another_organizations_records_in_lists(self):
+        list_expectations = (
+            (reverse("location-list"), "Org A Range", "Org B Range"),
+            (reverse("course-list"), "Org A Activity", "Org B Activity"),
+            (reverse("school-list"), "Org A School", "Org B School"),
+            (reverse("sched-list"), "Org A Schedule", "Org B Schedule"),
+        )
+
+        for url, visible_text, hidden_text in list_expectations:
+            with self.subTest(url=url):
+                response = self.client.get(url)
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, visible_text)
+                self.assertNotContains(response, hidden_text)
+
+    def test_url_tampering_cannot_access_another_organizations_schedule(self):
+        response = self.client.get(reverse("sched-detail", args=[self.schedule_b.id]))
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_url_tampering_cannot_access_another_organizations_detail_objects(self):
+        protected_urls = (
+            reverse("location-detail", args=[self.location_b.id]),
+            reverse("course-detail", args=[self.course_b.id]),
+            reverse("school-detail", args=[self.school_b.id]),
+        )
+
+        for url in protected_urls:
+            with self.subTest(url=url):
+                response = self.client.get(url)
+                self.assertEqual(response.status_code, 404)
+
+    def test_users_cannot_edit_another_organizations_records(self):
+        response = self.client.post(
+            reverse("location-update", args=[self.location_b.id]),
+            {
+                "loc_name": "Tampered Location",
+                "loc_short": "TMP",
+                "description": "Should not save.",
+                "availible": "on",
+            },
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.location_b.refresh_from_db()
+        self.assertEqual(self.location_b.loc_name, "Org B Range")
+
+    def test_users_cannot_delete_another_organizations_records(self):
+        response = self.client.post(reverse("course-delete", args=[self.course_b.id]))
+
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(Course.objects.filter(pk=self.course_b.pk).exists())
+
+    def test_authorized_user_can_delete_own_location(self):
+        location = Locations.objects.create(
+            organization=self.org_a,
+            loc_name="Org A Temporary Location",
+            loc_short="TMP",
+        )
+
+        response = self.client.post(reverse("location-delete", args=[location.id]))
+
+        self.assertRedirects(response, reverse("location-list"))
+        self.assertFalse(Locations.objects.filter(pk=location.pk).exists())
+
+    def test_users_cannot_delete_another_organizations_location(self):
+        response = self.client.post(reverse("location-delete", args=[self.location_b.id]))
+
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(Locations.objects.filter(pk=self.location_b.pk).exists())
+
+    def test_create_operations_assign_current_users_organization(self):
+        location_response = self.client.post(
+            reverse("add-loc"),
+            {
+                "loc_name": "Created For A",
+                "loc_short": "CFA",
+                "description": "Created through canonical form.",
+                "availible": "on",
+            },
+        )
+        self.assertRedirects(location_response, reverse("location-list"))
+        location = Locations.objects.get(loc_name="Created For A")
+        self.assertEqual(location.organization, self.org_a)
+
+        schedule_response = self.client.post(
+            reverse("sched-create"),
+            {"sched_name": "Created Schedule For A", "schools": [str(self.school_a.id)]},
+        )
+        self.assertRedirects(schedule_response, reverse("sched-list"))
+        schedule = TheSched.objects.get(sched_name="Created Schedule For A")
+        self.assertEqual(schedule.organization, self.org_a)
+        self.assertEqual(list(schedule.schools.all()), [self.school_a])
+
+    def test_form_choices_only_include_current_users_organization(self):
+        course_response = self.client.get(reverse("course-create"))
+        self.assertContains(course_response, "Org A Range")
+        self.assertNotContains(course_response, "Org B Range")
+
+        schedule_response = self.client.get(reverse("sched-create"))
+        self.assertContains(schedule_response, "Org A School")
+        self.assertNotContains(schedule_response, "Org B School")
+
+    def test_schedule_create_rejects_other_organizations_school_ids(self):
+        response = self.client.post(
+            reverse("sched-create"),
+            {"sched_name": "Tampered Schedule", "schools": [str(self.school_b.id)]},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(TheSched.objects.filter(sched_name="Tampered Schedule").exists())
+        self.assertContains(response, "Select a valid choice")
+
+    def test_schedule_generation_uses_only_current_organization_owned_lookup_data(self):
+        self.course_a.course_name = "Shared Activity"
+        self.course_a.abriviation = "SHA"
+        self.course_a.save(update_fields=["course_name", "abriviation"])
+        self.course_b.course_name = "Shared Activity"
+        self.course_b.abriviation = "SHB"
+        self.course_b.save(update_fields=["course_name", "abriviation"])
+        self.school_a.update_sorted_subject_lst()
+        self.school_a.save(update_fields=["sorted_subject_lst"])
+        self.school_b.update_sorted_subject_lst()
+        self.school_b.save(update_fields=["sorted_subject_lst"])
+
+        response = self.client.post(reverse("sched-generate", args=[self.schedule_a.id]))
+
+        self.assertRedirects(response, reverse("sched-detail", args=[self.schedule_a.id]))
+        self.assertEqual(class_locs["Shared Activity"], ["Org A Range"])
+        self.assertEqual(class_len["Shared Activity"], 1)
+        self.assertEqual(master_locs, ["Org A Range"])
 
 
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])
 class PresentationTerminologyTests(TestCase):
     def setUp(self):
         self.client = Client(HTTP_HOST="localhost")
+        force_login_operator(self.client)
 
     def test_public_and_operational_navigation_use_flowline_branding(self):
         for route in ("home", "home-paid"):
@@ -198,6 +593,7 @@ class PresentationTerminologyTests(TestCase):
 class OperationalNavigationTests(TestCase):
     def setUp(self):
         self.client = Client(HTTP_HOST="localhost")
+        force_login_operator(self.client)
 
     def test_operational_navbar_renders_canonical_links(self):
         response = self.client.get(reverse("home-paid"))
@@ -234,19 +630,17 @@ class OperationalNavigationTests(TestCase):
         self.assertNotContains(response, ">Link</a>", html=False)
         self.assertNotContains(response, 'type="search"', html=False)
 
-    def test_operational_navbar_shows_log_in_for_anonymous_user(self):
-        response = self.client.get(reverse("home-paid"))
+    def test_operational_dashboard_redirects_anonymous_user_to_login(self):
+        anonymous_client = Client(HTTP_HOST="localhost")
+        response = anonymous_client.get(reverse("home-paid"))
 
-        self.assertContains(response, f'href="{reverse("login")}">Log In</a>', html=False)
-        self.assertNotContains(response, "Log Out")
+        self.assertRedirects(response, f'{reverse("login")}?next={reverse("home-paid")}')
 
     def test_operational_navbar_shows_log_out_for_authenticated_user(self):
-        user = get_user_model().objects.create_user(username="operator", password="password")
-        self.client.force_login(user)
-
         response = self.client.get(reverse("home-paid"))
 
-        self.assertContains(response, f'href="{reverse("logout")}">Log Out</a>', html=False)
+        self.assertContains(response, f'<form action="{reverse("logout")}" method="post">', html=False)
+        self.assertContains(response, 'type="submit" class="nav-link btn btn-link">Log Out</button>', html=False)
         self.assertNotContains(response, "Log In")
 
 
@@ -254,6 +648,7 @@ class OperationalNavigationTests(TestCase):
 class OperationalDashboardTests(TestCase):
     def setUp(self):
         self.client = Client(HTTP_HOST="localhost")
+        force_login_operator(self.client)
 
     def test_dashboard_replaces_placeholder_with_operational_orientation(self):
         response = self.client.get(reverse("home-paid"))
@@ -325,6 +720,7 @@ class ScheduleOperationsTests(TestCase):
             "display_value": "Adapter Activity",
             "activity_id": activity.id,
             "activity_length": 1,
+            "activity_abbreviation": "AA",
             "is_activity": True,
             "is_empty": False,
             "is_unavailable": False,
@@ -1815,6 +2211,24 @@ class ManualMovePersistenceTests(TestCase):
         self.assertEqual(move_record["status"], "active")
         self.assertTrue(move_record["created_at"].endswith("Z"))
 
+    def test_persists_optional_location_metadata_for_future_location_moves(self):
+        proposal_result = self.build_saveable_result()
+        proposal_result.update({
+            "source_location_id": 11,
+            "source_location_name": "Original Range",
+            "target_location_id": 12,
+            "target_location_name": "Backup Range",
+        })
+
+        move_record = persist_manual_move(self.schedule, proposal_result)
+
+        self.assertEqual(move_record["source_location_id"], 11)
+        self.assertEqual(move_record["source_location_name"], "Original Range")
+        self.assertEqual(move_record["target_location_id"], 12)
+        self.assertEqual(move_record["target_location_name"], "Backup Range")
+        self.schedule.refresh_from_db()
+        self.assertEqual(self.schedule.sched_data["manual_moves"][0], move_record)
+
     def test_normalizes_none_sched_data(self):
         self.assertEqual(
             normalize_sched_data_structure(None),
@@ -2043,6 +2457,26 @@ class ManualMovePersistenceTests(TestCase):
 
         self.assertEqual(generated_schedule, generated_schedule_before)
 
+    def test_display_schedule_result_applies_manual_moves_to_stored_generation_copy(self):
+        generated_schedule = {
+            "ags": ["Persistence School 0"],
+            "mon_pm1": [self.activity.course_name],
+            "tue_am1": ["empty"],
+        }
+        self.schedule.store_generated_schedule(generated_schedule)
+        persist_manual_move(self.schedule, self.build_saveable_result())
+        stored_before = deepcopy(self.schedule.sched_data["generated_schedule"])
+
+        result = self.schedule.get_display_schedule_result()
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(self.schedule.sched_data["generated_schedule"], stored_before)
+        self.assertEqual(result["generated_schedule"], stored_before)
+        self.assertEqual(result["manual_moves"], self.schedule.sched_data["manual_moves"])
+        self.assertEqual(len(result["override_replay_result"]["applied_overrides"]), 1)
+        self.assertEqual(result["schedule_rows"][0]["cells"][0]["raw_value"], "empty")
+        self.assertEqual(result["schedule_rows"][0]["cells"][3]["raw_value"], self.activity.course_name)
+
 
 class MoveProposalSavePolicyTests(TestCase):
     def conflict(self, conflict_type, severity="error"):
@@ -2131,6 +2565,7 @@ class MoveProposalSavePolicyTests(TestCase):
 class ScheduleWorkflowTests(TestCase):
     def setUp(self):
         self.client = Client(HTTP_HOST="localhost")
+        force_login_operator(self.client)
         self.school = Schools.schools_list.create(
             school_name="Existing Schedule School",
             arrive="Thur",
@@ -2163,6 +2598,31 @@ class ScheduleWorkflowTests(TestCase):
         })
         self.schedule.sched_data = sched_data
         self.schedule.save(update_fields=["sched_data"])
+
+    def manual_move_payload(self, activity, **overrides):
+        payload = {
+            "schedule_id": self.schedule.id,
+            "source_schedule_id": self.schedule.id,
+            "target_schedule_id": self.schedule.id,
+            "source_block_id": "0:mon_pm1",
+            "source_activity_id": activity.id,
+            "source_activity_name": activity.course_name,
+            "source_occurrence_id": "occurrence:0:mon_pm1",
+            "source_group_index": 0,
+            "source_slot_key": "mon_pm1",
+            "target_group_index": 0,
+            "target_slot_key": "tue_am1",
+            "action_type": "displacement_move",
+        }
+        payload.update(overrides)
+        return payload
+
+    def post_manual_move(self, payload):
+        return self.client.post(
+            reverse("sched-manual-move", args=[self.schedule.id]),
+            data=json.dumps(payload),
+            content_type="application/json",
+        )
 
     def test_schedule_list_renders_readable_operational_summary(self):
         response = self.client.get(reverse("sched-list"))
@@ -2221,14 +2681,20 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, "Activity Group")
         self.assertContains(response, "Monday")
         self.assertContains(response, "Example School 0")
+        self.assertContains(response, 'class="schedule-row-accent-1"', html=False)
+        self.assertContains(response, 'class="schedule-row-header"', html=False)
+        self.assertContains(response, "Group 1")
         self.assertContains(response, "Archery")
         self.assertContains(
             response,
-            '<a href="?selected_block=0%3Amon_pm1#schedule-workspace" class="text-reset text-decoration-none d-block">Archery</a>',
-            html=True,
+            '<a href="?selected_block=0%3Amon_pm1#schedule-workspace" class="schedule-activity-card" draggable="false" title="Archery">',
+            html=False,
         )
-        self.assertContains(response, "<td>****</td>", html=True)
-        self.assertContains(response, "<td>/////</td>", html=True)
+        self.assertContains(response, '<span class="schedule-drag-handle" aria-hidden="true"></span>', html=False)
+        self.assertContains(response, "****")
+        self.assertContains(response, "/////")
+        self.assertEqual(response.context["schedule_rows"][0]["cells"][1]["display_value"], "****")
+        self.assertEqual(response.context["schedule_rows"][0]["cells"][2]["display_value"], "/////")
         self.assertContains(response, "How this Schedule record works")
         self.assertContains(response, 'id="schedule-workspace"', html=False)
 
@@ -2265,6 +2731,322 @@ class ScheduleWorkflowTests(TestCase):
         self.assertEqual(self.schedule.sched_data["generated_schedule"], generated_schedule)
         self.assertEqual(self.schedule.sched_data["manual_moves"], [])
         self.assertTrue(self.schedule.sched_data["generation_complete"])
+
+    def test_manual_move_endpoint_persists_valid_same_schedule_move(self):
+        activity = Course.objects.create(
+            course_name="Endpoint Move Activity",
+            abriviation="EMA",
+            course_len=1,
+        )
+        generated_schedule = {
+            "ags": ["Endpoint School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+        self.store_generated_schedule(generated_schedule)
+        payload = self.manual_move_payload(
+            activity,
+            source_location_id=1,
+            source_location_name="Original Field",
+            target_location_id=2,
+            target_location_name="Backup Field",
+        )
+
+        with patch.object(TheSched, "create_sched", new_callable=PropertyMock) as create_sched:
+            create_sched.side_effect = AssertionError("Manual move endpoint must not regenerate schedules")
+            response = self.post_manual_move(payload)
+
+        self.schedule.refresh_from_db()
+        response_data = response.json()
+        saved_move = self.schedule.sched_data["manual_moves"][0]
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response_data["ok"])
+        self.assertEqual(len(self.schedule.sched_data["manual_moves"]), 1)
+        self.assertEqual(saved_move["target_slot_key"], "tue_am1")
+        self.assertEqual(saved_move["source_location_name"], "Original Field")
+        self.assertEqual(saved_move["target_location_name"], "Backup Field")
+        self.assertEqual(response_data["manual_move"], saved_move)
+        self.assertEqual(create_sched.call_count, 0)
+
+    def test_manual_move_endpoint_rejects_cross_schedule_move(self):
+        activity = Course.objects.create(
+            course_name="Cross Schedule Activity",
+            abriviation="CSA",
+            course_len=1,
+        )
+        other_schedule = TheSched.objects.create(sched_name="Other Manual Move Schedule", sched_data={})
+        generated_schedule = {
+            "ags": ["Endpoint School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+        self.store_generated_schedule(generated_schedule)
+        payload = self.manual_move_payload(activity, target_schedule_id=other_schedule.id)
+
+        response = self.post_manual_move(payload)
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(response.json()["ok"])
+        self.assertEqual(response.json()["error"]["code"], "cross_schedule_move")
+        self.assertEqual(self.schedule.sched_data["manual_moves"], [])
+
+    def test_manual_move_endpoint_does_not_mutate_generated_schedule(self):
+        activity = Course.objects.create(
+            course_name="Endpoint Immutable Activity",
+            abriviation="EIA",
+            course_len=1,
+        )
+        generated_schedule = {
+            "ags": ["Endpoint School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+        self.store_generated_schedule(generated_schedule)
+        stored_generated_before = deepcopy(self.schedule.sched_data["generated_schedule"])
+
+        response = self.post_manual_move(self.manual_move_payload(activity))
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.schedule.sched_data["generated_schedule"], stored_generated_before)
+
+    def test_manual_move_endpoint_returns_updated_displayed_schedule(self):
+        activity = Course.objects.create(
+            course_name="Endpoint Display Activity",
+            abriviation="EDA",
+            course_len=1,
+        )
+        generated_schedule = {
+            "ags": ["Endpoint School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+        self.store_generated_schedule(generated_schedule)
+
+        response = self.post_manual_move(self.manual_move_payload(activity))
+
+        response_data = response.json()
+        displayed_schedule = response_data["displayed_schedule"]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(displayed_schedule["manual_moves"]), 1)
+        self.assertEqual(len(displayed_schedule["override_replay_result"]["applied_overrides"]), 1)
+        self.assertEqual(displayed_schedule["schedule_rows"][0]["cells"][0]["raw_value"], "empty")
+        self.assertEqual(displayed_schedule["schedule_rows"][0]["cells"][3]["raw_value"], activity.course_name)
+
+    def test_manual_move_endpoint_persists_holding_source_reassignment_with_displacement(self):
+        source = Course.objects.create(course_name="Endpoint Holding Source", abriviation="EHS", course_len=1)
+        displaced = Course.objects.create(course_name="Endpoint Holding Displaced", abriviation="EHD", course_len=1)
+        occupied = Course.objects.create(course_name="Endpoint Holding Occupied", abriviation="EHO", course_len=1)
+        generated_schedule = {
+            "ags": ["Endpoint School 0"],
+            "mon_pm1": [source.course_name],
+            "mon_pm2": [displaced.course_name],
+            "tue_am1": [occupied.course_name],
+        }
+        self.schedule.sched_data = {
+            "version": 1,
+            "manual_moves": [{
+                "source_block_id": "0:mon_pm1",
+                "source_activity_id": source.id,
+                "source_activity_name": source.course_name,
+                "source_occurrence_id": "occurrence:0:mon_pm1",
+                "source_group_index": 0,
+                "source_slot_key": "mon_pm1",
+                "target_group_index": 0,
+                "target_slot_key": "mon_pm2",
+                "move_type": "single_block",
+                "action_type": "displacement_move",
+                "created_at": "2026-06-14T12:00:00Z",
+                "status": "active",
+            }],
+            "generated_schedule": generated_schedule,
+            "generation_complete": True,
+            "generation_diagnostics": [],
+            "generation_runtime_diagnostics": [],
+        }
+        self.schedule.save(update_fields=["sched_data"])
+        payload = {
+            "schedule_id": self.schedule.id,
+            "source_schedule_id": self.schedule.id,
+            "target_schedule_id": self.schedule.id,
+            "source_kind": "holding",
+            "source_holding_id": "holding:override:0:0:mon_pm2:1",
+            "source_activity_id": displaced.id,
+            "source_activity_name": displaced.course_name,
+            "source_occurrence_id": "occurrence:0:mon_pm2",
+            "target_group_index": 0,
+            "target_slot_key": "tue_am1",
+            "action_type": "displacement_move",
+        }
+
+        response = self.post_manual_move(payload)
+
+        self.schedule.refresh_from_db()
+        response_data = response.json()
+        saved_move = self.schedule.sched_data["manual_moves"][1]
+        holding_area = response_data["displayed_schedule"]["override_replay_result"]["holding_area"]
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response_data["ok"])
+        self.assertEqual(saved_move["source_kind"], "holding")
+        self.assertEqual(saved_move["source_holding_id"], "holding:override:0:0:mon_pm2:1")
+        self.assertEqual(saved_move["action_type"], "displacement_move")
+        self.assertEqual(response_data["displayed_schedule"]["schedule_rows"][0]["cells"][3]["activity_id"], displaced.id)
+        self.assertEqual(holding_area[0]["activity_id"], occupied.id)
+
+    def test_manual_move_endpoint_rejects_holding_source_cross_group_move(self):
+        source = Course.objects.create(course_name="Endpoint Holding Cross Source", abriviation="EHCS", course_len=1)
+        displaced = Course.objects.create(course_name="Endpoint Holding Cross Displaced", abriviation="EHCD", course_len=1)
+        generated_schedule = {
+            "ags": ["Endpoint School 0", "Endpoint School 1"],
+            "mon_pm1": [source.course_name, "empty"],
+            "mon_pm2": [displaced.course_name, "empty"],
+            "tue_am1": ["empty", "empty"],
+        }
+        self.schedule.sched_data = {
+            "version": 1,
+            "manual_moves": [{
+                "source_block_id": "0:mon_pm1",
+                "source_activity_id": source.id,
+                "source_activity_name": source.course_name,
+                "source_occurrence_id": "occurrence:0:mon_pm1",
+                "source_group_index": 0,
+                "source_slot_key": "mon_pm1",
+                "target_group_index": 0,
+                "target_slot_key": "mon_pm2",
+                "move_type": "single_block",
+                "action_type": "displacement_move",
+                "created_at": "2026-06-14T12:00:00Z",
+                "status": "active",
+            }],
+            "generated_schedule": generated_schedule,
+            "generation_complete": True,
+            "generation_diagnostics": [],
+            "generation_runtime_diagnostics": [],
+        }
+        self.schedule.save(update_fields=["sched_data"])
+        payload = {
+            "schedule_id": self.schedule.id,
+            "source_kind": "holding",
+            "source_holding_id": "holding:override:0:0:mon_pm2:1",
+            "source_activity_id": displaced.id,
+            "source_activity_name": displaced.course_name,
+            "source_occurrence_id": "occurrence:0:mon_pm2",
+            "target_group_index": 1,
+            "target_slot_key": "tue_am1",
+        }
+
+        response = self.post_manual_move(payload)
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "cross_group_move")
+        self.assertEqual(len(self.schedule.sched_data["manual_moves"]), 1)
+
+    def test_manual_move_endpoint_rejects_missing_payload_fields(self):
+        generated_schedule = {
+            "ags": ["Endpoint School 0"],
+            "mon_pm1": ["Missing Payload Activity"],
+            "tue_am1": ["empty"],
+        }
+        self.store_generated_schedule(generated_schedule)
+
+        response = self.post_manual_move({})
+
+        response_data = response.json()
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response_data["ok"])
+        self.assertEqual(response_data["error"]["code"], "missing_field")
+        self.assertIn("source_block_id", response_data["error"]["fields"])
+        self.assertIn("target_slot_key", response_data["error"]["fields"])
+
+    def test_schedule_detail_renders_drag_and_drop_hooks_for_activity_cells(self):
+        activity = Course.objects.create(
+            course_name="Draggable Activity",
+            abriviation="DA",
+            course_len=1,
+        )
+        generated_schedule = {
+            "ags": ["Endpoint School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+        self.store_generated_schedule(generated_schedule)
+
+        response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
+
+        self.assertContains(response, 'draggable="true"', html=False)
+        self.assertContains(response, 'data-draggable-activity="true"', html=False)
+        self.assertContains(response, 'class="schedule-activity-card"', html=False)
+        self.assertContains(response, 'class="schedule-drag-handle"', html=False)
+        self.assertContains(response, 'class="schedule-activity-code"', html=False)
+        self.assertContains(response, "DA")
+        self.assertContains(response, "text-overflow: ellipsis", html=False)
+        self.assertContains(response, "white-space: nowrap", html=False)
+        self.assertContains(response, "border-left-width: 0.35rem", html=False)
+        self.assertContains(response, ".schedule-group-badge", html=False)
+        self.assertContains(response, 'cursor: grab', html=False)
+        self.assertContains(response, '.schedule-table td.schedule-drop-eligible', html=False)
+        self.assertContains(response, f'data-activity-id="{activity.id}"', html=False)
+        self.assertContains(response, 'data-source-group-index="0"', html=False)
+        self.assertContains(response, 'data-source-slot-key="mon_pm1"', html=False)
+        self.assertContains(response, 'data-drop-target="true"', html=False)
+        self.assertContains(response, 'data-slot-key="tue_am1"', html=False)
+
+    def test_schedule_detail_renders_multi_block_occurrence_as_single_draggable_object(self):
+        activity = Course.objects.create(
+            course_name="Draggable Two Block",
+            abriviation="D2B",
+            course_len=2,
+        )
+        generated_schedule = {
+            "ags": ["Endpoint School 0"],
+            "tue_am1": [activity.course_name],
+            "tue_am2": [activity.course_name],
+            "wed_am1": ["empty"],
+            "wed_am2": ["empty"],
+        }
+        self.store_generated_schedule(generated_schedule)
+
+        response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
+
+        first_block, second_block = response.context["schedule_rows"][0]["cells"][3:5]
+        self.assertTrue(first_block["is_multi_block"])
+        self.assertEqual(first_block["occurrence_position"], 1)
+        self.assertEqual(second_block["occurrence_position"], 2)
+        self.assertContains(response, 'data-block-id="0:tue_am1"', html=False)
+        self.assertContains(response, 'data-source-slot-key="tue_am1"', html=False)
+        self.assertContains(response, 'data-occurrence-length="2"', html=False)
+        self.assertContains(response, 'draggable="true"', count=1, html=False)
+        self.assertContains(response, 'class="schedule-activity-card schedule-activity-card-continuation"', html=False)
+        self.assertContains(response, 'title="Draggable Two Block"', html=False)
+        self.assertNotContains(response, 'class="schedule-activity-length"', html=False)
+        self.assertNotContains(response, "(continues)")
+
+    def test_schedule_detail_renders_manual_move_fetch_workflow(self):
+        activity = Course.objects.create(
+            course_name="Fetch Workflow Activity",
+            abriviation="FWA",
+            course_len=1,
+        )
+        generated_schedule = {
+            "ags": ["Endpoint School 0"],
+            "mon_pm1": [activity.course_name],
+            "tue_am1": ["empty"],
+        }
+        self.store_generated_schedule(generated_schedule)
+
+        response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
+
+        self.assertContains(response, reverse("sched-manual-move", args=[self.schedule.id]))
+        self.assertContains(response, "fetch(manualMoveUrl", html=False)
+        self.assertContains(response, "'X-CSRFToken': getCookie('csrftoken')", html=False)
+        self.assertContains(response, "targetCell.dataset.groupIndex === draggedSource.dataset.sourceGroupIndex", html=False)
+        self.assertContains(response, "source_kind: draggedSource.dataset.sourceKind || 'grid'", html=False)
+        self.assertContains(response, "source_holding_id: draggedSource.dataset.sourceHoldingId", html=False)
+        self.assertContains(response, "showEligibleDropTargets()", html=False)
+        self.assertContains(response, "cell.classList.add('schedule-drop-eligible')", html=False)
+        self.assertContains(response, "window.location.reload()", html=False)
 
     def test_schedule_detail_places_operational_workspace_before_secondary_details(self):
         generated_schedule = {
@@ -2341,7 +3123,7 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, "mon_pm1")
         self.assertContains(response, "Selectable Activity")
         self.assertContains(response, str(activity.id))
-        self.assertContains(response, '<td class="table-primary">', count=1, html=False)
+        self.assertContains(response, 'class="table-primary"', count=1, html=False)
         self.assertNotContains(response, "Multi-block activity occurrence")
         self.assertContains(response, 'method="get"', html=False)
         self.assertContains(response, f'name="source_activity_id" value="{activity.id}"', html=False)
@@ -3190,6 +3972,9 @@ class ScheduleWorkflowTests(TestCase):
         self.assertEqual(duplicate["severity"], "warning")
         self.assertContains(confirm_response, source.course_name)
         self.assertContains(confirm_response, target.course_name)
+        self.assertContains(confirm_response, 'class="schedule-overlap-card"', html=False)
+        self.assertContains(confirm_response, 'class="schedule-overlap-badge"', html=False)
+        self.assertContains(confirm_response, "Overlap")
         self.assertContains(confirm_response, "(proposed overlap)")
         self.assertContains(confirm_response, "Overlap Warning")
         self.assertContains(confirm_response, "This proposed move would save with warnings.")
@@ -3498,6 +4283,8 @@ class ScheduleWorkflowTests(TestCase):
             )
 
         self.assertContains(response, "(persisted overlap)")
+        self.assertContains(response, 'class="schedule-overlap-card"', html=False)
+        self.assertContains(response, 'class="schedule-overlap-badge"', html=False)
         self.assertContains(response, "(proposed)")
         self.assertContains(response, "duplicate_group_slot")
         self.assertTrue(response.context["proposal_result"]["applied"])
@@ -3539,21 +4326,36 @@ class ScheduleWorkflowTests(TestCase):
         self.schedule.refresh_from_db()
         main_target = response.context["schedule_rows"][0]["cells"][1]
         holding_item = response.context["holding_area_preview"][0]
-        self.assertContains(response, "Operational Holding Area")
+        self.assertContains(response, "Supporting Workspace")
+        self.assertContains(response, "Displaced Activities Awaiting Reassignment")
+        self.assertContains(response, "Displaced")
+        self.assertContains(response, 'class="list-group-item px-0 holding-area-item schedule-row-accent-1"', html=False)
+        self.assertContains(response, 'class="schedule-activity-card holding-activity-card"', html=False)
+        self.assertContains(response, 'draggable="true"', html=False)
+        self.assertContains(response, 'data-source-kind="holding"', html=False)
+        self.assertContains(response, 'data-source-holding-id="holding:override:0:0:mon_pm2:1"', html=False)
+        self.assertContains(response, 'aria-label="Drag Preview Holding Displaced from displaced activities to a schedule slot"', html=False)
+        self.assertContains(response, '<span class="schedule-drag-handle" aria-hidden="true"></span>', html=False)
+        self.assertContains(response, 'class="holding-card-meta small"', html=False)
+        self.assertContains(response, 'class="holding-fallback-controls"', html=False)
+        self.assertContains(response, "Fallback reassignment form")
+        self.assertContains(response, 'class="row g-2 align-items-end holding-reassign-form"', html=False)
+        self.assertContains(response, "PHD")
         self.assertContains(
             response,
-            "These activities were displaced by saved displacement moves",
+            "These activities were pushed out by saved displacement moves",
         )
         self.assertContains(response, displaced.course_name)
         self.assertContains(response, "Proposal School 0")
         self.assertContains(response, "PM2")
-        self.assertContains(response, "displaced by saved override 1")
+        self.assertContains(response, "Saved override 1")
         self.assertEqual(response.context["override_replay_result"]["replay_mode"], "overlap")
         self.assertEqual(response.context["displacement_preview"]["replay_mode"], "overlap")
         self.assertEqual(main_target["raw_value"], source.course_name)
         self.assertEqual(main_target["overlapping_blocks"], [])
         self.assertEqual(holding_item["activity_name"], displaced.course_name)
         self.assertEqual(holding_item["activity_id"], displaced.id)
+        self.assertEqual(holding_item["group_accent_class"], "schedule-row-accent-1")
         displacement_applied = response.context["displacement_preview"]["applied_overrides"][0]
         self.assertEqual(displacement_applied["moved_activity_id"], source.id)
         self.assertEqual(displacement_applied["displaced_activity_ids"], [displaced.id])
@@ -3595,10 +4397,10 @@ class ScheduleWorkflowTests(TestCase):
             response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
 
         self.assertEqual(response.context["holding_area_preview"], [])
-        self.assertNotContains(response, "Operational Holding Area")
+        self.assertNotContains(response, "Displaced Activities Awaiting Reassignment")
         self.assertNotContains(
             response,
-            "These activities were displaced by saved displacement moves",
+            "These activities were pushed out by saved displacement moves",
         )
         self.assertEqual(response.context["schedule_rows"][0]["cells"][3]["raw_value"], activity.course_name)
         self.assertEqual(response.context["conflict_summaries"], [])
@@ -3831,7 +4633,7 @@ class ScheduleWorkflowTests(TestCase):
         self.assertEqual(selected_block["occurrence_length"], 2)
         self.assertEqual(selected_block["occurrence_position"], 1)
         self.assertTrue(selected_block["is_multi_block"])
-        self.assertContains(response, '<td class="table-primary">', count=2, html=False)
+        self.assertContains(response, 'class="table-primary"', count=2, html=False)
 
     def test_selecting_second_half_of_multi_block_occurrence_highlights_both_cells_and_shows_metadata(self):
         activity = Course.objects.create(course_name="Selectable Two Block", abriviation="S2B", course_len=2)
@@ -3852,7 +4654,7 @@ class ScheduleWorkflowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(selected_block["block_id"], "0:tue_am2")
         self.assertEqual(response.context["selected_occurrence_id"], "occurrence:0:tue_am1")
-        self.assertContains(response, '<td class="table-primary">', count=2, html=False)
+        self.assertContains(response, 'class="table-primary"', count=2, html=False)
         self.assertContains(response, "Multi-block activity occurrence")
         self.assertContains(response, "Occurrence Length")
         self.assertContains(response, "2 blocks")
@@ -4921,6 +5723,7 @@ class PublicLandingPageTests(TestCase):
         self.archery = Course.objects.create(course_name="Archery", abriviation="ARCH", course_len=1)
         self.archery.primary_locs.add(range_location)
         self.client = Client(HTTP_HOST="localhost")
+        force_login_operator(self.client)
 
     def school_form_data(self, name, subjects, arrive="Mon", depart="Wed"):
         return {
@@ -5334,6 +6137,7 @@ class SchoolActivityBlockValidationTests(TestCase):
         for course in (self.two_block, self.one_block, self.extra_daytime, self.night, self.extra_night):
             course.primary_locs.add(location)
         self.client = Client(HTTP_HOST="localhost")
+        force_login_operator(self.client)
 
     def form_data(self, name, subjects):
         return {
@@ -5418,6 +6222,7 @@ class SchoolActivityBlockValidationTests(TestCase):
 class SchedulingLookupRefreshTests(TestCase):
     def setUp(self):
         self.client = Client(HTTP_HOST="localhost")
+        force_login_operator(self.client)
         self.first_location = Locations.objects.create(loc_name="Training Room", loc_short="TR")
         self.second_location = Locations.objects.create(loc_name="Conference Hall", loc_short="CH")
         self.support_daytime = Course.objects.create(course_name="Support Daytime", abriviation="SD", course_len=2)
@@ -5507,6 +6312,7 @@ class CourseFormWorkflowTests(TestCase):
         )
         self.course.primary_locs.set([self.available_location, self.unavailable_location])
         self.client = Client(HTTP_HOST="localhost")
+        force_login_operator(self.client)
 
     def course_form_data(self, name, abbreviation, course_len, locations):
         return {
@@ -5723,6 +6529,7 @@ class LocationFormWorkflowTests(TestCase):
             availible=True,
         )
         self.client = Client(HTTP_HOST="localhost")
+        force_login_operator(self.client)
 
     def location_form_data(self, name, abbreviation, description, available=True):
         data = {

@@ -14,7 +14,7 @@ predictable, and document known debt before further feature work.
     ├── manage.py                 # run Django commands from this directory
     ├── scheduler_project/        # Django settings and root URL configuration
     ├── scheduler_app/            # scheduling models, views, forms, templates, and tests
-    └── members/                  # custom authentication views/templates
+    └── members/                  # organization models and authentication templates
 ```
 
 `scheduler_app/extra-files/` contains legacy/experimental scheduling helpers. They are retained
@@ -55,7 +55,7 @@ Useful local URLs:
 - `http://127.0.0.1:8000/` — legacy landing page
 - `http://127.0.0.1:8000/home_paid` — operational dashboard
 - `http://127.0.0.1:8000/admin/` — Django admin
-- `http://127.0.0.1:8000/members/login_user` — custom login workflow
+- `http://127.0.0.1:8000/login/` — login workflow
 
 ## SQLite and migration workflow
 
@@ -109,12 +109,23 @@ day's first displayed block. Keep them synchronized with current School accounti
 scheduling search algorithm still relies on existing slot-key naming conventions such as `night`
 and paired `1`/`2` suffixes; changing those conventions requires separately scoped engine work.
 
+## Authentication and organization architecture
+
+The application uses Django's built-in `User` model and login/logout views. Operational scheduling
+data is owned by `Organization`, and users are connected to one organization through
+`OrganizationMembership`. Operational views enforce organization isolation through queryset
+filtering, object lookup protection, form choice filtering, create ownership assignment, protected
+CSV export, and organization-aware schedule generation.
+
+See [Authentication and Authorization Architecture](docs/authentication-authorization-architecture.md)
+for the current model, authorization rules, known limitations, and architecture decision record.
+
 ## Compatibility and known limitations
 
 - Both legacy function-based CRUD routes and newer class-based operational routes remain in use.
   Treat them as compatibility workflows until route-level usage is deliberately reviewed.
-- The custom `members` app overlaps with Django's built-in auth URL include. Preserve current URL
-  behavior until authentication flows receive a focused audit.
+- The `Default Organization` fallback remains for migration safety and legacy compatibility paths.
+  Real users should have explicit `OrganizationMembership` records before production use.
 - A few empty or legacy templates remain in the tree. They are intentionally retained because
   absence of direct references is not yet sufficient proof that external bookmarks or inherited
   compatibility flows do not depend on them.

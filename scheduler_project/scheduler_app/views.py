@@ -1,20 +1,27 @@
 import csv
+import json
 from collections import Counter
 from urllib.parse import urlencode
 
 from django.contrib import messages
 from django.shortcuts import get_object_or_404, render
-from .models import Locations, Course, Schools, TheSched
+from members.models import get_user_organization
+from .models import Instructor, Locations, Course, Schools, TheSched
 from .forms import CourseForm, InstructorForm, LocationsForm, SchedForm, SchoolsForm
-from django.http import HttpResponse, HttpResponseRedirect
+from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
 from django.urls import reverse, reverse_lazy
 from django.utils.text import slugify
+from django.db.models import Prefetch
 from django.db.models.functions import Lower
 
 from .school_accounting import school_slot_accounting_summary
 from .schedule_blocks import SCHEDULE_LEGEND
 from .schedule_operations import (
     DEFAULT_NEW_MOVE_ACTION,
+    GRID_SOURCE_KIND,
+    HOLDING_MOVE_REQUIRED_FIELDS,
+    HOLDING_SOURCE_KIND,
+    MANUAL_MOVE_REQUIRED_FIELDS,
     MalformedSchedDataError,
     MOVE_CONFLICT_SEVERITY,
     SCHEDULE_DAYS,
@@ -42,39 +49,67 @@ from django.views.generic.list import ListView
 from django.views.generic.detail import DetailView
 from django.views.generic.edit import CreateView, UpdateView, DeleteView
 
+
+class OrganizationScopedMixin:
+    organization = None
+
+    def get_organization(self):
+        if self.organization is None:
+            self.organization = get_user_organization(getattr(self.request, 'user', None))
+        return self.organization
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        if hasattr(queryset.model, 'organization'):
+            queryset = queryset.filter(organization=self.get_organization())
+        return queryset
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        form_class = self.get_form_class()
+        if form_class.__module__ == 'scheduler_app.forms':
+            kwargs['organization'] = self.get_organization()
+        return kwargs
+
+    def form_valid(self, form):
+        if hasattr(form, 'instance') and hasattr(form.instance, 'organization_id'):
+            form.instance.organization = self.get_organization()
+        return super().form_valid(form)
+
+
 # Locations 
-class LocationList(ListView):
+class LocationList(OrganizationScopedMixin, ListView):
     model = Locations
     template_name = "pay_end/locations_list.html"
     context_object_name = 'location'
     # paginate_by = 10
     ordering = ['loc_name',]
 
-class LocationDetail(DetailView):
+class LocationDetail(OrganizationScopedMixin, DetailView):
     model = Locations
     template_name = "pay_end/location_detail.html"
     context_object_name = "location"
 
-class LocationCreate(CreateView):
+class LocationCreate(OrganizationScopedMixin, CreateView):
     model = Locations
     form_class = LocationsForm
     template_name = "pay_end/locations_form.html"
     success_url = reverse_lazy('location-list')
 
-class LocationUpdate(UpdateView):
+class LocationUpdate(OrganizationScopedMixin, UpdateView):
     model = Locations
     form_class = LocationsForm
     template_name = "pay_end/locations_form.html"
     success_url = reverse_lazy('location-list')
 
-class LocationDelete(DeleteView):
+class LocationDelete(OrganizationScopedMixin, DeleteView):
     model = Locations
     template_name = "pay_end/location_confirm_delete.html"
     context_object_name = "location"
     success_url = reverse_lazy('location-list')
 
 # Courses 
-class CourseList(ListView):
+class CourseList(OrganizationScopedMixin, ListView):
     model = Course
     context_object_name = 'course'
     template_name = "pay_end/course_list.html"
@@ -82,24 +117,24 @@ class CourseList(ListView):
     # need to create the buttons to use this lul
     ordering = ['course_name',]
     
-class CourseDetail(DetailView):
+class CourseDetail(OrganizationScopedMixin, DetailView):
     model = Course
     template_name = 'pay_end/course_detail.html'
     context_object_name = 'course'
 
-class CourseCreate(CreateView):
+class CourseCreate(OrganizationScopedMixin, CreateView):
     model = Course
     form_class = CourseForm
     template_name = 'pay_end/course_form.html'
     success_url = reverse_lazy('course-list')
 
-class CourseUpdate(UpdateView):
+class CourseUpdate(OrganizationScopedMixin, UpdateView):
     model = Course
     form_class = CourseForm
     template_name = 'pay_end/course_form.html'
     success_url = reverse_lazy('course-list',)
 
-class CourseDelete(DeleteView):
+class CourseDelete(OrganizationScopedMixin, DeleteView):
     model = Course
     template_name = 'pay_end/course_confirm_delete.html'
     fields = "__all__"
@@ -107,13 +142,13 @@ class CourseDelete(DeleteView):
     context_object_name = "school"
 
 # Schools
-class SchoolList(ListView):
+class SchoolList(OrganizationScopedMixin, ListView):
     model = Schools
     template_name = 'pay_end/school_list.html'
     context_object_name = "school"
     ordering = ['school_name']
 
-class SchoolDetail(DetailView):
+class SchoolDetail(OrganizationScopedMixin, DetailView):
     model = Schools
     template_name = 'pay_end/school_detail.html'
     context_object_name = "school"
@@ -125,19 +160,19 @@ class SchoolSlotAccountingMixin:
         return context
 
 
-class SchoolCreate(SchoolSlotAccountingMixin, CreateView):
+class SchoolCreate(SchoolSlotAccountingMixin, OrganizationScopedMixin, CreateView):
     model = Schools
     form_class = SchoolsForm
     template_name = 'pay_end/school_form.html'
     success_url = reverse_lazy('school-list')
 
-class SchoolUpdate(SchoolSlotAccountingMixin, UpdateView):
+class SchoolUpdate(SchoolSlotAccountingMixin, OrganizationScopedMixin, UpdateView):
     model = Schools
     form_class = SchoolsForm
     template_name = 'pay_end/school_form.html'
     success_url = reverse_lazy('school-list')
 
-class SchoolDelete(DeleteView):
+class SchoolDelete(OrganizationScopedMixin, DeleteView):
     model = Schools 
     template_name = 'pay_end/school_confirm_delete.html'
     fields = "__all__"
@@ -224,7 +259,7 @@ def build_localized_failure_explanations(outcome_summary, diagnostics, affected_
     return explanations
 
 
-def build_generation_bottleneck_presentations(diagnostics):
+def build_generation_bottleneck_presentations(diagnostics, organization=None):
     unscheduled = [
         diagnostic
         for diagnostic in diagnostics
@@ -244,12 +279,19 @@ def build_generation_bottleneck_presentations(diagnostics):
             if activity_name:
                 activity_names.add(activity_name)
 
+    activities = Course.objects.filter(course_name__in=activity_names).prefetch_related('primary_locs')
+    if organization is not None:
+        activities = activities.filter(organization=organization)
+
     eligible_locations_by_activity = {
         activity.course_name: [
             location.loc_name
-            for location in activity.primary_locs.filter(availible=True).order_by(Lower('loc_name'))
+            for location in activity.primary_locs.filter(
+                availible=True,
+                organization=activity.organization,
+            ).order_by(Lower('loc_name'))
         ]
-        for activity in Course.objects.filter(course_name__in=activity_names).prefetch_related('primary_locs')
+        for activity in activities
     }
 
     bottlenecks = []
@@ -321,7 +363,11 @@ def build_generation_bottleneck_presentations(diagnostics):
 
 
 def schedule_csv_export(request, pk):
-    schedule_record = get_object_or_404(TheSched, pk=pk)
+    schedule_record = get_object_or_404(
+        TheSched,
+        pk=pk,
+        organization=get_user_organization(getattr(request, 'user', None)),
+    )
     stored_generation = schedule_record.get_stored_generation_result()
     if not stored_generation['has_generated_schedule']:
         return HttpResponse(
@@ -368,16 +414,21 @@ def schedule_csv_export(request, pk):
 
 
 '''Starting of function based views'''
-class SchedList(ListView):
+class SchedList(OrganizationScopedMixin, ListView):
     model = TheSched
     template_name = 'pay_end/sched_list.html'
     context_object_name = 'sched'
     ordering = ['sched_name']
 
     def get_queryset(self):
-        return super().get_queryset().prefetch_related('schools')
+        return super().get_queryset().prefetch_related(
+            Prefetch(
+                'schools',
+                queryset=Schools.schools_list.filter(organization=self.get_organization()).order_by('school_name'),
+            )
+        )
 
-class SchedDetail(DetailView):
+class SchedDetail(OrganizationScopedMixin, DetailView):
     model = TheSched
     template_name = 'pay_end/sched_detail.html'
     context_object_name = 'sched'
@@ -408,7 +459,7 @@ class SchedDetail(DetailView):
         generation_runtime_diagnostics = stored_generation['generation_runtime_diagnostics']
         generation_complete = stored_generation['generation_complete']
 
-        context['selected_schools'] = self.object.schools.order_by('school_name')
+        context['selected_schools'] = self.object.owned_schools().order_by('school_name')
         context['schedule_days'] = SCHEDULE_DAYS
         context['schedule_legend'] = SCHEDULE_LEGEND
         context['schedule_rows'] = []
@@ -428,7 +479,10 @@ class SchedDetail(DetailView):
         context['has_generated_schedule'] = stored_generation['has_generated_schedule']
         context['generation_diagnostics'] = generation_diagnostics
         context['generation_runtime_diagnostics'] = generation_runtime_diagnostics
-        bottleneck_summary = build_generation_bottleneck_presentations(generation_runtime_diagnostics)
+        bottleneck_summary = build_generation_bottleneck_presentations(
+            generation_runtime_diagnostics,
+            organization=self.object.organization,
+        )
         context['generation_bottlenecks'] = bottleneck_summary['bottlenecks']
         context['generation_affected_activities'] = bottleneck_summary['affected_activities']
         context['generation_outcome_summary'] = next(
@@ -466,7 +520,7 @@ class SchedDetail(DetailView):
 
         schedule = stored_generation['generated_schedule']
         schedule_days = SCHEDULE_DAYS
-        schedule_rows = build_schedule_blocks(schedule)
+        schedule_rows = build_schedule_blocks(schedule, organization=self.object.organization)
         replay_result = apply_persisted_overrides(self.object, schedule_rows)
         proposal_input = self.get_move_proposal_input()
         selected_block_id = proposal_input['source_block_id']
@@ -599,7 +653,7 @@ class SchedDetail(DetailView):
         return context
 
 
-class SchedGenerate(DetailView):
+class SchedGenerate(OrganizationScopedMixin, DetailView):
     model = TheSched
     http_method_names = ['post']
 
@@ -722,7 +776,222 @@ class SchedMoveSave(SchedMoveConfirm):
         return HttpResponseRedirect(self.get_proposal_redirect_url(confirmed=True))
 
 
-class SchedDataRepair(DetailView):
+class SchedManualMoveEndpoint(OrganizationScopedMixin, DetailView):
+    model = TheSched
+    http_method_names = ['post']
+
+    required_payload_fields = MANUAL_MOVE_REQUIRED_FIELDS
+    holding_required_payload_fields = HOLDING_MOVE_REQUIRED_FIELDS
+    optional_location_fields = (
+        'source_location_id',
+        'source_location_name',
+        'target_location_id',
+        'target_location_name',
+    )
+
+    def post(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        payload, error_response = self.get_json_payload(request)
+        if error_response:
+            return error_response
+
+        stored_generation = self.object.get_stored_generation_result()
+        if not stored_generation['has_generated_schedule']:
+            return self.error_response(
+                'missing_generated_schedule',
+                'Manual moves require stored generated schedule output.',
+                status=409,
+            )
+
+        sched_data_diagnostic = diagnose_sched_data_structure(self.object.sched_data)
+        if sched_data_diagnostic['status'] == 'malformed':
+            return self.error_response(
+                'malformed_sched_data',
+                sched_data_diagnostic['message'],
+                status=400,
+            )
+
+        source_kind = payload.get('source_kind') or GRID_SOURCE_KIND
+        required_fields = (
+            self.holding_required_payload_fields
+            if source_kind == HOLDING_SOURCE_KIND
+            else self.required_payload_fields
+        )
+        missing_fields = [field for field in required_fields if payload.get(field) in (None, '')]
+        if missing_fields:
+            return self.error_response(
+                'missing_field',
+                'Manual move payload is missing required fields.',
+                status=400,
+                fields=missing_fields,
+            )
+        if source_kind not in (GRID_SOURCE_KIND, HOLDING_SOURCE_KIND):
+            return self.error_response(
+                'unsupported_source_kind',
+                'The requested operational move source is not supported.',
+                status=400,
+            )
+
+        ownership_error = self.validate_payload_ownership(payload)
+        if ownership_error:
+            return ownership_error
+
+        target_group_index = self.parse_int(payload.get('target_group_index'))
+        source_activity_id = self.parse_int(payload.get('source_activity_id'))
+        source_group_index = self.parse_int(payload.get('source_group_index'))
+        if source_kind == GRID_SOURCE_KIND and source_group_index is None:
+            return self.error_response(
+                'invalid_payload',
+                'Manual move payload contains invalid numeric identity fields.',
+                status=400,
+            )
+        if None in (target_group_index, source_activity_id):
+            return self.error_response(
+                'invalid_payload',
+                'Manual move payload contains invalid numeric identity fields.',
+                status=400,
+            )
+
+        display_result = self.object.get_display_schedule_result()
+        schedule_rows = display_result['schedule_rows']
+        if source_kind == HOLDING_SOURCE_KIND:
+            holding_area = display_result['override_replay_result']['holding_area']
+            source_holding = next(
+                (
+                    item
+                    for item in holding_area
+                    if item.get('holding_id') == payload.get('source_holding_id')
+                ),
+                None,
+            )
+            if source_holding and source_holding.get('origin_group_index') != target_group_index:
+                return self.error_response(
+                    'cross_group_move',
+                    'Manual moves must stay within the same school/group schedule.',
+                    status=403,
+                )
+            proposal_result = apply_holding_reassignment_proposal(schedule_rows, holding_area, {
+                'source_holding_id': payload.get('source_holding_id'),
+                'source_activity_id': source_activity_id,
+                'source_activity_name': payload.get('source_activity_name'),
+                'source_occurrence_id': payload.get('source_occurrence_id'),
+                'target_slot_key': payload.get('target_slot_key'),
+                'target_group_index': target_group_index,
+                'action_type': payload.get('action_type') or DEFAULT_NEW_MOVE_ACTION,
+            })
+        else:
+            proposal_result = apply_move_proposal(schedule_rows, {
+                'source_block_id': payload.get('source_block_id'),
+                'source_activity_id': source_activity_id,
+                'source_activity_name': payload.get('source_activity_name'),
+                'source_occurrence_id': payload.get('source_occurrence_id'),
+                'source_group_index': source_group_index,
+                'source_slot_key': payload.get('source_slot_key'),
+                'target_slot_key': payload.get('target_slot_key'),
+                'target_group_index': target_group_index,
+                'action_type': payload.get('action_type') or DEFAULT_NEW_MOVE_ACTION,
+            })
+        conflict_summaries = validate_schedule_blocks(schedule_rows)
+        proposal_result['conflicts'] = conflict_summaries
+        save_readiness = evaluate_move_proposal_for_save(proposal_result)
+
+        if not proposal_result.get('applied'):
+            return self.error_response(
+                proposal_result.get('error') or 'invalid_move',
+                proposal_result.get('message') or 'Manual move could not be applied.',
+                status=400,
+                save_readiness=save_readiness,
+            )
+        if not save_readiness['can_save']:
+            return self.error_response(
+                'unsaveable_move',
+                save_readiness['operator_message'],
+                status=400,
+                save_readiness=save_readiness,
+            )
+
+        for field in self.optional_location_fields:
+            if payload.get(field) not in (None, ''):
+                proposal_result[field] = payload[field]
+
+        try:
+            move_record = persist_manual_move(self.object, proposal_result)
+        except MalformedSchedDataError as error:
+            return self.error_response('malformed_sched_data', error.operator_message, status=400)
+        except ValueError as error:
+            return self.error_response('invalid_move', str(error), status=400)
+
+        return JsonResponse({
+            'ok': True,
+            'manual_move': move_record,
+            'displayed_schedule': self.serialize_display_schedule(
+                self.object.get_display_schedule_result()
+            ),
+        })
+
+    def get_json_payload(self, request):
+        if request.content_type == 'application/json':
+            try:
+                return json.loads(request.body.decode('utf-8') or '{}'), None
+            except json.JSONDecodeError:
+                return None, self.error_response(
+                    'invalid_json',
+                    'Request body must be valid JSON.',
+                    status=400,
+                )
+        return request.POST.dict(), None
+
+    def validate_payload_ownership(self, payload):
+        for field in ('schedule_id', 'source_schedule_id', 'target_schedule_id'):
+            if payload.get(field) in (None, ''):
+                continue
+            if self.parse_int(payload.get(field)) != self.object.pk:
+                return self.error_response(
+                    'cross_schedule_move',
+                    'Manual moves must stay within the selected Schedule record.',
+                    status=403,
+                )
+
+        source_group_index = self.parse_int(payload.get('source_group_index'))
+        target_group_index = self.parse_int(payload.get('target_group_index'))
+        if source_group_index is not None and target_group_index is not None:
+            if source_group_index != target_group_index:
+                return self.error_response(
+                    'cross_group_move',
+                    'Manual moves must stay within the same school/group schedule.',
+                    status=403,
+                )
+        return None
+
+    def serialize_display_schedule(self, display_result):
+        return {
+            'has_generated_schedule': display_result['has_generated_schedule'],
+            'generation_complete': display_result['generation_complete'],
+            'generation_diagnostics': display_result['generation_diagnostics'],
+            'generation_runtime_diagnostics': display_result['generation_runtime_diagnostics'],
+            'manual_moves': display_result.get('manual_moves', []),
+            'schedule_rows': display_result.get('schedule_rows', []),
+            'override_replay_result': display_result.get('override_replay_result'),
+        }
+
+    def parse_int(self, value):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def error_response(self, code, message, status=400, **extra):
+        return JsonResponse({
+            'ok': False,
+            'error': {
+                'code': code,
+                'message': message,
+                **extra,
+            },
+        }, status=status)
+
+
+class SchedDataRepair(OrganizationScopedMixin, DetailView):
     model = TheSched
     http_method_names = ['post']
 
@@ -744,19 +1013,19 @@ class SchedDataRepair(DetailView):
         return HttpResponseRedirect(reverse('sched-detail', args=[self.object.pk]))
 
 
-class SchedCreate(CreateView):
+class SchedCreate(OrganizationScopedMixin, CreateView):
     model = TheSched
     template_name = 'pay_end/sched_form.html'
     form_class = SchedForm
     success_url = reverse_lazy('sched-list')
 
-class SchedUpdate(UpdateView):
+class SchedUpdate(OrganizationScopedMixin, UpdateView):
     model = TheSched
     template_name = 'pay_end/sched_form.html'
     form_class = SchedForm
     success_url = reverse_lazy('sched-list')
 
-class SchedDelete(DeleteView):
+class SchedDelete(OrganizationScopedMixin, DeleteView):
     model = TheSched
     template_name = 'pay_end/sched_confirm_delete.html'
     fields = "__all__"
@@ -764,64 +1033,80 @@ class SchedDelete(DeleteView):
     context_object_name = "sched"
 
 def class_view(request):
-    location = Locations.objects.all()
+    location = Locations.objects.filter(organization=get_user_organization(request.user))
     return render(request, 'pay_end/class_view.html', {'location':location,})
 
 def add_location(request):
+    organization = get_user_organization(request.user)
     submitted = False
-    location = Locations.objects
+    location = Locations.objects.filter(organization=organization)
     if request.method == "POST":
-        form = LocationsForm(request.POST)
+        form = LocationsForm(request.POST, organization=organization)
         if form.is_valid():
-            form.save()
+            location_record = form.save(commit=False)
+            location_record.organization = organization
+            location_record.save()
             return HttpResponseRedirect('/add_location?submitted=True')
         # if not form.is_valid: probably reload page? or redirect with submitted in the thing?
     else:
-        form = LocationsForm()
+        form = LocationsForm(organization=organization)
         if 'submitted' in request.GET:
             submitted = True
     
     return render(request, 'pay_end/add_location.html', {'form': form, 'submitted' : submitted, 'location':location})
 
 def add_course(request):
+    organization = get_user_organization(request.user)
     submitted = False
     if request.method == "POST":
-        form = CourseForm(request.POST)
+        form = CourseForm(request.POST, organization=organization)
         if form.is_valid():
-            form.save()
+            course = form.save(commit=False)
+            course.organization = organization
+            course.save()
+            form.save_m2m()
             return HttpResponseRedirect('/add_course?submitted=True')
     else:
-        form = CourseForm()
+        form = CourseForm(organization=organization)
         if 'submitted' in request.GET:
             submitted = True
             
     return render(request, 'pay_end/add_course.html', {'form': form, 'submitted' : submitted })
 
 def add_instructor(request):
+    organization = get_user_organization(request.user)
     submitted=False
     if request.method == "POST":
-        form = InstructorForm(request.POST)
+        form = InstructorForm(request.POST, organization=organization)
         if form.is_valid():
-            form.save()
+            instructor = form.save(commit=False)
+            instructor.organization = organization
+            instructor.save()
             return HttpResponseRedirect('/add_instructor.html?sumbitted=True')
         else:
             return render(request, 'pay_end/home_pay.html',{})
     else:
-        form = InstructorForm            
+        form = InstructorForm(organization=organization)
         if 'submitted' in request.GET:
             submitted=True
     return render(request, 'pay_end/add_instructor.html',{'form':form, 'submitted': submitted})
 
 def add_school(request):
+    organization = get_user_organization(request.user)
     submitted = False
     if request.method == "POST":
-        form = SchoolsForm(request.POST)
+        form = SchoolsForm(request.POST, organization=organization)
         if form.is_valid():
-            form.save()
+            school = form.save(commit=False)
+            school.organization = organization
+            school.save()
+            form.save_m2m()
+            school.update_sorted_subject_lst()
+            school.save(update_fields=['sorted_subject_lst'])
             return HttpResponseRedirect('/add_school?submitted=True')
             # added the ppl_temps to the front of ^^^
     else:
-        form = SchoolsForm()
+        form = SchoolsForm(organization=organization)
         if 'submitted' in request.GET:
             submitted = True
 

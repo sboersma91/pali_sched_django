@@ -1,12 +1,11 @@
 from collections import Counter
 from copy import deepcopy
 
-from django.db.models import CASCADE
+from django.db.models import CASCADE, PROTECT, Q, UniqueConstraint
 from django.db import models
 from django.db.models.fields import BooleanField, CharField, IntegerField, SmallIntegerField, TextField, DateField
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db.models.fields.related import ManyToManyField, ForeignKey
-from django.db import connection
 from django.db.models import JSONField
 
 from .schedule_blocks import (
@@ -26,8 +25,21 @@ from .schedule_feasibility import audit_schedule_feasibility
 wk_days = WEEKDAY_CHOICES
 # ('stored in DB', "shown on screen" )
 
+
+def get_default_organization_id():
+    from members.models import get_default_organization
+
+    return get_default_organization().pk
+
+
 class Locations(models.Model):
-    loc_name = CharField(max_length=100, unique=True)
+    organization = ForeignKey(
+        'members.Organization',
+        on_delete=PROTECT,
+        related_name='locations',
+        default=get_default_organization_id,
+    )
+    loc_name = CharField(max_length=100)
     # capicty = SmallIntegerField()
     loc_short = CharField(max_length=5, null=True, default='5 character max')
     description = TextField(default= 'Notes for the new people', blank=True, null=True)
@@ -36,13 +48,24 @@ class Locations(models.Model):
     def __str__(self):
         return self.loc_name
 
+    class Meta:
+        constraints = [
+            UniqueConstraint(fields=['organization', 'loc_name'], name='unique_location_name_per_organization'),
+        ]
+
     # a secondary locations, it cannot also be  foreign key otherwise it errors
     # coures length Night == 0 will need to add help tool here.
     # num_staff = SmallIntegerField()
 
 class Course(models.Model):
-    course_name =  CharField(max_length=120,unique=True,)
-    abriviation = CharField(max_length=5, unique=True, blank=True, null=True, default='5 character max')
+    organization = ForeignKey(
+        'members.Organization',
+        on_delete=PROTECT,
+        related_name='courses',
+        default=get_default_organization_id,
+    )
+    course_name =  CharField(max_length=120)
+    abriviation = CharField(max_length=5, blank=True, null=True, default='5 character max')
     primary_locs =  ManyToManyField(Locations)
     course_len = SmallIntegerField(
         default=1, 
@@ -53,46 +76,56 @@ class Course(models.Model):
     def __str__(self):
         return self.course_name
 
+    class Meta:
+        constraints = [
+            UniqueConstraint(fields=['organization', 'course_name'], name='unique_course_name_per_organization'),
+            UniqueConstraint(
+                fields=['organization', 'abriviation'],
+                condition=Q(abriviation__isnull=False) & ~Q(abriviation=''),
+                name='unique_course_abbreviation_per_organization',
+            ),
+        ]
+
 
 master_locs = []
-def create_master_locs():
-    for l in Locations.objects.raw('SELECT loc_name, id FROM scheduler_app_locations WHERE availible = 1'):
-        master_locs.append(l.loc_name)
+def create_master_locs(organization=None):
+    queryset = Locations.objects.filter(availible=True)
+    if organization is not None:
+        queryset = queryset.filter(organization=organization)
+    for location_name in queryset.values_list('loc_name', flat=True):
+        master_locs.append(location_name)
     return master_locs
 
 class_len = {}
 class_locs = {}
-def create_class_len_dict():
-    for t11 in Course.objects.raw('SELECT * FROM scheduler_app_course'):
-        class_len[t11.course_name] = t11.course_len
-    return class_locs
-def create_class_locs_dict():
-    with connection.cursor() as cursor:
-        query = """SELECT scheduler_app_course.course_name, scheduler_app_locations.loc_name 
-        FROM 
-        scheduler_app_course 
-        LEFT JOIN 
-        scheduler_app_course_primary_locs 
-        ON 
-        scheduler_app_course.id = scheduler_app_course_primary_locs.course_id 
-        LEFT JOIN 
-        scheduler_app_locations 
-        ON 
-        scheduler_app_course_primary_locs.locations_id = scheduler_app_locations.id 
-        WHERE scheduler_app_locations.availible = 1"""
-        cursor.execute(query)
-        row = cursor.fetchall()
+def create_class_len_dict(organization=None):
+    queryset = Course.objects.all()
+    if organization is not None:
+        queryset = queryset.filter(organization=organization)
+    for course_name, course_len in queryset.values_list('course_name', 'course_len'):
+        class_len[course_name] = course_len
+    return class_len
+def create_class_locs_dict(organization=None):
+    queryset = Course.objects.prefetch_related('primary_locs').all()
+    if organization is not None:
+        queryset = queryset.filter(organization=organization)
 
-    for r in row:
-        if r[0] not in class_locs:
-            class_locs[r[0]]= [r[1],]
+    for course in queryset:
+        for location_name in course.primary_locs.filter(
+            availible=True,
+            organization=course.organization,
+        ).values_list('loc_name', flat=True):
+            if course.course_name not in class_locs:
+                class_locs[course.course_name] = [location_name]
+                continue
+            if location_name not in class_locs[course.course_name]:
+                class_locs[course.course_name].append(location_name)
             continue
-        if r[0] in class_locs and r[1] not in class_locs[r[0]]:
-            class_locs[r[0]].append(r[1])
     return class_locs
 
 
 scheduling_data_initialized = False
+scheduling_data_initialized_organization_id = None
 GENERATION_SEARCH_MAX_ATTEMPTS = 100000
 LOCALIZED_FAILURE_COMPLETION_THRESHOLD = 80.0
 
@@ -166,22 +199,35 @@ def summarize_generation_completion(schedule, expected_activities_by_group, clas
     }
 
 
-def initialize_scheduling_data(force=False):
+def initialize_scheduling_data(force=False, organization=None):
     global scheduling_data_initialized
-    if scheduling_data_initialized and not force:
+    global scheduling_data_initialized_organization_id
+    organization_id = organization.pk if organization is not None else None
+    if (
+        scheduling_data_initialized
+        and scheduling_data_initialized_organization_id == organization_id
+        and not force
+    ):
         return
 
     master_locs.clear()
     class_locs.clear()
     class_len.clear()
-    create_master_locs()
-    create_class_locs_dict()
-    create_class_len_dict()
+    create_master_locs(organization=organization)
+    create_class_locs_dict(organization=organization)
+    create_class_len_dict(organization=organization)
     scheduling_data_initialized = True
+    scheduling_data_initialized_organization_id = organization_id
 
 
 class Schools(models.Model):
-    school_name = CharField(max_length=150, unique=True,)
+    organization = ForeignKey(
+        'members.Organization',
+        on_delete=PROTECT,
+        related_name='schools',
+        default=get_default_organization_id,
+    )
+    school_name = CharField(max_length=150)
     subject = ManyToManyField(Course)
     arrive = CharField(max_length=50, choices=wk_days)
     depart = CharField(max_length=50, choices=wk_days)
@@ -209,7 +255,7 @@ class Schools(models.Model):
 
     def update_sorted_subject_lst(self, class_len_lookup=None, class_locs_lookup=None):
         if class_len_lookup is None or class_locs_lookup is None:
-            initialize_scheduling_data(force=True)
+            initialize_scheduling_data(force=True, organization=self.organization)
             class_len_lookup = class_len
             class_locs_lookup = class_locs
         # Sorted order = Two Block w/ loc, two block no loc, one block w/ loc, one block no loc, night
@@ -273,8 +319,19 @@ class Schools(models.Model):
     def __str__(self):
         return self.school_name # + ' ' + self.attending_year # need to change data type of attending_year??
 
+    class Meta:
+        constraints = [
+            UniqueConstraint(fields=['organization', 'school_name'], name='unique_school_name_per_organization'),
+        ]
+
 
 class TheSched(models.Model):
+    organization = ForeignKey(
+        'members.Organization',
+        on_delete=PROTECT,
+        related_name='schedules',
+        default=get_default_organization_id,
+    )
     sched_name = CharField(max_length=150)
     schools = ManyToManyField(Schools)
     sched_data = JSONField(null=True)
@@ -284,6 +341,11 @@ class TheSched(models.Model):
 
     def __str__(self):
         return self.sched_name
+
+    class Meta:
+        constraints = [
+            UniqueConstraint(fields=['organization', 'sched_name'], name='unique_schedule_name_per_organization'),
+        ]
 
     def get_stored_generation_result(self):
         if not isinstance(self.sched_data, dict) or "generated_schedule" not in self.sched_data:
@@ -303,6 +365,39 @@ class TheSched(models.Model):
                 self.sched_data.get("generation_runtime_diagnostics") or []
             ),
             "generation_complete": self.sched_data.get("generation_complete", True),
+        }
+
+    def get_manual_moves(self):
+        if not isinstance(self.sched_data, dict):
+            return []
+        manual_moves = self.sched_data.get("manual_moves")
+        if not isinstance(manual_moves, list):
+            return []
+        return deepcopy(manual_moves)
+
+    def owned_schools(self):
+        return self.schools.filter(organization=self.organization)
+
+    def get_display_schedule_result(self):
+        stored_generation = self.get_stored_generation_result()
+        if not stored_generation["has_generated_schedule"]:
+            return {
+                **stored_generation,
+                "schedule_rows": [],
+                "override_replay_result": None,
+            }
+
+        from .schedule_operations import apply_persisted_overrides, build_schedule_blocks
+
+        generated_schedule = deepcopy(stored_generation["generated_schedule"])
+        schedule_rows = build_schedule_blocks(generated_schedule, organization=self.organization)
+        replay_result = apply_persisted_overrides(self, schedule_rows)
+        return {
+            **stored_generation,
+            "generated_schedule": generated_schedule,
+            "manual_moves": self.get_manual_moves(),
+            "schedule_rows": schedule_rows,
+            "override_replay_result": replay_result,
         }
 
     def store_generated_schedule(self, generated_schedule):
@@ -326,8 +421,8 @@ class TheSched(models.Model):
     def get_scheduling_diagnostics(self, class_locs_lookup=None):
         class_locs_lookup = class_locs if class_locs_lookup is None else class_locs_lookup
         diagnostics = []
-        for school in self.schools.all():
-            for activity in school.subject.all():
+        for school in self.owned_schools():
+            for activity in school.subject.filter(organization=self.organization):
                 if not activity.primary_locs.exists():
                     reason = "Activity is not connected to any scheduling Locations."
                 elif not activity.primary_locs.filter(availible=True).exists():
@@ -350,7 +445,7 @@ class TheSched(models.Model):
         master_locs_lookup = set(master_locs_lookup)
         special_capacity_locs = {'Various', 'Manz'}
 
-        for school in self.schools.all():
+        for school in self.owned_schools():
             available_slot_blocks = slot_blocks[DAY_OFFSETS[school.arrive]:DAY_OFFSETS[school.depart]]
             available_slot_keys = {slot_key for slot_key, _slot_kind in available_slot_blocks}
             night_slots = [
@@ -369,7 +464,7 @@ class TheSched(models.Model):
                 if '1' in slot_key and slot_key[:-1] + '2' in available_slot_keys
             ]
 
-            for activity in school.subject.all():
+            for activity in school.subject.filter(organization=self.organization):
                 activity_name = activity.course_name
                 activity_len = class_len_lookup[activity_name]
                 eligible_locs = [
@@ -411,7 +506,7 @@ class TheSched(models.Model):
 
     @property
     def create_sched(self): #save(self, *args, **kwargs):
-        initialize_scheduling_data(force=True)
+        initialize_scheduling_data(force=True, organization=self.organization)
         local_class_locs = {
             activity_name: list(locations)
             for activity_name, locations in class_locs.items()
@@ -425,7 +520,7 @@ class TheSched(models.Model):
             return {}
 
         count=0
-        for school in self.schools.all():
+        for school in self.owned_schools():
             count+= school.ag_num
         global sched
         sched = {slot_key: [UNAVAILABLE_SLOT_VALUE] * count for slot_key in SCHEDULE_SLOT_KEYS}
@@ -436,7 +531,7 @@ class TheSched(models.Model):
         group_count=0
         day_offset = {'Mon':0, "Tue":5, "Wed":10, "Thur":15, "Fri":19}
         #  day_end_offsett = {'Mon':, 'Tues':, 'Wed':,'Fri':}
-        for school in self.schools.all():
+        for school in self.owned_schools():
             school.update_sorted_subject_lst(local_class_len, local_class_locs)
             sorted_subjects = [subject for subject in school.sorted_subject_lst.split(',') if subject]
             for i in range(school.ag_num):
@@ -607,7 +702,7 @@ class TheSched(models.Model):
             return diagnostics
 
         feasibility_audit = audit_schedule_feasibility(
-            self.schools.all(),
+            self.owned_schools(),
             local_class_locs,
             local_class_len,
             local_master_locs,
@@ -627,7 +722,7 @@ class TheSched(models.Model):
 
         time_slots = list(SCHEDULE_SLOT_KEYS)
         locs_open = {
-            loc:{slot: 3 if loc in local_class_locs['Ropes'] else 1 for slot in time_slots} for loc in local_master_locs
+            loc:{slot: 3 if loc in local_class_locs.get('Ropes', []) else 1 for slot in time_slots} for loc in local_master_locs
         }  
         locs_open['Various'] = {slot:100 for slot in time_slots}
         locs_open['Manz'] = {slot:10 for slot in time_slots}
@@ -742,6 +837,12 @@ class TheSched(models.Model):
 
 
 class Instructor(models.Model):
+    organization = ForeignKey(
+        'members.Organization',
+        on_delete=PROTECT,
+        related_name='instructors',
+        default=get_default_organization_id,
+    )
     fname = CharField(max_length=450)
     lname = CharField(max_length=450)
     ropes_lead = BooleanField()

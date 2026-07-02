@@ -22,9 +22,13 @@ def suggest_activity_group_count(total_students):
 
 
 class LocationsForm(ModelForm):
+    def __init__(self, *args, **kwargs):
+        self.organization = kwargs.pop('organization', None)
+        super().__init__(*args, **kwargs)
+
     class Meta:
         model = Locations
-        fields = "__all__"
+        fields = ('loc_name', 'loc_short', 'description', 'availible')
         labels = {
             'loc_name': 'Location Name',
             'loc_short': 'Abbreviation',
@@ -59,9 +63,14 @@ class CourseForm(ModelForm):
     )
 
     def __init__(self, *args, **kwargs):
+        self.organization = kwargs.pop('organization', None)
         super().__init__(*args, **kwargs)
         locations_by_availability = {True: [], False: []}
-        for location in Locations.objects.order_by('-availible', Lower('loc_name')):
+        locations = Locations.objects.order_by('-availible', Lower('loc_name'))
+        if self.organization is not None:
+            locations = locations.filter(organization=self.organization)
+        self.fields['primary_locs'].queryset = locations
+        for location in locations:
             locations_by_availability[location.availible].append(location)
 
         self.fields['primary_locs'].choices = [
@@ -85,7 +94,7 @@ class CourseForm(ModelForm):
 
     class Meta:
         model = Course
-        fields = '__all__'
+        fields = ('course_name', 'abriviation', 'primary_locs', 'course_len')
         labels = {
             'course_name': 'Activity Name',
             'abriviation': 'Abbreviation',
@@ -122,6 +131,7 @@ class SchoolsForm(ModelForm):
     )
 
     def __init__(self, *args, **kwargs):
+        self.organization = kwargs.pop('organization', None)
         bound_data = args[0] if args else kwargs.get('data')
         if bound_data is not None and not bound_data.get('ag_num'):
             suggested_group_count = suggest_activity_group_count(bound_data.get('total_students'))
@@ -137,7 +147,11 @@ class SchoolsForm(ModelForm):
         courses_by_length = {
             course_len: [] for course_len, _group_label, _cost_label in self.ACTIVITY_GROUPS
         }
-        for course in Course.objects.order_by('-course_len', Lower('course_name')):
+        courses = Course.objects.order_by('-course_len', Lower('course_name'))
+        if self.organization is not None:
+            courses = courses.filter(organization=self.organization)
+        self.fields['subject'].queryset = courses
+        for course in courses:
             courses_by_length[course.course_len].append(course)
 
         self.fields['subject'].choices = [
@@ -165,6 +179,8 @@ class SchoolsForm(ModelForm):
         arrive = cleaned_data.get('arrive')
         depart = cleaned_data.get('depart')
         subjects = cleaned_data.get('subject', Course.objects.none())
+        if self.organization is not None:
+            subjects = subjects.filter(organization=self.organization)
         if not arrive or not depart:
             return cleaned_data
 
@@ -239,8 +255,12 @@ class SchoolsForm(ModelForm):
 
 class SchedForm(ModelForm):
     def __init__(self, *args, **kwargs):
+        self.organization = kwargs.pop('organization', None)
         super().__init__(*args, **kwargs)
-        self.fields['schools'].queryset = Schools.schools_list.order_by(Lower('school_name'))
+        schools = Schools.schools_list.order_by(Lower('school_name'))
+        if self.organization is not None:
+            schools = schools.filter(organization=self.organization)
+        self.fields['schools'].queryset = schools
 
     def save(self, commit=True):
         schedule = super().save(commit=False)
@@ -268,6 +288,10 @@ class SchedForm(ModelForm):
         }
 
 class InstructorForm(ModelForm):
+    def __init__(self, *args, **kwargs):
+        self.organization = kwargs.pop('organization', None)
+        super().__init__(*args, **kwargs)
+
     class Meta:
         model = Instructor
         fields = ('fname', 'lname', 'ropes_lead', 'school_lead',

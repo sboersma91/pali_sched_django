@@ -43,6 +43,10 @@ derived holding source instead of a grid source:
   "source_occurrence_id": "occurrence:0:tue_am1",
   "target_group_index": 0,
   "target_slot_key": "wed_am1",
+  "source_location_id": 11,
+  "source_location_name": "Original Range",
+  "target_location_id": 12,
+  "target_location_name": "Backup Range",
   "move_type": "occurrence",
   "action_type": "displacement_move",
   "occurrence_length": 2,
@@ -65,6 +69,8 @@ derived holding source instead of a grid source:
 - `source_occurrence_id`: expected normalized occurrence identity when available.
 - `source_group_index` and `source_slot_key`: explicit source coordinates for diagnostics and future migration.
 - `target_group_index` and `target_slot_key`: requested destination coordinates.
+- `source_location_id` and `source_location_name`: optional source location snapshot for future location-aware editing.
+- `target_location_id` and `target_location_name`: optional target location snapshot for future location-aware editing.
 - `move_type`: supported values are `single_block` and `occurrence`. Two-block
   activities persist as occurrence moves and must replay as a whole.
 - `action_type`: explicit replay behavior. Supported values are `overlap_move` and `displacement_move`.
