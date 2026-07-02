@@ -67,7 +67,7 @@ Holding items intentionally have no current `slot_key`, `group_index`, or
 Two-block activities appear as one holding item with `occurrence_length: 2` and
 the full source footprint in `source_block_ids` / `source_slot_keys`.
 
-## Schedule Detail Holding Panel
+## Schedule Detail Supporting Workspace
 
 The schedule detail page replays each saved action according to its explicit
 action type:
@@ -75,12 +75,21 @@ action type:
 1. Legacy and `overlap_move` records retain overlap behavior.
 2. `displacement_move` records replace the target primary and derive holding items.
 
-The holding panel appears when displacement actions produce holding items.
-Operators can explicitly select `overlap_move` for advanced or legacy workflows.
+The Supporting Workspace appears when displacement actions produce holding
+items. Operators can explicitly select `overlap_move` for advanced or legacy
+workflows through fallback controls, but Phase 1 drag/drop defaults to
+`displacement_move`.
 
-Holding items expose a simple reassignment workflow:
+Holding items expose a card-based reassignment workflow:
 
-1. Select a derived holding item.
+1. Drag a derived holding item card.
+2. Drop it onto a valid schedule slot in the same origin group.
+3. POST a holding-source payload to the existing manual move endpoint.
+4. Persist a new manual move with `source_kind: "holding"`.
+
+The older reassignment form remains available as a collapsed fallback:
+
+1. Expand the fallback reassignment form.
 2. Choose target group, target slot, and occupied-target behavior.
 3. Preview the reassignment with GET parameters.
 4. Confirm and save through the existing server-side POST contract.
@@ -171,11 +180,13 @@ become fragile if history is imported, merged, or repaired.
 
 ## UI Implications
 
-The schedule detail page includes a holding-area panel near the schedule grid:
+The schedule detail page includes a Supporting Workspace near the schedule grid:
 
-- Show activity name, original group/slot, displacement reason, and occurrence length.
-- Make holding items selectable using their derived holding ID.
-- Allow previewing assignment into a grid destination.
+- Show activity name, original group/slot, displacement reason, occurrence
+  length, and origin group color.
+- Make holding items draggable using their derived holding ID.
+- Allow drag/drop assignment into a same-group grid destination.
+- Keep the old preview assignment form as a fallback, not the primary workflow.
 - Clearly show unassigned displaced activities when present.
 - Keep holding items out of schedule table columns and conflict cell styling.
 - Warn before leaving the workspace while holding items remain unassigned, but do not silently place them.
@@ -189,4 +200,5 @@ Retain overlap support for legacy records and explicit exceptional workflows.
 1. Add clearer management controls for unresolved holding items.
 2. Add stable action IDs before any import/export or history-repair workflow.
 3. Add operator-managed supersession without deleting legacy overlap history.
-4. Add workspace-state editing or drag/drop only after override management is stable.
+4. Add workspace-state editing after override management is stable. Basic
+   holding-source drag/drop is complete in Operational Workspace UX Phase 1.

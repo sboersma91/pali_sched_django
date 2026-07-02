@@ -5,11 +5,15 @@
     <div>
       <p class="text-uppercase text-muted small mb-1">Generated Schedule</p>
       <h1 class="mb-1">{{ sched.sched_name }}</h1>
-      <p class="text-muted mb-0">Current operational output generated when this page was opened.</p>
+      <p class="text-muted mb-0">Stored operational output from the most recent intentional generation.</p>
     </div>
     <div class="d-flex flex-wrap gap-2">
-      {% if not generation_blocked %}
-        <a href="{% url 'sched-export' sched.id %}" class="btn btn-primary">Export CSV</a>
+      <form method="post" action="{% url 'sched-generate' sched.id %}">
+        {% csrf_token %}
+        <button type="submit" class="btn btn-primary">Generate Schedule</button>
+      </form>
+      {% if has_generated_schedule and not generation_blocked %}
+        <a href="{% url 'sched-export' sched.id %}" class="btn btn-outline-success">Export CSV</a>
       {% endif %}
       <a href="{% url 'sched-update' sched.id %}" class="btn btn-secondary">Edit Schedule Record</a>
       <a href="{% url 'sched-delete' sched.id %}" class="btn btn-outline-danger">Delete Schedule</a>
@@ -17,7 +21,14 @@
     </div>
   </div>
 
-  {% if not generation_blocked %}
+  {% if not has_generated_schedule %}
+    <section class="mb-4" aria-labelledby="empty-schedule-heading">
+      <div class="alert alert-info" role="status">
+        <h2 id="empty-schedule-heading" class="h4 alert-heading">No Generated Schedule Yet</h2>
+        <p class="mb-0">This Schedule record has not stored generated output yet. Use Generate Schedule when you are ready to create one.</p>
+      </div>
+    </section>
+  {% elif not generation_blocked %}
   <section id="schedule-workspace" class="mb-4" aria-labelledby="generated-schedule-heading" tabindex="-1">
     <div class="mb-3">
       <h2 id="generated-schedule-heading" class="h3 mb-1">{% if generation_incomplete %}Incomplete Schedule Output{% else %}Generated Schedule{% endif %}</h2>
@@ -28,6 +39,242 @@
         <span><strong>(persisted)</strong> = saved manual override</span>
         <span><strong>(proposed)</strong> = temporary move proposal</span>
       </div>
+      <style>
+        .schedule-table td {
+          min-width: 5.75rem;
+          vertical-align: middle;
+        }
+        .schedule-table tbody tr,
+        .holding-area-item {
+          --group-accent: #6c757d;
+          --group-soft: #f8f9fa;
+        }
+        .schedule-table tbody tr.schedule-row-accent-1,
+        .holding-area-item.schedule-row-accent-1 {
+          --group-accent: #0d6efd;
+          --group-soft: #eef5ff;
+        }
+        .schedule-table tbody tr.schedule-row-accent-2,
+        .holding-area-item.schedule-row-accent-2 {
+          --group-accent: #198754;
+          --group-soft: #edf8f2;
+        }
+        .schedule-table tbody tr.schedule-row-accent-3,
+        .holding-area-item.schedule-row-accent-3 {
+          --group-accent: #6f42c1;
+          --group-soft: #f3effb;
+        }
+        .schedule-table tbody tr.schedule-row-accent-4,
+        .holding-area-item.schedule-row-accent-4 {
+          --group-accent: #fd7e14;
+          --group-soft: #fff4e8;
+        }
+        .schedule-row-header {
+          background: var(--group-soft);
+          border-left: 0.35rem solid var(--group-accent);
+          min-width: 10rem;
+          text-align: left;
+          white-space: normal;
+        }
+        .schedule-group-badge {
+          background: var(--group-accent);
+          border-radius: 999px;
+          color: #ffffff;
+          display: inline-block;
+          font-size: 0.7rem;
+          font-weight: 700;
+          line-height: 1;
+          margin-bottom: 0.25rem;
+          padding: 0.2rem 0.45rem;
+        }
+        .schedule-group-name {
+          display: block;
+          font-weight: 700;
+          line-height: 1.2;
+        }
+        .schedule-table td[data-drop-target="true"] {
+          transition: background-color 0.15s ease, box-shadow 0.15s ease, outline-color 0.15s ease;
+        }
+        .schedule-table td[data-draggable-activity="true"] {
+          cursor: grab;
+        }
+        .schedule-table td[data-draggable-activity="true"]:active,
+        .schedule-table td.schedule-dragging {
+          cursor: grabbing;
+        }
+        .schedule-table td.schedule-dragging {
+          opacity: 0.55;
+          box-shadow: inset 0 0 0 2px #0d6efd;
+        }
+        .schedule-table td.schedule-drop-eligible {
+          background-color: #f0f7ff;
+          box-shadow: inset 0 0 0 1px #9ec5fe;
+        }
+        .schedule-table td.schedule-drop-active {
+          background-color: #d1e7dd;
+          outline: 2px solid #198754;
+          outline-offset: -2px;
+          box-shadow: inset 0 0 0 2px #198754;
+        }
+        .schedule-activity-card {
+          align-items: center;
+          background: #ffffff;
+          border: 1px solid var(--group-accent);
+          border-left-width: 0.35rem;
+          border-radius: 0.35rem;
+          box-shadow: 0 1px 2px rgba(13, 110, 253, 0.18);
+          color: #212529;
+          cursor: grab;
+          display: inline-flex;
+          font-weight: 600;
+          gap: 0.25rem;
+          justify-content: flex-start;
+          min-height: 2rem;
+          max-width: 100%;
+          overflow: hidden;
+          padding: 0.25rem 0.35rem;
+          text-decoration: none;
+          white-space: nowrap;
+          width: 100%;
+        }
+        .schedule-activity-card-continuation {
+          background: var(--group-soft);
+          border-style: dashed;
+          box-shadow: none;
+          color: #495057;
+          cursor: default;
+        }
+        .schedule-activity-card:hover,
+        .schedule-activity-card:focus {
+          background: var(--group-soft);
+          color: #000000;
+          text-decoration: none;
+        }
+        .schedule-dragging .schedule-activity-card {
+          background: #cfe2ff;
+          border-color: #0d6efd;
+          box-shadow: 0 0.25rem 0.75rem rgba(13, 110, 253, 0.3);
+          cursor: grabbing;
+          transform: scale(0.98);
+        }
+        .schedule-activity-card.schedule-dragging {
+          background: #cfe2ff;
+          border-color: #0d6efd;
+          box-shadow: 0 0.25rem 0.75rem rgba(13, 110, 253, 0.3);
+          cursor: grabbing;
+          opacity: 0.65;
+          transform: scale(0.98);
+        }
+        .schedule-drag-handle {
+          flex: 0 0 auto;
+          height: 0.95rem;
+          opacity: 0.55;
+          width: 0.32rem;
+        }
+        .schedule-drag-handle::before {
+          border-left: 1px solid #495057;
+          border-right: 1px solid #495057;
+          content: "";
+          display: block;
+          height: 100%;
+          width: 100%;
+        }
+        .schedule-activity-code,
+        .schedule-overlap-badge {
+          border-radius: 999px;
+          flex: 0 0 auto;
+          font-size: 0.68rem;
+          font-weight: 700;
+          line-height: 1;
+          padding: 0.16rem 0.38rem;
+          text-transform: uppercase;
+        }
+        .schedule-activity-code {
+          background: var(--group-accent);
+          color: #ffffff;
+        }
+        .schedule-activity-name {
+          flex: 1 1 auto;
+          min-width: 0;
+          overflow: hidden;
+          text-align: left;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .schedule-overlap-card {
+          align-items: center;
+          background: #fff3cd;
+          border: 1px solid #ffda6a;
+          border-radius: 0.35rem;
+          color: #664d03;
+          display: flex;
+          font-size: 0.82rem;
+          font-weight: 600;
+          gap: 0.3rem;
+          margin-top: 0.35rem;
+          padding: 0.25rem 0.35rem;
+          text-align: left;
+        }
+        .schedule-overlap-badge {
+          background: #ffc107;
+          color: #212529;
+        }
+        .schedule-overlap-link,
+        .schedule-overlap-name {
+          color: inherit;
+          min-width: 0;
+          overflow-wrap: anywhere;
+          text-decoration: none;
+        }
+        .holding-area-item {
+          background: var(--group-soft);
+          border-left: 0.35rem solid var(--group-accent);
+          padding: 0.75rem 0 0.85rem 0.75rem;
+        }
+        .holding-area-status {
+          font-size: 0.7rem;
+          letter-spacing: 0.02em;
+        }
+        .holding-activity-card {
+          background: #ffffff;
+          border-color: var(--group-accent);
+          border-left-color: var(--group-accent);
+          box-shadow: 0 1px 2px rgba(255, 193, 7, 0.22);
+          cursor: grab;
+          margin-bottom: 0.45rem;
+          max-width: 28rem;
+        }
+        .holding-activity-card .schedule-activity-code {
+          background: var(--group-accent);
+          color: #ffffff;
+        }
+        .holding-card-meta {
+          color: #495057;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 0.35rem 0.75rem;
+          margin: 0.15rem 0 0.35rem;
+        }
+        .holding-card-meta span {
+          white-space: nowrap;
+        }
+        .holding-reassign-form {
+          border-top: 1px solid #ffe69c;
+          margin-top: 0.6rem;
+          padding-top: 0.65rem;
+        }
+        .holding-fallback-controls {
+          margin-top: 0.5rem;
+        }
+        .holding-fallback-controls summary {
+          color: #6c757d;
+          cursor: pointer;
+          font-size: 0.85rem;
+        }
+        .holding-fallback-controls[open] summary {
+          margin-bottom: 0.35rem;
+        }
+      </style>
     </div>
     {% if override_replay_result.applied_overrides %}
       <div class="alert alert-secondary mb-3" role="status">
@@ -35,61 +282,81 @@
       </div>
     {% endif %}
     {% if holding_area_preview %}
-      <div class="card border-warning mb-3" aria-labelledby="holding-area-preview-heading">
+      <div class="card border-warning mb-3 bg-light" aria-labelledby="holding-area-preview-heading">
         <div class="card-body">
-          <h3 id="holding-area-preview-heading" class="h5 card-title">Operational Holding Area</h3>
-          <p class="mb-3">These activities were displaced by saved displacement moves and remain visible while awaiting reassignment.</p>
+          <p class="text-uppercase text-muted small mb-1">Supporting Workspace</p>
+          <h3 id="holding-area-preview-heading" class="h5 card-title">Displaced Activities Awaiting Reassignment</h3>
+          <p class="mb-3">These activities were pushed out by saved displacement moves. They stay visible here until an operator assigns them back into the schedule grid.</p>
           <ul class="list-group list-group-flush">
             {% for item in holding_area_preview %}
-              <li class="list-group-item px-0">
-                <strong>{{ item.display_value }}</strong>
-                {% if item.occurrence_length and item.occurrence_length > 1 %}
-                  <span class="badge bg-warning text-dark ms-2">{{ item.occurrence_length }}-block occurrence</span>
-                {% endif %}
-                <span class="d-block small">
-                  Source: {{ item.origin_group_label }} — {{ item.origin_slot_label }}
-                  (<code>{{ item.origin_slot_key }}</code>)
-                </span>
-                <span class="d-block small">
-                  Reason: displaced by saved override {{ item.displaced_by_override_index|add:"1" }}.
-                </span>
-                <form method="get" action="{% url 'sched-detail' sched.id %}#schedule-workspace" class="row g-2 align-items-end mt-2">
-                  <input type="hidden" name="source_kind" value="holding">
-                  <input type="hidden" name="selected_holding" value="{{ item.holding_id }}">
-                  <input type="hidden" name="source_activity_id" value="{{ item.activity_id }}">
-                  <input type="hidden" name="source_activity_name" value="{{ item.activity_name }}">
-                  <input type="hidden" name="source_occurrence_id" value="{{ item.occurrence_id }}">
-                  <div class="col-md-3">
-                    <label for="holding-target-group-{{ forloop.counter }}" class="form-label">Target Group</label>
-                    <select id="holding-target-group-{{ forloop.counter }}" name="target_group" class="form-select" required>
-                      {% for row in schedule_rows %}
-                        <option value="{{ row.group_index }}"{% if row.group_index == item.origin_group_index %} selected{% endif %}>{{ row.ag }}</option>
-                      {% endfor %}
-                    </select>
-                  </div>
-                  <div class="col-md-3">
-                    <label for="holding-target-slot-{{ forloop.counter }}" class="form-label">Target Time</label>
-                    <select id="holding-target-slot-{{ forloop.counter }}" name="target_slot" class="form-select" required>
-                      {% for day in schedule_days %}
-                        <optgroup label="{{ day.name }}">
-                          {% for slot in day.slots %}
-                            <option value="{{ slot.key }}">{{ slot.label }} — {{ slot.key }}</option>
-                          {% endfor %}
-                        </optgroup>
-                      {% endfor %}
-                    </select>
-                  </div>
-                  <div class="col-md-4">
-                    <label for="holding-action-type-{{ forloop.counter }}" class="form-label">Occupied Target Behavior</label>
-                    <select id="holding-action-type-{{ forloop.counter }}" name="action_type" class="form-select" required>
-                      <option value="displacement_move" selected>Replace activity and move current activity to holding</option>
-                      <option value="overlap_move">Advanced: allow overlap / double-book warning</option>
-                    </select>
-                  </div>
-                  <div class="col-md-2">
-                    <button type="submit" class="btn btn-outline-primary w-100">Preview Reassign</button>
-                  </div>
-                </form>
+              <li class="list-group-item px-0 holding-area-item {{ item.group_accent_class }}">
+                <div
+                  class="schedule-activity-card holding-activity-card"
+                  title="{{ item.display_value }}"
+                  draggable="true"
+                  data-draggable-activity="true"
+                  data-source-kind="holding"
+                  data-source-holding-id="{{ item.holding_id }}"
+                  data-activity-id="{{ item.activity_id }}"
+                  data-activity-name="{{ item.activity_name }}"
+                  data-occurrence-id="{{ item.occurrence_id }}"
+                  data-occurrence-length="{{ item.occurrence_length|default:1 }}"
+                  data-source-group-index="{{ item.origin_group_index }}"
+                  data-source-slot-key=""
+                  aria-label="Drag {{ item.display_value }} from displaced activities to a schedule slot"
+                >
+                  <span class="schedule-drag-handle" aria-hidden="true"></span>
+                  {% if item.activity_abbreviation %}<span class="schedule-activity-code">{{ item.activity_abbreviation }}</span>{% endif %}
+                  <span class="schedule-activity-name">{{ item.display_value }}</span>
+                  <span class="badge bg-warning text-dark holding-area-status">Displaced</span>
+                </div>
+                <div class="holding-card-meta small">
+                  <span>From {{ item.origin_group_label }} — {{ item.origin_slot_label }}</span>
+                  <span>Saved override {{ item.displaced_by_override_index|add:"1" }}</span>
+                  {% if item.occurrence_length and item.occurrence_length > 1 %}
+                    <span>{{ item.occurrence_length }}-block occurrence</span>
+                  {% endif %}
+                </div>
+                <details class="holding-fallback-controls">
+                  <summary>Fallback reassignment form</summary>
+                  <form method="get" action="{% url 'sched-detail' sched.id %}#schedule-workspace" class="row g-2 align-items-end holding-reassign-form">
+                    <input type="hidden" name="source_kind" value="holding">
+                    <input type="hidden" name="selected_holding" value="{{ item.holding_id }}">
+                    <input type="hidden" name="source_activity_id" value="{{ item.activity_id }}">
+                    <input type="hidden" name="source_activity_name" value="{{ item.activity_name }}">
+                    <input type="hidden" name="source_occurrence_id" value="{{ item.occurrence_id }}">
+                    <div class="col-md-3">
+                      <label for="holding-target-group-{{ forloop.counter }}" class="form-label">Target Group</label>
+                      <select id="holding-target-group-{{ forloop.counter }}" name="target_group" class="form-select" required>
+                        {% for row in schedule_rows %}
+                          <option value="{{ row.group_index }}"{% if row.group_index == item.origin_group_index %} selected{% endif %}>{{ row.ag }}</option>
+                        {% endfor %}
+                      </select>
+                    </div>
+                    <div class="col-md-3">
+                      <label for="holding-target-slot-{{ forloop.counter }}" class="form-label">Target Time</label>
+                      <select id="holding-target-slot-{{ forloop.counter }}" name="target_slot" class="form-select" required>
+                        {% for day in schedule_days %}
+                          <optgroup label="{{ day.name }}">
+                            {% for slot in day.slots %}
+                              <option value="{{ slot.key }}">{{ slot.label }} — {{ slot.key }}</option>
+                            {% endfor %}
+                          </optgroup>
+                        {% endfor %}
+                      </select>
+                    </div>
+                    <div class="col-md-4">
+                      <label for="holding-action-type-{{ forloop.counter }}" class="form-label">Occupied Target Behavior</label>
+                      <select id="holding-action-type-{{ forloop.counter }}" name="action_type" class="form-select" required>
+                        <option value="displacement_move" selected>Replace activity and move current activity to holding</option>
+                        <option value="overlap_move">Advanced: allow overlap / double-book warning</option>
+                      </select>
+                    </div>
+                    <div class="col-md-2">
+                      <button type="submit" class="btn btn-outline-primary w-100">Preview Reassign</button>
+                    </div>
+                  </form>
+                </details>
               </li>
             {% endfor %}
           </ul>
@@ -116,26 +383,63 @@
         </thead>
         <tbody>
           {% for row in schedule_rows %}
-            <tr>
-              <th scope="row">{{ row.ag }}</th>
+            <tr class="{% cycle 'schedule-row-accent-1' 'schedule-row-accent-2' 'schedule-row-accent-3' 'schedule-row-accent-4' %}">
+              <th scope="row" class="schedule-row-header">
+                <span class="schedule-group-badge">Group {{ row.group_index|add:"1" }}</span>
+                <span class="schedule-group-name">{{ row.ag }}</span>
+              </th>
               {% for cell in row.cells %}
-                <td{% if cell.conflicts %} class="{% if has_blocking_conflicts %}table-danger{% else %}table-warning{% endif %}{% if selected_occurrence_id and selected_occurrence_id == cell.occurrence_id %} border border-primary border-2{% endif %}"{% elif cell.is_proposed_target %} class="table-success border border-primary border-2"{% elif cell.is_proposed_source %} class="table-warning"{% elif cell.is_persisted_override and cell.is_activity %} class="table-info"{% elif cell.is_persisted_override %} class="table-secondary"{% elif selected_occurrence_id and selected_occurrence_id == cell.occurrence_id %} class="table-primary"{% endif %}>
+                <td
+                  data-drop-target="true"
+                  data-schedule-id="{{ sched.id }}"
+                  data-group-index="{{ cell.group_index }}"
+                  data-slot-key="{{ cell.slot_key }}"
+                  data-block-id="{{ cell.block_id }}"
+                  data-unavailable="{% if cell.is_unavailable %}true{% else %}false{% endif %}"
                   {% if cell.is_activity %}
-                    {% if proposal_result %}
-                      <span class="d-block">{{ cell.display_value }}{% if cell.is_proposed_target %} <span class="small">(proposed)</span>{% elif cell.is_persisted_override %} <span class="small">(persisted)</span>{% endif %}</span>
+                    {% if not cell.is_multi_block or cell.occurrence_position == 1 %}
+                      draggable="true"
+                      data-draggable-activity="true"
+                      data-activity-id="{{ cell.activity_id }}"
+                      data-activity-name="{{ cell.raw_value }}"
+                      data-occurrence-id="{{ cell.occurrence_id }}"
+                      data-occurrence-length="{{ cell.occurrence_length|default:1 }}"
+                      data-source-group-index="{{ cell.group_index }}"
+                      data-source-slot-key="{{ cell.slot_key }}"
+                      aria-label="Drag {{ cell.display_value }} from {{ cell.group_label }} {{ cell.slot_label }}"
+                    {% endif %}
+                  {% endif %}
+                  {% if cell.conflicts %} class="{% if has_blocking_conflicts %}table-danger{% else %}table-warning{% endif %}{% if selected_occurrence_id and selected_occurrence_id == cell.occurrence_id %} border border-primary border-2{% endif %}"{% elif cell.is_proposed_target %} class="table-success border border-primary border-2"{% elif cell.is_proposed_source %} class="table-warning"{% elif cell.is_persisted_override and cell.is_activity %} class="table-info"{% elif cell.is_persisted_override %} class="table-secondary"{% elif selected_occurrence_id and selected_occurrence_id == cell.occurrence_id %} class="table-primary"{% endif %}>
+                  {% if cell.is_activity %}
+                    {% if cell.is_multi_block and cell.occurrence_position > 1 %}
+                      <span class="schedule-activity-card schedule-activity-card-continuation" title="{{ cell.display_value }}">
+                        {% if cell.activity_abbreviation %}<span class="schedule-activity-code">{{ cell.activity_abbreviation }}</span>{% endif %}
+                        <span class="schedule-activity-name">{{ cell.display_value }}{% if cell.is_proposed_target %} <span class="small">(proposed)</span>{% elif cell.is_persisted_override %} <span class="small">(persisted)</span>{% endif %}</span>
+                      </span>
+                    {% elif proposal_result %}
+                      <span class="schedule-activity-card" title="{{ cell.display_value }}">
+                        <span class="schedule-drag-handle" aria-hidden="true"></span>
+                        {% if cell.activity_abbreviation %}<span class="schedule-activity-code">{{ cell.activity_abbreviation }}</span>{% endif %}
+                        <span class="schedule-activity-name">{{ cell.display_value }}{% if cell.is_proposed_target %} <span class="small">(proposed)</span>{% elif cell.is_persisted_override %} <span class="small">(persisted)</span>{% endif %}</span>
+                      </span>
                     {% else %}
-                      <a href="?selected_block={{ cell.block_id|urlencode }}#schedule-workspace" class="text-reset text-decoration-none d-block">{{ cell.display_value }}{% if cell.is_proposed_target %} <span class="small">(proposed)</span>{% elif cell.is_persisted_override %} <span class="small">(persisted)</span>{% endif %}</a>
+                      <a href="?selected_block={{ cell.block_id|urlencode }}#schedule-workspace" class="schedule-activity-card" draggable="false" title="{{ cell.display_value }}">
+                        <span class="schedule-drag-handle" aria-hidden="true"></span>
+                        {% if cell.activity_abbreviation %}<span class="schedule-activity-code">{{ cell.activity_abbreviation }}</span>{% endif %}
+                        <span class="schedule-activity-name">{{ cell.display_value }}{% if cell.is_proposed_target %} <span class="small">(proposed)</span>{% elif cell.is_persisted_override %} <span class="small">(persisted)</span>{% endif %}</span>
+                      </a>
                     {% endif %}
                     {% for overlap in cell.overlapping_blocks %}
-                      <span class="d-block border-top mt-1 pt-1 fw-bold">
+                      <span class="schedule-overlap-card">
+                        <span class="schedule-overlap-badge">Overlap</span>
                         {% if overlap.is_persisted_override %}
                           {% if proposal_result %}
-                            {{ overlap.display_value }} <span class="small">(persisted overlap)</span>
+                            <span class="schedule-overlap-name">{{ overlap.display_value }} <span class="small">(persisted overlap)</span></span>
                           {% else %}
-                            <a href="?selected_block={{ overlap.block_id|urlencode }}#schedule-workspace" class="text-reset text-decoration-none d-block">{{ overlap.display_value }} <span class="small">(persisted overlap)</span></a>
+                            <a href="?selected_block={{ overlap.block_id|urlencode }}#schedule-workspace" class="schedule-overlap-link">{{ overlap.display_value }} <span class="small">(persisted overlap)</span></a>
                           {% endif %}
                         {% else %}
-                          {{ overlap.display_value }} <span class="small">(proposed overlap)</span>
+                          <span class="schedule-overlap-name">{{ overlap.display_value }} <span class="small">(proposed overlap)</span></span>
                         {% endif %}
                       </span>
                     {% endfor %}
@@ -358,6 +662,151 @@
     {% endif %}
   </section>
   {% endif %}
+  {% if has_generated_schedule and not generation_blocked %}
+    <script>
+      (function () {
+        const workspace = document.getElementById('schedule-workspace');
+        if (!workspace) {
+          return;
+        }
+
+        const manualMoveUrl = "{% url 'sched-manual-move' sched.id %}";
+        const scheduleId = Number("{{ sched.id }}");
+        let draggedSource = null;
+
+        function getCookie(name) {
+          const cookies = document.cookie ? document.cookie.split(';') : [];
+          for (const cookie of cookies) {
+            const trimmed = cookie.trim();
+            if (trimmed.startsWith(name + '=')) {
+              return decodeURIComponent(trimmed.slice(name.length + 1));
+            }
+          }
+          return '';
+        }
+
+        function clearDropHighlights() {
+          workspace.querySelectorAll('.schedule-drop-active').forEach((cell) => {
+            cell.classList.remove('schedule-drop-active');
+          });
+          workspace.querySelectorAll('.schedule-drop-eligible').forEach((cell) => {
+            cell.classList.remove('schedule-drop-eligible');
+          });
+        }
+
+        function showEligibleDropTargets() {
+          if (!draggedSource) {
+            return;
+          }
+          workspace.querySelectorAll('td[data-drop-target="true"]').forEach((cell) => {
+            if (canDropOn(cell)) {
+              cell.classList.add('schedule-drop-eligible');
+            }
+          });
+        }
+
+        function canDropOn(targetCell) {
+          return (
+            draggedSource &&
+            targetCell &&
+            targetCell.dataset.dropTarget === 'true' &&
+            targetCell.dataset.unavailable !== 'true' &&
+            targetCell.dataset.groupIndex === draggedSource.dataset.sourceGroupIndex &&
+            targetCell.dataset.slotKey !== draggedSource.dataset.sourceSlotKey
+          );
+        }
+
+        workspace.addEventListener('dragstart', function (event) {
+          const source = event.target.closest('[data-draggable-activity="true"]');
+          if (!source) {
+            return;
+          }
+          draggedSource = source;
+          source.classList.add('schedule-dragging');
+          showEligibleDropTargets();
+          event.dataTransfer.effectAllowed = 'move';
+          event.dataTransfer.setData('text/plain', source.dataset.blockId || source.dataset.sourceHoldingId);
+        });
+
+        workspace.addEventListener('dragend', function () {
+          if (draggedSource) {
+            draggedSource.classList.remove('schedule-dragging');
+          }
+          draggedSource = null;
+          clearDropHighlights();
+        });
+
+        workspace.addEventListener('dragover', function (event) {
+          const targetCell = event.target.closest('td[data-drop-target="true"]');
+          if (!canDropOn(targetCell)) {
+            return;
+          }
+          event.preventDefault();
+          event.dataTransfer.dropEffect = 'move';
+          workspace.querySelectorAll('.schedule-drop-active').forEach((cell) => {
+            cell.classList.remove('schedule-drop-active');
+          });
+          targetCell.classList.add('schedule-drop-active');
+        });
+
+        workspace.addEventListener('dragleave', function (event) {
+          const targetCell = event.target.closest('td[data-drop-target="true"]');
+          if (targetCell) {
+            targetCell.classList.remove('schedule-drop-active');
+          }
+        });
+
+        workspace.addEventListener('drop', async function (event) {
+          const targetCell = event.target.closest('td[data-drop-target="true"]');
+          if (!canDropOn(targetCell)) {
+            return;
+          }
+          event.preventDefault();
+          clearDropHighlights();
+
+          const payload = {
+            schedule_id: scheduleId,
+            source_schedule_id: scheduleId,
+            target_schedule_id: scheduleId,
+            source_kind: draggedSource.dataset.sourceKind || 'grid',
+            source_block_id: draggedSource.dataset.blockId,
+            source_holding_id: draggedSource.dataset.sourceHoldingId,
+            source_activity_id: Number(draggedSource.dataset.activityId),
+            source_activity_name: draggedSource.dataset.activityName,
+            source_occurrence_id: draggedSource.dataset.occurrenceId,
+            source_group_index: Number(draggedSource.dataset.sourceGroupIndex),
+            source_slot_key: draggedSource.dataset.sourceSlotKey,
+            target_group_index: Number(targetCell.dataset.groupIndex),
+            target_slot_key: targetCell.dataset.slotKey,
+            action_type: 'displacement_move',
+          };
+
+          try {
+            const response = await fetch(manualMoveUrl, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCookie('csrftoken'),
+              },
+              body: JSON.stringify(payload),
+            });
+            const result = await response.json();
+            if (!response.ok || !result.ok) {
+              const message = result.error && result.error.message
+                ? result.error.message
+                : 'Manual move could not be saved.';
+              window.alert(message);
+              return;
+            }
+            window.location.href = "{% url 'sched-detail' sched.id %}#schedule-workspace";
+            window.location.reload();
+          } catch (error) {
+            window.alert('Manual move could not be saved. Check your connection and try again.');
+          }
+        });
+      }());
+    </script>
+  {% endif %}
 
   <section class="mb-4" aria-labelledby="schedule-details-heading">
     <h2 id="schedule-details-heading" class="h3 mb-3">Schedule Details</h2>
@@ -381,8 +830,8 @@
     </div>
     <div class="alert alert-info mb-0" role="alert">
       <h3 class="h5 alert-heading">How this Schedule record works</h3>
-      <p>Generated output uses this Schedule’s selected Schools and their current Activities and Locations. Viewing this page regenerates the current output, then replays saved manual overrides onto the normalized operational schedule.</p>
-      {% if not generation_blocked %}<p class="mb-0"><strong>Export CSV:</strong> Download generated schedule for spreadsheet review.</p>{% endif %}
+      <p>View Schedule loads stored generated output without running the scheduler. Generate Schedule intentionally runs the scheduler from scratch and replaces the stored output.</p>
+      {% if has_generated_schedule and not generation_blocked %}<p class="mb-0"><strong>Export CSV:</strong> Download stored generated schedule for spreadsheet review.</p>{% endif %}
     </div>
   </section>
 
@@ -408,16 +857,131 @@
     {% endif %}
     <div aria-labelledby="generation-status-heading">
       <h3 id="generation-status-heading" class="h4 mb-3">Generation Status</h3>
-      {% if generation_succeeded %}
+      {% if not has_generated_schedule %}
+        <div class="alert alert-info mb-0" role="status">
+          <h4 class="h5 alert-heading">No stored generated schedule</h4>
+          <p class="mb-0">Viewing this page does not generate output. Use Generate Schedule to create stored output for this Schedule record.</p>
+        </div>
+      {% elif generation_succeeded %}
         <div class="alert alert-success mb-0" role="status">
-          <h4 class="h5 alert-heading">Schedule generated successfully</h4>
+          <h4 class="h5 alert-heading">Schedule generated successfully{% if generation_runtime_diagnostics %} with feasibility notes{% endif %}</h4>
           <p class="mb-0">All selected Activities have available scheduling Locations and were fully assigned.</p>
+          {% if generation_runtime_diagnostics %}
+            <ul class="mb-0 mt-2">
+              {% for diagnostic in generation_runtime_diagnostics %}
+                <li>{{ diagnostic.reason }}</li>
+              {% endfor %}
+            </ul>
+          {% endif %}
         </div>
       {% elif generation_incomplete %}
         <div class="alert alert-warning mb-0" role="alert">
           <h4 class="h5 alert-heading">Schedule generation is incomplete</h4>
-          <p>Activity and Location configuration passed initial checks, but the complete Schedule could not be fully assigned.</p>
-          <p class="mb-0">This may be due to Location capacity, timing constraints, or Activity combinations. Review School activity selections, Activity lengths, and available Locations.</p>
+          {% if generation_outcome_summary %}
+            <p class="fw-bold mb-2">
+              {% if generation_outcome_summary.outcome_severity == 'widespread_failure' %}
+                Generation-wide failure
+              {% else %}
+                Localized generation failure
+              {% endif %}
+            </p>
+            <p class="mb-2">{{ generation_outcome_summary.reason }}</p>
+            {% if generation_outcome_summary.first_bottleneck_reason %}
+              <p class="mb-3"><strong>First detected bottleneck:</strong> {{ generation_outcome_summary.first_bottleneck_reason }}</p>
+            {% endif %}
+          {% endif %}
+          {% if generation_collapse_explanation %}
+            <div class="mb-3">
+              <p class="fw-bold mb-1">{{ generation_collapse_explanation.heading }}</p>
+              <p class="mb-1">{{ generation_collapse_explanation.bottleneck_reason }}</p>
+              <p class="mb-0">{{ generation_collapse_explanation.scheduler_reason }}</p>
+            </div>
+          {% endif %}
+          {% if generation_localized_failure_explanations %}
+            <div class="mb-3">
+              {% for explanation in generation_localized_failure_explanations %}
+                <div class="mb-2">
+                  <p class="fw-bold mb-1">{{ explanation.heading }}</p>
+                  {% if explanation.eligible_locations %}
+                    <span class="d-block">Eligible locations:</span>
+                    <ul class="mb-2">
+                      {% for location in explanation.eligible_locations %}
+                        <li>{{ location }}</li>
+                      {% endfor %}
+                    </ul>
+                  {% endif %}
+                  <p class="mb-1">{{ explanation.root_cause_reason }}</p>
+                  {% if explanation.search_exhausted %}
+                    <p class="mb-0">The scheduler exhausted available placement options while attempting to place this activity.</p>
+                  {% endif %}
+                </div>
+              {% endfor %}
+            </div>
+          {% endif %}
+          {% if generation_bottlenecks %}
+            <p class="fw-bold mb-2">Primary Bottlenecks:</p>
+            <ul class="mb-3">
+              {% for bottleneck in generation_bottlenecks %}
+                <li>
+                  <strong>{{ bottleneck.title }}</strong>
+                  {% if bottleneck.demand is not None %}
+                    <span class="d-block">Total demand: {{ bottleneck.demand }} placements</span>
+                  {% endif %}
+                  {% if bottleneck.capacity is not None %}
+                    <span class="d-block">Total available capacity: {{ bottleneck.capacity }} placements</span>
+                  {% endif %}
+                  {% if bottleneck.shortfall is not None %}
+                    <span class="d-block">Shortfall: {{ bottleneck.shortfall }} placements</span>
+                  {% endif %}
+                  {% if bottleneck.eligible_locations %}
+                    <span class="d-block">Eligible locations:</span>
+                    <ul class="mb-2">
+                      {% for location in bottleneck.eligible_locations %}
+                        <li>{{ location }}</li>
+                      {% endfor %}
+                    </ul>
+                  {% endif %}
+                  {% if bottleneck.activities %}
+                    <span class="d-block">Competing Activities: {{ bottleneck.activities|join:", " }}</span>
+                  {% endif %}
+                  {% if bottleneck.reason %}
+                    <span class="d-block">{{ bottleneck.reason }}</span>
+                  {% endif %}
+                </li>
+              {% endfor %}
+            </ul>
+          {% endif %}
+          {% if not generation_localized_failure_explanations and not generation_collapse_explanation %}
+            <p>Activity and Location configuration passed initial checks, but the complete Schedule could not be fully assigned.</p>
+            <p>This may be due to Location capacity, timing constraints, or Activity combinations. Review School activity selections, Activity lengths, and available Locations.</p>
+          {% endif %}
+          {% if generation_affected_activities or generation_runtime_diagnostics %}
+            <details class="mt-3">
+              <summary class="fw-bold">Additional Diagnostic Details</summary>
+              {% if generation_affected_activities %}
+                <p class="fw-bold mb-2 mt-3">Affected Activities:</p>
+                <ul class="mb-3">
+                  {% for activity in generation_affected_activities %}
+                    <li>
+                      <strong>{{ activity.activity }}</strong>
+                      ({{ activity.unscheduled_count }} unscheduled assignment{{ activity.unscheduled_count|pluralize }})
+                      {% if activity.eligible_locations %}
+                        <span class="d-block">Eligible locations: {{ activity.eligible_locations|join:", " }}</span>
+                      {% endif %}
+                    </li>
+                  {% endfor %}
+                </ul>
+              {% endif %}
+              {% if generation_runtime_diagnostics %}
+                <p class="fw-bold mb-1">Technical diagnostics:</p>
+                <ul class="mb-0">
+                  {% for diagnostic in generation_runtime_diagnostics %}
+                    <li>{{ diagnostic.reason }}</li>
+                  {% endfor %}
+                </ul>
+              {% endif %}
+            </details>
+          {% endif %}
         </div>
       {% else %}
         <div class="alert alert-danger mb-0" role="alert">
