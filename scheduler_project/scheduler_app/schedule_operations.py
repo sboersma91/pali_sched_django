@@ -63,6 +63,12 @@ HOLDING_MOVE_REQUIRED_FIELDS = (
     'target_group_index',
     'target_slot_key',
 )
+MANUAL_MOVE_OPTIONAL_LOCATION_FIELDS = (
+    'source_location_id',
+    'source_location_name',
+    'target_location_id',
+    'target_location_name',
+)
 LEGACY_SCHED_DATA_OPERATOR_MESSAGE = (
     'This schedule contains legacy operational data that must be repaired '
     'before schedule edits can be saved.'
@@ -76,7 +82,7 @@ class MalformedSchedDataError(ValueError):
         super().__init__(f'{self.operator_message} Diagnostic: {debug_detail}')
 
 
-def build_schedule_blocks(schedule):
+def build_schedule_blocks(schedule, organization=None):
     activity_names = {
         value
         for day in SCHEDULE_DAYS
@@ -84,11 +90,26 @@ def build_schedule_blocks(schedule):
         for value in schedule.get(slot['key'], [])
         if value not in SCHEDULE_DISPLAY_VALUES and value
     }
+    activity_queryset = Course.objects.filter(course_name__in=activity_names)
+    if organization is not None:
+        activity_queryset = activity_queryset.filter(organization=organization)
+
     activities = {
-        course_name: {'id': activity_id, 'length': course_len}
-        for course_name, activity_id, course_len in Course.objects.filter(
-            course_name__in=activity_names
-        ).values_list('course_name', 'id', 'course_len')
+        course_name: {
+            'id': activity_id,
+            'length': course_len,
+            'abbreviation': (
+                abbreviation
+                if abbreviation and abbreviation != '5 character max'
+                else None
+            ),
+        }
+        for course_name, activity_id, course_len, abbreviation in activity_queryset.values_list(
+            'course_name',
+            'id',
+            'course_len',
+            'abriviation',
+        )
     }
 
     schedule_rows = []
@@ -113,6 +134,7 @@ def build_schedule_blocks(schedule):
                     'display_value': SCHEDULE_DISPLAY_VALUES.get(raw_value, raw_value),
                     'activity_id': activity.get('id'),
                     'activity_length': activity.get('length'),
+                    'activity_abbreviation': activity.get('abbreviation'),
                     'is_activity': is_activity,
                     'is_empty': is_empty,
                     'is_unavailable': is_unavailable,
@@ -267,6 +289,7 @@ def clear_block_activity(block, empty_metadata=None):
         'display_value': SCHEDULE_DISPLAY_VALUES['empty'],
         'activity_id': None,
         'activity_length': None,
+        'activity_abbreviation': None,
         'is_activity': False,
         'is_empty': True,
         'is_unavailable': False,
@@ -297,10 +320,14 @@ def build_activity_values_from_source(source):
             'display_value': source['display_value'],
             'activity_id': source['activity_id'],
             'activity_length': source['activity_length'],
+            'activity_abbreviation': source.get('activity_abbreviation'),
         }
     return {
-        key: source[key]
-        for key in ('raw_value', 'display_value', 'activity_id', 'activity_length')
+        'raw_value': source.get('raw_value'),
+        'display_value': source.get('display_value'),
+        'activity_id': source.get('activity_id'),
+        'activity_length': source.get('activity_length'),
+        'activity_abbreviation': source.get('activity_abbreviation'),
     }
 
 
@@ -498,12 +525,13 @@ def remove_activity_from_operational_blocks(blocks, source, empty_metadata=None)
                     remaining_overlaps = primary['overlapping_blocks']
                     primary.update({
                         **{
-                            key: promoted[key]
+                            key: promoted.get(key)
                             for key in (
                                 'raw_value',
                                 'display_value',
                                 'activity_id',
                                 'activity_length',
+                                'activity_abbreviation',
                                 'is_activity',
                                 'is_empty',
                                 'is_unavailable',
@@ -528,6 +556,7 @@ def remove_activity_from_operational_blocks(blocks, source, empty_metadata=None)
                     'display_value': SCHEDULE_DISPLAY_VALUES['empty'],
                     'activity_id': None,
                     'activity_length': None,
+                    'activity_abbreviation': None,
                     'is_activity': False,
                     'is_empty': True,
                     'is_unavailable': False,
@@ -813,6 +842,8 @@ def build_holding_area_item(block_or_blocks, override_index, displacement_positi
     )
     block = occurrence_blocks[0]
     occurrence_length = block.get('occurrence_length') or len(occurrence_blocks)
+    origin_group_index = block.get('group_index')
+    group_accent_number = ((origin_group_index or 0) % 4) + 1
     return {
         'holding_id': (
             f'holding:override:{override_index}:{block["group_index"]}:'
@@ -822,15 +853,17 @@ def build_holding_area_item(block_or_blocks, override_index, displacement_positi
         'activity_name': block.get('raw_value'),
         'display_value': block.get('display_value'),
         'activity_length': block.get('activity_length'),
+        'activity_abbreviation': block.get('activity_abbreviation'),
         'occurrence_id': block.get('occurrence_id'),
         'occurrence_length': occurrence_length,
         'source_block_ids': [occurrence_block.get('block_id') for occurrence_block in occurrence_blocks],
         'source_slot_keys': [occurrence_block.get('slot_key') for occurrence_block in occurrence_blocks],
         'origin_block_id': block.get('block_id'),
-        'origin_group_index': block.get('group_index'),
+        'origin_group_index': origin_group_index,
         'origin_group_label': block.get('group_label'),
         'origin_slot_key': block.get('slot_key'),
         'origin_slot_label': block.get('slot_label'),
+        'group_accent_class': f'schedule-row-accent-{group_accent_number}',
         'displaced_by_override_index': override_index,
         'holding_status': 'awaiting_assignment',
         'is_holding': True,
@@ -1349,6 +1382,9 @@ def persist_manual_move(schedule_obj, proposal_result):
         'created_at': timezone.now().isoformat().replace('+00:00', 'Z'),
         'status': 'active',
     })
+    for field in MANUAL_MOVE_OPTIONAL_LOCATION_FIELDS:
+        if proposal_result.get(field) not in (None, ''):
+            move_record[field] = proposal_result[field]
 
     with transaction.atomic():
         locked_schedule = type(schedule_obj).objects.select_for_update().get(pk=schedule_obj.pk)

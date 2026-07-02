@@ -4,7 +4,7 @@
   <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-4 mb-3">
     <div>
       <h1 class="mb-1">Schedules</h1>
-      <p class="text-muted mb-0">Opening a Schedule regenerates output for its selected Schools using their latest Activities and Locations.</p>
+      <p class="text-muted mb-0">View stored generated output, or intentionally regenerate a Schedule from its selected Schools.</p>
     </div>
     <a href="{% url 'sched-create' %}" class="btn btn-primary">Create Schedule</a>
   </div>
@@ -26,7 +26,11 @@
             <td>{{ s.timestamp_og|date:"M j, Y" }}</td>
             <td><span class="badge bg-primary">{{ s.schools.count }} School{{ s.schools.count|pluralize }}</span></td>
             <td class="text-end text-nowrap">
-              <a href="{% url 'sched-detail' s.id %}" class="btn btn-sm btn-outline-primary">Generate / View</a>
+              <a href="{% url 'sched-detail' s.id %}" class="btn btn-sm btn-outline-primary">View Schedule</a>
+              <form method="post" action="{% url 'sched-generate' s.id %}" class="d-inline">
+                {% csrf_token %}
+                <button type="submit" class="btn btn-sm btn-primary">Generate Schedule</button>
+              </form>
               <a href="{% url 'sched-update' s.id %}" class="btn btn-sm btn-outline-secondary">Edit Record</a>
               <a href="{% url 'sched-delete' s.id %}" class="btn btn-sm btn-outline-danger">Delete</a>
             </td>

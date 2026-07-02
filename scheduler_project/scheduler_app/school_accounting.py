@@ -1,35 +1,19 @@
 from .models import Course
+from .schedule_blocks import SCHEDULE_SLOT_BLOCKS
 
 
-SCHEDULE_SLOT_BLOCKS = [
-    ('mon_pm1', 'daytime'),
-    ('mon_pm2', 'daytime'),
-    ('mon_night', 'night'),
-    ('tue_am1', 'daytime'),
-    ('tue_am2', 'daytime'),
-    ('tue_pm1', 'daytime'),
-    ('tue_pm2', 'daytime'),
-    ('tue_night', 'night'),
-    ('wed_am1', 'daytime'),
-    ('wed_am2', 'daytime'),
-    ('wed_pm1', 'daytime'),
-    ('wed_pm2', 'daytime'),
-    ('wed_night', 'night'),
-    ('thur_am1', 'daytime'),
-    ('thur_am2', 'daytime'),
-    ('thur_pm1', 'daytime'),
-    ('thur_pm2', 'daytime'),
-    ('thur_night', 'night'),
-    ('fri_am1', 'daytime'),
-    ('fri_am2', 'daytime'),
-]
-DAY_OFFSETS = {'Mon': 0, 'Tue': 5, 'Tues': 5, 'Wed': 10, 'Thur': 15, 'Thurs': 15, 'Fri': 19}
+ARRIVAL_OFFSETS = {'Mon': 0, 'Tue': 5, 'Tues': 5, 'Wed': 10, 'Thur': 15, 'Thurs': 15, 'Fri': 19}
+DEPARTURE_OFFSETS = {'Mon': 0, 'Tue': 4, 'Tues': 4, 'Wed': 9, 'Thur': 14, 'Thurs': 14, 'Fri': 19}
+
+
+def school_validation_slot_blocks(arrive, depart):
+    if arrive not in ARRIVAL_OFFSETS or depart not in DEPARTURE_OFFSETS:
+        return []
+    return list(SCHEDULE_SLOT_BLOCKS[ARRIVAL_OFFSETS[arrive]:DEPARTURE_OFFSETS[depart]])
 
 
 def calculate_school_slot_accounting(arrive, depart, selected_courses):
-    required_slots = []
-    if arrive in DAY_OFFSETS and depart in DAY_OFFSETS:
-        required_slots = SCHEDULE_SLOT_BLOCKS[DAY_OFFSETS[arrive]:DAY_OFFSETS[depart]]
+    required_slots = school_validation_slot_blocks(arrive, depart)
 
     selected_courses = list(selected_courses)
     selected_daytime = sum(course.course_len for course in selected_courses if course.course_len > 0)
@@ -85,6 +69,9 @@ def _form_value(form, field_name):
 
 def school_slot_accounting_summary(form):
     selected_courses = Course.objects.filter(pk__in=_form_values(form, 'subject'))
+    organization = getattr(form, 'organization', None)
+    if organization is not None:
+        selected_courses = selected_courses.filter(organization=organization)
     return calculate_school_slot_accounting(
         _form_value(form, 'arrive'),
         _form_value(form, 'depart'),

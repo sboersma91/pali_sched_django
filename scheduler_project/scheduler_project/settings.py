@@ -128,3 +128,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 MEDIA_ROOT = BASE_DIR / 'media_root'
 # this could also be 'scheduler_projet/media_root
+
+LOGIN_URL = 'login'
+LOGIN_REDIRECT_URL = 'home-paid'
+LOGOUT_REDIRECT_URL = 'login'

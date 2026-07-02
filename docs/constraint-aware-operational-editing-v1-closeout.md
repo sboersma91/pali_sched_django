@@ -77,7 +77,8 @@ Operational editing is now a first-class workflow:
 
 ## Deferred Items
 
-- Drag/drop editing.
+- Drag/drop editing. Completed later in Operational Workspace UX Phase 1; see
+  `docs/operational-workspace-ux-phase-1-closeout.md`.
 - Multi-move unsaved workspace state.
 - Override history management UI.
 - Explicit override deactivate/supersede controls.
@@ -111,7 +112,13 @@ history repair.
 
 ## Recommended Next Milestone
 
-Next milestone: Operational Workspace Management v1.
+Historical recommendation at the time of this backend closeout: Operational
+Workspace Management v1. This recommendation has been partially superseded by
+Operational Workspace UX Phase 1; see
+`docs/operational-workspace-ux-phase-1-closeout.md` for the current closeout
+and next milestone recommendation.
+
+Historical objectives:
 
 Objectives:
 
