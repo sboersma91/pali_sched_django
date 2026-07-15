@@ -5,12 +5,19 @@ from io import StringIO
 from unittest.mock import PropertyMock, patch
 
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
 from django.db import IntegrityError
+from django.db.models.deletion import ProtectedError
 from django.template.loader import render_to_string
 from django.test import Client, RequestFactory, TestCase, override_settings
 from django.urls import reverse
 
 from .forms import SchoolsForm, SchedForm, suggest_activity_group_count
+from .instructor_assignment import (
+    assign_occurrences_deterministically,
+    evaluate_occurrence_qualifications,
+    extract_operational_occurrences,
+)
 from .views import (
     SchedDetail,
     SchedList,
@@ -39,8 +46,13 @@ from .schedule_operations import (
     verify_move_proposal_source,
 )
 from .models import (
+    ActivityCertificationRequirement,
+    Certification,
     Course,
     Instructor,
+    InstructorCertification,
+    InstructorLeadershipRole,
+    LeadershipRole,
     Locations,
     Schools,
     TheSched,
@@ -57,6 +69,764 @@ def force_login_operator(client):
     user = get_user_model().objects.create_user(username="operator", password="password")
     client.force_login(user)
     return user
+
+
+class OperationalOccurrenceExtractionTests(TestCase):
+    def setUp(self):
+        self.organization = Organization.objects.create(name="Occurrence Extraction Organization")
+
+    def create_course(self, name, abbreviation, length=1):
+        return Course.objects.create(
+            organization=self.organization,
+            course_name=name,
+            abriviation=abbreviation,
+            course_len=length,
+        )
+
+    def create_schedule(self, generated_schedule, manual_moves=None):
+        return TheSched.objects.create(
+            organization=self.organization,
+            sched_name=f"Extraction Schedule {TheSched.objects.count()}",
+            sched_data={
+                "version": 1,
+                "generated_schedule": generated_schedule,
+                "manual_moves": manual_moves or [],
+                "generation_diagnostics": [],
+                "generation_runtime_diagnostics": [],
+                "generation_complete": True,
+            },
+        )
+
+    def test_extracts_single_block_activity(self):
+        activity = self.create_course("Archery", "ARCH")
+        schedule = self.create_schedule({
+            "ags": ["School 0"],
+            "mon_pm1": [activity.course_name],
+        })
+
+        occurrences = extract_operational_occurrences(schedule)
+
+        self.assertEqual(occurrences, [{
+            "schedule_id": schedule.pk,
+            "organization_id": self.organization.pk,
+            "activity_id": activity.pk,
+            "activity_display_name": activity.course_name,
+            "group_index": 0,
+            "group_label": "School 0",
+            "occurrence_id": "occurrence:0:mon_pm1",
+            "slot_footprint": [{
+                "block_id": "0:mon_pm1",
+                "slot_key": "mon_pm1",
+                "slot_label": "PM1",
+                "position": 1,
+            }],
+        }])
+
+    def test_extracts_multi_block_activity_once(self):
+        activity = self.create_course("Climbing", "CLMB", length=2)
+        schedule = self.create_schedule({
+            "ags": ["School 0"],
+            "tue_am1": [activity.course_name],
+            "tue_am2": [activity.course_name],
+        })
+
+        occurrences = extract_operational_occurrences(schedule)
+
+        self.assertEqual(len(occurrences), 1)
+        self.assertEqual(occurrences[0]["occurrence_id"], "occurrence:0:tue_am1")
+        self.assertEqual(
+            [slot["slot_key"] for slot in occurrences[0]["slot_footprint"]],
+            ["tue_am1", "tue_am2"],
+        )
+        self.assertEqual(
+            [slot["position"] for slot in occurrences[0]["slot_footprint"]],
+            [1, 2],
+        )
+
+    def test_manual_move_is_reflected_in_extracted_occurrence(self):
+        activity = self.create_course("Canoeing", "CANO")
+        manual_move = {
+            "source_block_id": "0:mon_pm1",
+            "source_activity_id": activity.pk,
+            "source_activity_name": activity.course_name,
+            "source_occurrence_id": "occurrence:0:mon_pm1",
+            "source_group_index": 0,
+            "source_slot_key": "mon_pm1",
+            "target_group_index": 0,
+            "target_slot_key": "tue_am1",
+            "source_kind": "grid",
+            "move_type": "single_block",
+            "action_type": "displacement_move",
+            "occurrence_length": 1,
+            "source_block_ids": ["0:mon_pm1"],
+            "target_block_ids": ["0:tue_am1"],
+            "created_at": "2026-07-12T12:00:00Z",
+            "status": "active",
+        }
+        schedule = self.create_schedule(
+            {
+                "ags": ["School 0"],
+                "mon_pm1": [activity.course_name],
+                "tue_am1": ["empty"],
+            },
+            manual_moves=[manual_move],
+        )
+
+        occurrences = extract_operational_occurrences(schedule)
+
+        self.assertEqual(len(occurrences), 1)
+        self.assertEqual(
+            [slot["slot_key"] for slot in occurrences[0]["slot_footprint"]],
+            ["tue_am1"],
+        )
+
+    def test_empty_and_unavailable_cells_are_ignored(self):
+        schedule = self.create_schedule({
+            "ags": ["School 0"],
+            "mon_pm1": ["empty"],
+            "mon_pm2": ["g_box"],
+        })
+
+        self.assertEqual(extract_operational_occurrences(schedule), [])
+
+    def test_occurrences_have_deterministic_group_and_slot_order(self):
+        later_activity = self.create_course("Later Activity", "LATE")
+        earlier_activity = self.create_course("Earlier Activity", "ERLY")
+        second_group_activity = self.create_course("Second Group Activity", "SCND")
+        schedule = self.create_schedule({
+            "ags": ["School 0", "School 1"],
+            "mon_pm1": [earlier_activity.course_name, second_group_activity.course_name],
+            "tue_am1": [later_activity.course_name, "empty"],
+        })
+
+        first_result = extract_operational_occurrences(schedule)
+        second_result = extract_operational_occurrences(schedule)
+
+        self.assertEqual(first_result, second_result)
+        self.assertEqual(
+            [occurrence["activity_id"] for occurrence in first_result],
+            [earlier_activity.pk, later_activity.pk, second_group_activity.pk],
+        )
+
+
+class QualificationEvaluationTests(TestCase):
+    def setUp(self):
+        self.organization = Organization.objects.create(name="Qualification Organization")
+        self.other_organization = Organization.objects.create(name="Other Qualification Organization")
+        self.course = Course.objects.create(
+            organization=self.organization,
+            course_name="Qualification Activity",
+            abriviation="QUAL",
+            course_len=1,
+        )
+        self.occurrence = {
+            "schedule_id": 1,
+            "organization_id": self.organization.pk,
+            "activity_id": self.course.pk,
+            "activity_display_name": self.course.course_name,
+            "group_index": 0,
+            "group_label": "School 0",
+            "occurrence_id": "occurrence:0:mon_pm1",
+            "slot_footprint": [],
+        }
+
+    def create_instructor(self, first_name, organization=None):
+        return Instructor.objects.create(
+            organization=organization or self.organization,
+            fname=first_name,
+            lname="Instructor",
+            ropes_lead=False,
+            school_lead=False,
+            cpr=True,
+            firstaid="yes",
+        )
+
+    def evaluate(self, instructors, instructor_certifications=None, required=None):
+        with self.assertNumQueries(0):
+            return evaluate_occurrence_qualifications(
+                self.occurrence,
+                instructors,
+                instructor_certifications or {},
+                {self.course.pk: required or ()},
+            )
+
+    def test_course_with_no_requirements_qualifies_every_candidate(self):
+        first = self.create_instructor("First")
+        second = self.create_instructor("Second")
+
+        result = self.evaluate([second, first])
+
+        self.assertEqual(result["qualified_instructors"], [first, second])
+        self.assertEqual(result["unqualified_instructors"], [])
+
+    def test_instructor_with_all_requirements_is_qualified(self):
+        instructor = self.create_instructor("Qualified")
+
+        result = self.evaluate(
+            [instructor],
+            {instructor.pk: {10, 20}},
+            required={10, 20},
+        )
+
+        self.assertEqual(result["qualified_instructors"], [instructor])
+
+    def test_instructor_missing_one_requirement_is_unqualified(self):
+        instructor = self.create_instructor("Missing One")
+
+        result = self.evaluate(
+            [instructor],
+            {instructor.pk: {10}},
+            required={10, 20},
+        )
+
+        self.assertEqual(result["qualified_instructors"], [])
+        self.assertEqual(result["unqualified_instructors"][0]["missing_certification_ids"], (20,))
+
+    def test_instructor_missing_multiple_requirements_is_unqualified(self):
+        instructor = self.create_instructor("Missing Multiple")
+
+        result = self.evaluate([instructor], required={10, 20})
+
+        self.assertEqual(
+            result["unqualified_instructors"][0]["missing_certification_ids"],
+            (10, 20),
+        )
+
+    def test_multiple_instructors_can_be_qualified_deterministically(self):
+        first = self.create_instructor("First")
+        second = self.create_instructor("Second")
+
+        result = self.evaluate(
+            [second, first],
+            {first.pk: {10}, second.pk: {10, 20}},
+            required={10},
+        )
+
+        self.assertEqual(result["qualified_instructors"], [first, second])
+
+    def test_no_instructors_are_qualified_when_all_lack_requirements(self):
+        first = self.create_instructor("First")
+        second = self.create_instructor("Second")
+
+        result = self.evaluate(
+            [first, second],
+            {first.pk: {10}, second.pk: {20}},
+            required={10, 20},
+        )
+
+        self.assertEqual(result["qualified_instructors"], [])
+        self.assertEqual(len(result["unqualified_instructors"]), 2)
+
+    def test_candidate_from_another_organization_is_unqualified(self):
+        instructor = self.create_instructor("Foreign", organization=self.other_organization)
+
+        result = self.evaluate([instructor])
+
+        self.assertEqual(result["qualified_instructors"], [])
+        self.assertTrue(result["unqualified_instructors"][0]["organization_mismatch"])
+
+
+class DeterministicAssignmentStrategyTests(TestCase):
+    def setUp(self):
+        self.organization = Organization.objects.create(name="Assignment Strategy Organization")
+        self.course = Course.objects.create(
+            organization=self.organization,
+            course_name="Assignment Activity",
+            abriviation="ASGN",
+            course_len=1,
+        )
+        self.occurrence = {
+            "schedule_id": 1,
+            "organization_id": self.organization.pk,
+            "activity_id": self.course.pk,
+            "activity_display_name": self.course.course_name,
+            "group_index": 0,
+            "group_label": "School 0",
+            "occurrence_id": "occurrence:0:mon_pm1",
+            "slot_footprint": [{
+                "block_id": "0:mon_pm1",
+                "slot_key": "mon_pm1",
+                "slot_label": "PM1",
+                "position": 1,
+            }],
+        }
+
+    def create_instructor(self, first_name):
+        return Instructor.objects.create(
+            organization=self.organization,
+            fname=first_name,
+            lname="Instructor",
+            ropes_lead=False,
+            school_lead=False,
+            cpr=True,
+            firstaid="yes",
+        )
+
+    def assign(self, instructors, instructor_certifications=None, required=None):
+        with self.assertNumQueries(0):
+            return assign_occurrences_deterministically(
+                [self.occurrence],
+                instructors,
+                instructor_certifications or {},
+                {self.course.pk: required or ()},
+            )
+
+    def test_assigns_one_qualified_instructor(self):
+        instructor = self.create_instructor("Qualified")
+
+        assignments = self.assign(
+            [instructor],
+            {instructor.pk: {10}},
+            required={10},
+        )
+
+        self.assertIs(assignments[0]["assigned_instructor"], instructor)
+        self.assertEqual(assignments[0]["status"], "assigned")
+
+    def test_selects_first_of_multiple_qualified_instructors(self):
+        first = self.create_instructor("First")
+        second = self.create_instructor("Second")
+
+        assignments = self.assign(
+            [second, first],
+            {first.pk: {10}, second.pk: {10}},
+            required={10},
+        )
+
+        self.assertIs(assignments[0]["assigned_instructor"], first)
+
+    def test_no_qualified_instructor_produces_unstaffed_result(self):
+        instructor = self.create_instructor("Unqualified")
+
+        assignments = self.assign([instructor], required={10})
+
+        self.assertIsNone(assignments[0]["assigned_instructor"])
+        self.assertEqual(assignments[0]["status"], "unstaffed")
+        self.assertEqual(assignments[0]["reason"], "No qualified instructors available.")
+
+    def test_selection_is_deterministic_for_reversed_candidate_input(self):
+        first = self.create_instructor("First")
+        second = self.create_instructor("Second")
+        certifications = {first.pk: {10}, second.pk: {10}}
+
+        forward = self.assign([first, second], certifications, required={10})
+        reversed_input = self.assign([second, first], certifications, required={10})
+
+        self.assertIs(forward[0]["assigned_instructor"], first)
+        self.assertIs(reversed_input[0]["assigned_instructor"], first)
+
+    def test_assignment_result_has_renderable_structure(self):
+        instructor = self.create_instructor("Structured")
+
+        assignment = self.assign([instructor])[0]
+
+        self.assertEqual(
+            set(assignment),
+            {"occurrence", "assigned_instructor", "status", "reason"},
+        )
+        self.assertIs(assignment["occurrence"], self.occurrence)
+        self.assertEqual(assignment["status"], "assigned")
+        self.assertIsNone(assignment["reason"])
+
+    def test_assignment_strategy_performs_no_database_writes(self):
+        instructor = self.create_instructor("Read Only")
+        instructor_count = Instructor.objects.count()
+
+        self.assign([instructor])
+
+        self.assertEqual(Instructor.objects.count(), instructor_count)
+
+    def test_repeated_execution_produces_identical_output(self):
+        first = self.create_instructor("First")
+        second = self.create_instructor("Second")
+        certifications = {first.pk: {10}, second.pk: {10}}
+
+        first_result = self.assign([second, first], certifications, required={10})
+        second_result = self.assign([second, first], certifications, required={10})
+
+        self.assertEqual(first_result, second_result)
+
+
+class CertificationModelTests(TestCase):
+    def setUp(self):
+        self.organization = Organization.objects.create(name="Certification Organization")
+        self.other_organization = Organization.objects.create(name="Other Certification Organization")
+
+    def test_certification_can_be_created_for_an_organization(self):
+        certification = Certification.objects.create(
+            organization=self.organization,
+            name="Wilderness First Aid",
+        )
+
+        self.assertEqual(certification.name, "Wilderness First Aid")
+        self.assertEqual(certification.organization, self.organization)
+        self.assertEqual(str(certification), "Wilderness First Aid")
+
+    def test_certification_name_must_be_unique_within_an_organization(self):
+        Certification.objects.create(organization=self.organization, name="Belay")
+
+        with self.assertRaises(IntegrityError):
+            Certification.objects.create(organization=self.organization, name="Belay")
+
+    def test_certification_name_can_repeat_across_organizations(self):
+        Certification.objects.create(organization=self.organization, name="Archery")
+
+        certification = Certification.objects.create(
+            organization=self.other_organization,
+            name="Archery",
+        )
+
+        self.assertEqual(certification.organization, self.other_organization)
+
+    def test_certification_protects_its_organization_from_deletion(self):
+        Certification.objects.create(organization=self.organization, name="River 1")
+
+        with self.assertRaises(ProtectedError):
+            self.organization.delete()
+
+
+class InstructorCertificationModelTests(TestCase):
+    def setUp(self):
+        self.organization = Organization.objects.create(name="Instructor Certification Organization")
+        self.other_organization = Organization.objects.create(name="Other Instructor Organization")
+        self.instructor = Instructor.objects.create(
+            organization=self.organization,
+            fname="Jordan",
+            lname="River",
+            ropes_lead=False,
+            school_lead=False,
+            cpr=True,
+            firstaid="yes",
+        )
+        self.certification = Certification.objects.create(
+            organization=self.organization,
+            name="River 1",
+        )
+
+    def test_assigning_one_certification(self):
+        InstructorCertification.objects.create(
+            instructor=self.instructor,
+            certification=self.certification,
+        )
+
+        self.assertQuerySetEqual(
+            self.instructor.certifications.all(),
+            [self.certification],
+        )
+
+    def test_assigning_multiple_certifications(self):
+        second_certification = Certification.objects.create(
+            organization=self.organization,
+            name="Wilderness First Aid",
+        )
+        InstructorCertification.objects.create(
+            instructor=self.instructor,
+            certification=self.certification,
+        )
+        InstructorCertification.objects.create(
+            instructor=self.instructor,
+            certification=second_certification,
+        )
+
+        self.assertSetEqual(
+            set(self.instructor.certifications.all()),
+            {self.certification, second_certification},
+        )
+
+    def test_duplicate_relationship_is_rejected(self):
+        InstructorCertification.objects.create(
+            instructor=self.instructor,
+            certification=self.certification,
+        )
+
+        with self.assertRaises(IntegrityError):
+            InstructorCertification.objects.create(
+                instructor=self.instructor,
+                certification=self.certification,
+            )
+
+    def test_cross_organization_relationship_is_rejected(self):
+        other_certification = Certification.objects.create(
+            organization=self.other_organization,
+            name="River 2",
+        )
+
+        with self.assertRaises(ValidationError):
+            InstructorCertification.objects.create(
+                instructor=self.instructor,
+                certification=other_certification,
+            )
+
+        self.assertFalse(InstructorCertification.objects.exists())
+
+    def test_deleting_parent_records_cascades_only_join_rows(self):
+        relationship = InstructorCertification.objects.create(
+            instructor=self.instructor,
+            certification=self.certification,
+        )
+
+        self.instructor.delete()
+
+        self.assertFalse(InstructorCertification.objects.filter(pk=relationship.pk).exists())
+        self.assertTrue(Certification.objects.filter(pk=self.certification.pk).exists())
+
+        remaining_instructor = Instructor.objects.create(
+            organization=self.organization,
+            fname="Taylor",
+            lname="Forest",
+            ropes_lead=False,
+            school_lead=False,
+            cpr=True,
+            firstaid="yes",
+        )
+        second_certification = Certification.objects.create(
+            organization=self.organization,
+            name="Belay",
+        )
+        relationship = InstructorCertification.objects.create(
+            instructor=remaining_instructor,
+            certification=second_certification,
+        )
+
+        second_certification.delete()
+
+        self.assertFalse(InstructorCertification.objects.filter(pk=relationship.pk).exists())
+        self.assertTrue(Instructor.objects.filter(pk=remaining_instructor.pk).exists())
+
+
+class ActivityCertificationRequirementModelTests(TestCase):
+    def setUp(self):
+        self.organization = Organization.objects.create(name="Activity Requirement Organization")
+        self.other_organization = Organization.objects.create(name="Other Activity Organization")
+        self.course = Course.objects.create(
+            organization=self.organization,
+            course_name="Climbing",
+            abriviation="CLMB",
+            course_len=1,
+        )
+        self.certification = Certification.objects.create(
+            organization=self.organization,
+            name="Belay",
+        )
+
+    def test_adding_one_required_certification(self):
+        ActivityCertificationRequirement.objects.create(
+            course=self.course,
+            certification=self.certification,
+        )
+
+        self.assertQuerySetEqual(
+            self.course.required_certifications.all(),
+            [self.certification],
+        )
+
+    def test_adding_multiple_required_certifications(self):
+        second_certification = Certification.objects.create(
+            organization=self.organization,
+            name="High Ropes",
+        )
+        ActivityCertificationRequirement.objects.create(
+            course=self.course,
+            certification=self.certification,
+        )
+        ActivityCertificationRequirement.objects.create(
+            course=self.course,
+            certification=second_certification,
+        )
+
+        self.assertSetEqual(
+            set(self.course.required_certifications.all()),
+            {self.certification, second_certification},
+        )
+
+    def test_duplicate_requirement_is_rejected(self):
+        ActivityCertificationRequirement.objects.create(
+            course=self.course,
+            certification=self.certification,
+        )
+
+        with self.assertRaises(IntegrityError):
+            ActivityCertificationRequirement.objects.create(
+                course=self.course,
+                certification=self.certification,
+            )
+
+    def test_cross_organization_requirement_is_rejected(self):
+        other_certification = Certification.objects.create(
+            organization=self.other_organization,
+            name="High Ropes",
+        )
+
+        with self.assertRaises(ValidationError):
+            ActivityCertificationRequirement.objects.create(
+                course=self.course,
+                certification=other_certification,
+            )
+
+        self.assertFalse(ActivityCertificationRequirement.objects.exists())
+
+    def test_deleting_parent_records_cascades_only_join_rows(self):
+        requirement = ActivityCertificationRequirement.objects.create(
+            course=self.course,
+            certification=self.certification,
+        )
+
+        self.course.delete()
+
+        self.assertFalse(
+            ActivityCertificationRequirement.objects.filter(pk=requirement.pk).exists()
+        )
+        self.assertTrue(Certification.objects.filter(pk=self.certification.pk).exists())
+
+        remaining_course = Course.objects.create(
+            organization=self.organization,
+            course_name="Archery",
+            abriviation="ARCH",
+            course_len=1,
+        )
+        second_certification = Certification.objects.create(
+            organization=self.organization,
+            name="Archery",
+        )
+        requirement = ActivityCertificationRequirement.objects.create(
+            course=remaining_course,
+            certification=second_certification,
+        )
+
+        second_certification.delete()
+
+        self.assertFalse(
+            ActivityCertificationRequirement.objects.filter(pk=requirement.pk).exists()
+        )
+        self.assertTrue(Course.objects.filter(pk=remaining_course.pk).exists())
+
+
+class InstructorLeadershipRoleModelTests(TestCase):
+    def setUp(self):
+        self.organization = Organization.objects.create(name="Leadership Role Organization")
+        self.other_organization = Organization.objects.create(name="Other Leadership Organization")
+        self.instructor = Instructor.objects.create(
+            organization=self.organization,
+            fname="Morgan",
+            lname="Summit",
+            ropes_lead=False,
+            school_lead=False,
+            cpr=True,
+            firstaid="yes",
+        )
+        self.leadership_role = LeadershipRole.objects.create(
+            organization=self.organization,
+            name="School Lead",
+        )
+
+    def test_leadership_role_name_is_unique_within_an_organization(self):
+        with self.assertRaises(IntegrityError):
+            LeadershipRole.objects.create(
+                organization=self.organization,
+                name="School Lead",
+            )
+
+    def test_leadership_role_name_can_repeat_across_organizations(self):
+        other_role = LeadershipRole.objects.create(
+            organization=self.other_organization,
+            name="School Lead",
+        )
+
+        self.assertEqual(other_role.organization, self.other_organization)
+
+    def test_leadership_role_protects_its_organization_from_deletion(self):
+        with self.assertRaises(ProtectedError):
+            self.organization.delete()
+
+    def test_assigning_one_leadership_role(self):
+        InstructorLeadershipRole.objects.create(
+            instructor=self.instructor,
+            leadership_role=self.leadership_role,
+        )
+
+        self.assertQuerySetEqual(
+            self.instructor.leadership_roles.all(),
+            [self.leadership_role],
+        )
+
+    def test_assigning_multiple_leadership_roles(self):
+        second_role = LeadershipRole.objects.create(
+            organization=self.organization,
+            name="Head Instructor",
+        )
+        InstructorLeadershipRole.objects.create(
+            instructor=self.instructor,
+            leadership_role=self.leadership_role,
+        )
+        InstructorLeadershipRole.objects.create(
+            instructor=self.instructor,
+            leadership_role=second_role,
+        )
+
+        self.assertSetEqual(
+            set(self.instructor.leadership_roles.all()),
+            {self.leadership_role, second_role},
+        )
+
+    def test_duplicate_leadership_role_relationship_is_rejected(self):
+        InstructorLeadershipRole.objects.create(
+            instructor=self.instructor,
+            leadership_role=self.leadership_role,
+        )
+
+        with self.assertRaises(IntegrityError):
+            InstructorLeadershipRole.objects.create(
+                instructor=self.instructor,
+                leadership_role=self.leadership_role,
+            )
+
+    def test_cross_organization_leadership_role_is_rejected(self):
+        other_role = LeadershipRole.objects.create(
+            organization=self.other_organization,
+            name="Head Instructor",
+        )
+
+        with self.assertRaises(ValidationError):
+            InstructorLeadershipRole.objects.create(
+                instructor=self.instructor,
+                leadership_role=other_role,
+            )
+
+        self.assertFalse(InstructorLeadershipRole.objects.exists())
+
+    def test_deleting_parent_records_cascades_only_join_rows(self):
+        relationship = InstructorLeadershipRole.objects.create(
+            instructor=self.instructor,
+            leadership_role=self.leadership_role,
+        )
+
+        self.instructor.delete()
+
+        self.assertFalse(InstructorLeadershipRole.objects.filter(pk=relationship.pk).exists())
+        self.assertTrue(LeadershipRole.objects.filter(pk=self.leadership_role.pk).exists())
+
+        remaining_instructor = Instructor.objects.create(
+            organization=self.organization,
+            fname="Casey",
+            lname="Trail",
+            ropes_lead=False,
+            school_lead=False,
+            cpr=True,
+            firstaid="yes",
+        )
+        second_role = LeadershipRole.objects.create(
+            organization=self.organization,
+            name="Ropes Lead",
+        )
+        relationship = InstructorLeadershipRole.objects.create(
+            instructor=remaining_instructor,
+            leadership_role=second_role,
+        )
+
+        second_role.delete()
+
+        self.assertFalse(InstructorLeadershipRole.objects.filter(pk=relationship.pk).exists())
+        self.assertTrue(Instructor.objects.filter(pk=remaining_instructor.pk).exists())
 
 
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])

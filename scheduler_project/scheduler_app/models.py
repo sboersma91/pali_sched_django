@@ -5,6 +5,7 @@ from django.db.models import CASCADE, PROTECT, Q, UniqueConstraint
 from django.db import models
 from django.db.models.fields import BooleanField, CharField, IntegerField, SmallIntegerField, TextField, DateField
 from django.core.validators import MaxValueValidator, MinValueValidator
+from django.core.exceptions import ValidationError
 from django.db.models.fields.related import ManyToManyField, ForeignKey
 from django.db.models import JSONField
 
@@ -30,6 +31,48 @@ def get_default_organization_id():
     from members.models import get_default_organization
 
     return get_default_organization().pk
+
+
+class Certification(models.Model):
+    organization = ForeignKey(
+        'members.Organization',
+        on_delete=PROTECT,
+        related_name='certifications',
+        default=get_default_organization_id,
+    )
+    name = CharField(max_length=150)
+
+    def __str__(self):
+        return self.name
+
+    class Meta:
+        constraints = [
+            UniqueConstraint(
+                fields=['organization', 'name'],
+                name='unique_certification_name_per_organization',
+            ),
+        ]
+
+
+class LeadershipRole(models.Model):
+    organization = ForeignKey(
+        'members.Organization',
+        on_delete=PROTECT,
+        related_name='leadership_roles',
+        default=get_default_organization_id,
+    )
+    name = CharField(max_length=150)
+
+    def __str__(self):
+        return self.name
+
+    class Meta:
+        constraints = [
+            UniqueConstraint(
+                fields=['organization', 'name'],
+                name='unique_leadership_role_name_per_organization',
+            ),
+        ]
 
 
 class Locations(models.Model):
@@ -67,6 +110,12 @@ class Course(models.Model):
     course_name =  CharField(max_length=120)
     abriviation = CharField(max_length=5, blank=True, null=True, default='5 character max')
     primary_locs =  ManyToManyField(Locations)
+    required_certifications = ManyToManyField(
+        Certification,
+        through='ActivityCertificationRequirement',
+        related_name='required_by_courses',
+        blank=True,
+    )
     course_len = SmallIntegerField(
         default=1, 
         validators=[MaxValueValidator(2), MinValueValidator(0)]
@@ -83,6 +132,45 @@ class Course(models.Model):
                 fields=['organization', 'abriviation'],
                 condition=Q(abriviation__isnull=False) & ~Q(abriviation=''),
                 name='unique_course_abbreviation_per_organization',
+            ),
+        ]
+
+
+class ActivityCertificationRequirement(models.Model):
+    course = ForeignKey(
+        Course,
+        on_delete=CASCADE,
+        related_name='certification_requirements',
+    )
+    certification = ForeignKey(
+        Certification,
+        on_delete=CASCADE,
+        related_name='activity_requirements',
+    )
+
+    def clean(self):
+        super().clean()
+        if (
+            self.course_id
+            and self.certification_id
+            and self.course.organization_id != self.certification.organization_id
+        ):
+            raise ValidationError(
+                'Course and certification must belong to the same organization.'
+            )
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f'{self.course} — {self.certification}'
+
+    class Meta:
+        constraints = [
+            UniqueConstraint(
+                fields=['course', 'certification'],
+                name='unique_activity_certification_requirement',
             ),
         ]
 
@@ -851,6 +939,96 @@ class Instructor(models.Model):
     # this will have to be a calculated field.
     cpr = BooleanField(choices=(("fr", "fresh"), ('hr', 'house'),('boolean field','boolean field')))
     firstaid = CharField(choices= (('yes','yes'),('jack','jack'), ('charfield','charfield')),max_length=100)
+    certifications = ManyToManyField(
+        Certification,
+        through='InstructorCertification',
+        related_name='instructors',
+        blank=True,
+    )
+    leadership_roles = ManyToManyField(
+        LeadershipRole,
+        through='InstructorLeadershipRole',
+        related_name='instructors',
+        blank=True,
+    )
     
     def __str__(self):
         return self.fname + ' ' + self.lname
+
+
+class InstructorCertification(models.Model):
+    instructor = ForeignKey(
+        Instructor,
+        on_delete=CASCADE,
+        related_name='certification_relationships',
+    )
+    certification = ForeignKey(
+        Certification,
+        on_delete=CASCADE,
+        related_name='instructor_relationships',
+    )
+
+    def clean(self):
+        super().clean()
+        if (
+            self.instructor_id
+            and self.certification_id
+            and self.instructor.organization_id != self.certification.organization_id
+        ):
+            raise ValidationError(
+                'Instructor and certification must belong to the same organization.'
+            )
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f'{self.instructor} — {self.certification}'
+
+    class Meta:
+        constraints = [
+            UniqueConstraint(
+                fields=['instructor', 'certification'],
+                name='unique_instructor_certification',
+            ),
+        ]
+
+
+class InstructorLeadershipRole(models.Model):
+    instructor = ForeignKey(
+        Instructor,
+        on_delete=CASCADE,
+        related_name='leadership_role_relationships',
+    )
+    leadership_role = ForeignKey(
+        LeadershipRole,
+        on_delete=CASCADE,
+        related_name='instructor_relationships',
+    )
+
+    def clean(self):
+        super().clean()
+        if (
+            self.instructor_id
+            and self.leadership_role_id
+            and self.instructor.organization_id != self.leadership_role.organization_id
+        ):
+            raise ValidationError(
+                'Instructor and leadership role must belong to the same organization.'
+            )
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f'{self.instructor} — {self.leadership_role}'
+
+    class Meta:
+        constraints = [
+            UniqueConstraint(
+                fields=['instructor', 'leadership_role'],
+                name='unique_instructor_leadership_role',
+            ),
+        ]
