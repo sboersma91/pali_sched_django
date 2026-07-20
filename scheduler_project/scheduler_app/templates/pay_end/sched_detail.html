@@ -15,6 +15,7 @@
       {% if has_generated_schedule and not generation_blocked %}
         <a href="{% url 'sched-export' sched.id %}" class="btn btn-outline-success">Export CSV</a>
       {% endif %}
+      <a href="{% url 'instructor-availability' sched.id %}" class="btn btn-outline-primary">Manage Instructor Availability</a>
       <a href="{% url 'sched-update' sched.id %}" class="btn btn-secondary">Edit Schedule Record</a>
       <a href="{% url 'sched-delete' sched.id %}" class="btn btn-outline-danger">Delete Schedule</a>
       <a href="{% url 'sched-list' %}" class="btn btn-outline-primary">Back to Schedules</a>

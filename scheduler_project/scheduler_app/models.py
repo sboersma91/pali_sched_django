@@ -933,12 +933,21 @@ class Instructor(models.Model):
     )
     fname = CharField(max_length=450)
     lname = CharField(max_length=450)
-    ropes_lead = BooleanField()
-    school_lead = BooleanField()
+    ropes_lead = BooleanField(blank=True, null=True)
+    school_lead = BooleanField(blank=True, null=True)
     # days_incabin = SmallIntegerField()
     # this will have to be a calculated field.
-    cpr = BooleanField(choices=(("fr", "fresh"), ('hr', 'house'),('boolean field','boolean field')))
-    firstaid = CharField(choices= (('yes','yes'),('jack','jack'), ('charfield','charfield')),max_length=100)
+    cpr = BooleanField(
+        blank=True,
+        null=True,
+        choices=(("fr", "fresh"), ('hr', 'house'), ('boolean field', 'boolean field')),
+    )
+    firstaid = CharField(
+        blank=True,
+        null=True,
+        choices=(('yes', 'yes'), ('jack', 'jack'), ('charfield', 'charfield')),
+        max_length=100,
+    )
     certifications = ManyToManyField(
         Certification,
         through='InstructorCertification',
@@ -954,6 +963,77 @@ class Instructor(models.Model):
     
     def __str__(self):
         return self.fname + ' ' + self.lname
+
+
+class InstructorScheduleAvailability(models.Model):
+    AVAILABLE = 'available'
+    UNAVAILABLE = 'unavailable'
+    AVAILABILITY_STATE_CHOICES = (
+        (AVAILABLE, 'Available'),
+        (UNAVAILABLE, 'Unavailable'),
+    )
+    SLOT_KEY_CHOICES = tuple((slot_key, slot_key) for slot_key in SCHEDULE_SLOT_KEYS)
+
+    organization = ForeignKey(
+        'members.Organization',
+        on_delete=PROTECT,
+        related_name='instructor_schedule_availability_records',
+    )
+    instructor = ForeignKey(
+        Instructor,
+        on_delete=CASCADE,
+        related_name='schedule_availability_records',
+    )
+    schedule = ForeignKey(
+        TheSched,
+        on_delete=CASCADE,
+        related_name='instructor_availability_records',
+    )
+    slot_key = CharField(max_length=20, choices=SLOT_KEY_CHOICES)
+    state = CharField(max_length=11, choices=AVAILABILITY_STATE_CHOICES)
+
+    def clean(self):
+        super().clean()
+        errors = {}
+
+        if self.slot_key not in SCHEDULE_SLOT_KEYS:
+            errors['slot_key'] = 'Slot key must be a canonical schedule slot key.'
+        if self.state not in {self.AVAILABLE, self.UNAVAILABLE}:
+            errors['state'] = 'State must be available or unavailable.'
+        if (
+            self.organization_id
+            and self.instructor_id
+            and self.organization_id != self.instructor.organization_id
+        ):
+            errors['instructor'] = (
+                'Instructor and availability record must belong to the same organization.'
+            )
+        if (
+            self.organization_id
+            and self.schedule_id
+            and self.organization_id != self.schedule.organization_id
+        ):
+            errors['schedule'] = (
+                'Schedule and availability record must belong to the same organization.'
+            )
+
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f'{self.instructor} — {self.schedule} — {self.slot_key}: {self.state}'
+
+    class Meta:
+        constraints = [
+            UniqueConstraint(
+                fields=['instructor', 'schedule', 'slot_key'],
+                name='unique_instructor_schedule_slot_availability',
+            ),
+        ]
 
 
 class InstructorCertification(models.Model):

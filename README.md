@@ -120,6 +120,18 @@ CSV export, and organization-aware schedule generation.
 See [Authentication and Authorization Architecture](docs/authentication-authorization-architecture.md)
 for the current model, authorization rules, known limitations, and architecture decision record.
 
+## Instructor assignment architecture
+
+Instructor assignment is a separate, read-only pipeline built on the displayed
+Operational Schedule. It extracts activity occurrences, evaluates certification
+and organization qualification, applies operational constraints, and selects
+eligible instructors deterministically. Assignment results remain in memory and
+do not alter the Activity Scheduling Engine or persist instructor assignments.
+
+See [Instructor Assignment Architecture](docs/instructor-assignment-architecture.md)
+for the current layer contracts, first overlap constraint, limitations, and
+extension guidance.
+
 ## Compatibility and known limitations
 
 - Both legacy function-based CRUD routes and newer class-based operational routes remain in use.

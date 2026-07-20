@@ -4,10 +4,38 @@ from django.db.models.base import Model
 from django.forms import ModelForm, widgets
 from django.db.models.functions import Lower
 from .models import Course, Locations, Schools, Instructor, TheSched
+from .schedule_blocks import SCHEDULE_SLOT_KEYS
 from .school_accounting import calculate_school_slot_accounting
 
 
 DEFAULT_ACTIVITY_GROUP_SIZE = 16
+
+
+class InstructorAvailabilityChangeForm(forms.Form):
+    CLEAR = 'clear'
+    ACTION_CHOICES = (
+        ('available', 'Available'),
+        ('unavailable', 'Unavailable'),
+        (CLEAR, 'Clear explicit state'),
+    )
+
+    instructor_id = forms.IntegerField(min_value=1)
+    slot_key = forms.ChoiceField(
+        choices=tuple((slot_key, slot_key) for slot_key in SCHEDULE_SLOT_KEYS)
+    )
+    action = forms.ChoiceField(choices=ACTION_CHOICES)
+
+    def __init__(self, *args, organization, instructors_by_id, **kwargs):
+        self.organization = organization
+        self.instructors_by_id = instructors_by_id
+        super().__init__(*args, **kwargs)
+
+    def clean_instructor_id(self):
+        instructor_id = self.cleaned_data['instructor_id']
+        instructor = self.instructors_by_id.get(instructor_id)
+        if instructor is None or instructor.organization_id != self.organization.pk:
+            raise ValidationError('Instructor does not belong to the authorized organization.')
+        return instructor
 
 
 def suggest_activity_group_count(total_students):
@@ -307,4 +335,22 @@ class InstructorForm(ModelForm):
             # 'days_incabin': forms.(attrs={'class':'form-control'}),
             'cpr': widgets.SelectMultiple(attrs={'class':'form-control'}),
             # 'firstaid': forms.(attrs={'class':'form-control'}),
+        }
+
+
+class InstructorManagementForm(ModelForm):
+    def __init__(self, *args, **kwargs):
+        self.organization = kwargs.pop('organization', None)
+        super().__init__(*args, **kwargs)
+
+    class Meta:
+        model = Instructor
+        fields = ('fname', 'lname')
+        labels = {
+            'fname': 'First Name',
+            'lname': 'Last Name',
+        }
+        widgets = {
+            'fname': forms.TextInput(attrs={'class': 'form-control'}),
+            'lname': forms.TextInput(attrs={'class': 'form-control'}),
         }

@@ -1,0 +1,20 @@
+{% extends 'pay_end/base_pay.html' %}
+{% block title %}Delete {{ instructor }}{% endblock title %}
+{% block content %}
+  <div class="card border-danger mt-4 mb-4">
+    <div class="card-header bg-danger text-white">
+      <h1 class="h4 mb-0">Confirm Instructor Deletion</h1>
+    </div>
+    <div class="card-body">
+      <p>Are you sure you want to permanently delete <strong>{{ instructor }}</strong>?</p>
+      <p class="text-danger fw-bold">This also removes the instructor’s schedule-specific availability and their certification and leadership-role relationship rows.</p>
+      <p>Certification and leadership-role definitions will not be deleted.</p>
+      <p class="mb-4">This action cannot be undone.</p>
+      <form method="post" class="d-flex flex-wrap gap-2">
+        {% csrf_token %}
+        <button type="submit" class="btn btn-danger">Confirm Delete</button>
+        <a href="{% url 'instructor-list' %}" class="btn btn-secondary">Cancel</a>
+      </form>
+    </div>
+  </div>
+{% endblock content %}

@@ -1,0 +1,66 @@
+{% extends 'pay_end/base_pay.html' %}
+{% block title %}Instructor Availability — {{ schedule.sched_name }}{% endblock title %}
+{% block content %}
+  <div class="mt-4 mb-3">
+    <p class="text-uppercase text-muted small mb-1">{{ schedule.sched_name }}</p>
+    <h1>Instructor Availability</h1>
+    <p class="text-muted">Set an explicit state for each instructor and operational schedule slot. Missing availability blocks automatic assignment.</p>
+  </div>
+
+  {% if availability_error %}
+    <div class="alert alert-danger" role="alert">
+      {{ availability_error }}
+    </div>
+  {% endif %}
+
+  {% if availability_matrix.rows %}
+    <form method="post">
+      {% csrf_token %}
+      <div class="table-responsive">
+        <table class="table table-bordered table-sm align-middle">
+          <thead>
+            <tr>
+              <th scope="col">Instructor</th>
+              {% for slot_key in availability_matrix.slot_keys %}
+                <th scope="col"><code>{{ slot_key }}</code></th>
+              {% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in availability_matrix.rows %}
+              <tr>
+                <th scope="row">{{ row.instructor }}</th>
+                {% for cell in row.cells %}
+                  <td>
+                    <label class="visually-hidden" for="availability_{{ row.instructor.pk }}_{{ cell.slot_key }}">
+                      {{ row.instructor }} — {{ cell.slot_key }}
+                    </label>
+                    <select
+                      class="form-select form-select-sm"
+                      id="availability_{{ row.instructor.pk }}_{{ cell.slot_key }}"
+                      name="availability_{{ row.instructor.pk }}_{{ cell.slot_key }}"
+                      aria-label="{{ row.instructor }} — {{ cell.slot_key }}"
+                    >
+                      <option value="clear"{% if cell.state == None %} selected{% endif %}>Missing</option>
+                      <option value="available"{% if cell.state == 'available' %} selected{% endif %}>Available</option>
+                      <option value="unavailable"{% if cell.state == 'unavailable' %} selected{% endif %}>Unavailable</option>
+                    </select>
+                  </td>
+                {% endfor %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <button type="submit" class="btn btn-primary">Save Instructor Availability</button>
+    </form>
+  {% else %}
+    <div class="alert alert-info" role="status">
+      <p>No instructors belong to this schedule’s organization yet.</p>
+      <a href="{% url 'instructor-create' %}" class="btn btn-primary btn-sm">Add Instructor</a>
+      <a href="{% url 'instructor-list' %}" class="btn btn-outline-primary btn-sm">View Instructors</a>
+    </div>
+  {% endif %}
+
+  <a href="{% url 'sched-detail' schedule.pk %}" class="btn btn-link mt-3">Back to Schedule</a>
+{% endblock content %}

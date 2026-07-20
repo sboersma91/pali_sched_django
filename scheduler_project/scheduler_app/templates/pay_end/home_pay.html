@@ -70,6 +70,19 @@
           </div>
         </div>
       </div>
+
+      <div class="col-md-6 col-xl-3">
+        <div class="card h-100">
+          <div class="card-body d-flex flex-column">
+            <h3 class="h5 card-title">Instructors</h3>
+            <p class="card-text text-muted flex-grow-1">Manage the instructors used for schedule-specific availability and assignment.</p>
+            <div class="d-flex flex-wrap gap-2">
+              <a href="{% url 'instructor-list' %}" class="btn btn-outline-primary btn-sm">View Instructors</a>
+              <a href="{% url 'instructor-create' %}" class="btn btn-primary btn-sm">Add Instructor</a>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   </section>
 {% endblock %}

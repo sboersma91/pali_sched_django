@@ -12,11 +12,24 @@ from django.template.loader import render_to_string
 from django.test import Client, RequestFactory, TestCase, override_settings
 from django.urls import reverse
 
-from .forms import SchoolsForm, SchedForm, suggest_activity_group_count
+from .forms import (
+    InstructorManagementForm,
+    SchoolsForm,
+    SchedForm,
+    suggest_activity_group_count,
+)
 from .instructor_assignment import (
     assign_occurrences_deterministically,
+    evaluate_instructor_assignment_overlap,
+    evaluate_instructor_availability,
+    evaluate_occurrence_constraints,
     evaluate_occurrence_qualifications,
     extract_operational_occurrences,
+    preload_instructor_availability,
+)
+from .instructor_availability import (
+    apply_instructor_availability_changes,
+    build_instructor_availability_matrix,
 )
 from .views import (
     SchedDetail,
@@ -30,6 +43,7 @@ from .school_accounting import (
     school_slot_accounting_summary,
     school_validation_slot_blocks,
 )
+from .schedule_blocks import SCHEDULE_SLOT_KEYS
 from .schedule_operations import (
     apply_holding_reassignment_proposal,
     apply_move_proposal,
@@ -52,6 +66,7 @@ from .models import (
     Instructor,
     InstructorCertification,
     InstructorLeadershipRole,
+    InstructorScheduleAvailability,
     LeadershipRole,
     Locations,
     Schools,
@@ -326,6 +341,802 @@ class QualificationEvaluationTests(TestCase):
         self.assertTrue(result["unqualified_instructors"][0]["organization_mismatch"])
 
 
+class InstructorAvailabilityEvaluationTests(TestCase):
+    def setUp(self):
+        self.organization = Organization.objects.create(name="Availability Evaluation Organization")
+        self.other_organization = Organization.objects.create(name="Other Evaluation Organization")
+        self.instructor = self.create_instructor("Available", self.organization)
+        self.other_instructor = self.create_instructor("Other", self.organization)
+        self.schedule = self.create_schedule("Evaluation Week", self.organization)
+        self.other_schedule = self.create_schedule("Other Week", self.organization)
+        self.occurrence = self.make_occurrence("mon_pm1")
+
+    def create_instructor(self, first_name, organization):
+        return Instructor.objects.create(
+            organization=organization,
+            fname=first_name,
+            lname="Instructor",
+            ropes_lead=False,
+            school_lead=False,
+            cpr=True,
+            firstaid="yes",
+        )
+
+    def create_schedule(self, name, organization):
+        return TheSched.objects.create(
+            organization=organization,
+            sched_name=name,
+            sched_data={},
+        )
+
+    def make_occurrence(self, *slot_keys):
+        return {
+            "schedule_id": self.schedule.pk,
+            "organization_id": self.organization.pk,
+            "activity_id": 1,
+            "activity_display_name": "Activity",
+            "group_index": 0,
+            "group_label": "School 0",
+            "occurrence_id": f"occurrence:0:{slot_keys[0]}",
+            "slot_footprint": [
+                {
+                    "block_id": f"0:{slot_key}",
+                    "slot_key": slot_key,
+                    "slot_label": slot_key.upper(),
+                    "position": position,
+                }
+                for position, slot_key in enumerate(slot_keys, start=1)
+            ],
+        }
+
+    def availability(self, slot_key, state="available", **overrides):
+        values = {
+            "organization": self.organization,
+            "instructor": self.instructor,
+            "schedule": self.schedule,
+            "slot_key": slot_key,
+            "state": state,
+        }
+        values.update(overrides)
+        return InstructorScheduleAvailability.objects.create(**values)
+
+    def evaluate(self, records, occurrence=None, instructor=None):
+        return evaluate_instructor_availability(
+            occurrence or self.occurrence,
+            instructor or self.instructor,
+            records,
+        )
+
+    def test_single_slot_passes_with_explicit_availability(self):
+        result = self.evaluate([self.availability("mon_pm1")])
+
+        self.assertTrue(result["passes"])
+        self.assertIsNone(result["code"])
+        self.assertEqual(result["rule"], "explicit_schedule_slot_availability")
+        self.assertEqual(result["details"]["failed_slots"], ())
+
+    def test_single_slot_fails_when_availability_is_missing(self):
+        result = self.evaluate([])
+
+        self.assertFalse(result["passes"])
+        self.assertEqual(result["code"], "missing_availability")
+        self.assertEqual(result["severity"], "blocking")
+
+    def test_single_slot_fails_when_explicitly_unavailable(self):
+        result = self.evaluate([self.availability("mon_pm1", state="unavailable")])
+
+        self.assertFalse(result["passes"])
+        self.assertEqual(result["code"], "explicitly_unavailable")
+        self.assertEqual(result["severity"], "blocking")
+
+    def test_missing_and_unavailable_have_distinct_slot_reason_codes(self):
+        occurrence = self.make_occurrence("mon_pm1", "mon_pm2")
+
+        result = self.evaluate(
+            [self.availability("mon_pm2", state="unavailable")],
+            occurrence=occurrence,
+        )
+
+        self.assertEqual(result["code"], "availability_requirements_not_met")
+        self.assertEqual(
+            [failure["reason_code"] for failure in result["details"]["failed_slots"]],
+            ["missing_availability", "explicitly_unavailable"],
+        )
+
+    def test_multi_slot_passes_only_when_every_slot_is_explicitly_available(self):
+        occurrence = self.make_occurrence("mon_pm1", "mon_pm2")
+        records = [self.availability(slot_key) for slot_key in ("mon_pm1", "mon_pm2")]
+
+        result = self.evaluate(records, occurrence=occurrence)
+
+        self.assertTrue(result["passes"])
+
+    def test_one_missing_slot_blocks_multi_slot_occurrence(self):
+        occurrence = self.make_occurrence("mon_pm1", "mon_pm2")
+
+        result = self.evaluate(
+            [self.availability("mon_pm1")],
+            occurrence=occurrence,
+        )
+
+        self.assertEqual(result["code"], "missing_availability")
+        self.assertEqual(result["details"]["failed_slots"][0]["slot_key"], "mon_pm2")
+
+    def test_one_unavailable_slot_blocks_multi_slot_occurrence(self):
+        occurrence = self.make_occurrence("mon_pm1", "mon_pm2")
+        records = [
+            self.availability("mon_pm1"),
+            self.availability("mon_pm2", state="unavailable"),
+        ]
+
+        result = self.evaluate(records, occurrence=occurrence)
+
+        self.assertEqual(result["code"], "explicitly_unavailable")
+        self.assertEqual(result["details"]["failed_slots"][0]["slot_key"], "mon_pm2")
+
+    def test_multiple_failed_slots_are_returned_in_occurrence_order(self):
+        occurrence = self.make_occurrence("tue_am1", "tue_am2", "tue_pm1")
+        records = [self.availability("tue_am2", state="unavailable")]
+
+        result = self.evaluate(records, occurrence=occurrence)
+
+        self.assertEqual(
+            [failure["slot_key"] for failure in result["details"]["failed_slots"]],
+            ["tue_am1", "tue_am2", "tue_pm1"],
+        )
+        self.assertEqual(
+            [failure["slot_label"] for failure in result["details"]["failed_slots"]],
+            ["TUE_AM1", "TUE_AM2", "TUE_PM1"],
+        )
+
+    def test_record_from_another_instructor_does_not_satisfy_availability(self):
+        record = self.availability("mon_pm1", instructor=self.other_instructor)
+
+        result = self.evaluate([record])
+
+        self.assertEqual(result["code"], "missing_availability")
+
+    def test_record_from_another_schedule_does_not_satisfy_availability(self):
+        record = self.availability("mon_pm1", schedule=self.other_schedule)
+
+        result = self.evaluate([record])
+
+        self.assertEqual(result["code"], "missing_availability")
+
+    def test_record_from_another_organization_does_not_satisfy_availability(self):
+        record = InstructorScheduleAvailability(
+            organization=self.other_organization,
+            instructor=self.instructor,
+            schedule=self.schedule,
+            slot_key="mon_pm1",
+            state="available",
+        )
+
+        result = self.evaluate([record])
+
+        self.assertEqual(result["code"], "missing_availability")
+
+    def test_irrelevant_extra_slot_does_not_affect_result(self):
+        records = [
+            self.availability("mon_pm1"),
+            self.availability("tue_am1", state="unavailable"),
+        ]
+
+        result = self.evaluate(records)
+
+        self.assertTrue(result["passes"])
+
+    def test_evaluation_is_deterministic_regardless_of_record_order(self):
+        occurrence = self.make_occurrence("mon_pm1", "mon_pm2")
+        records = [
+            self.availability("mon_pm1"),
+            self.availability("mon_pm2", state="unavailable"),
+            self.availability("tue_am1"),
+        ]
+
+        forward = self.evaluate(records, occurrence=occurrence)
+        reversed_result = self.evaluate(list(reversed(records)), occurrence=occurrence)
+
+        self.assertEqual(forward, reversed_result)
+
+    def test_duplicate_relevant_records_fail_closed_deterministically(self):
+        stored = self.availability("mon_pm1")
+        duplicate = InstructorScheduleAvailability(
+            organization=self.organization,
+            instructor=self.instructor,
+            schedule=self.schedule,
+            slot_key="mon_pm1",
+            state="available",
+        )
+
+        forward = self.evaluate([stored, duplicate])
+        reversed_result = self.evaluate([duplicate, stored])
+
+        self.assertEqual(forward, reversed_result)
+        self.assertEqual(forward["code"], "duplicate_availability")
+        self.assertEqual(
+            forward["details"]["failed_slots"][0]["reason_code"],
+            "duplicate_availability",
+        )
+
+    def test_invalid_relevant_state_fails_closed(self):
+        record = InstructorScheduleAvailability(
+            organization=self.organization,
+            instructor=self.instructor,
+            schedule=self.schedule,
+            slot_key="mon_pm1",
+            state="invalid",
+        )
+
+        result = self.evaluate([record])
+
+        self.assertEqual(result["code"], "invalid_availability_state")
+
+    def test_lazy_or_unknown_record_container_is_rejected(self):
+        with self.assertRaises(TypeError):
+            self.evaluate(iter(()))
+
+    def test_evaluation_performs_no_database_queries_or_writes(self):
+        records = [self.availability("mon_pm1")]
+        before_count = InstructorScheduleAvailability.objects.count()
+
+        with self.assertNumQueries(0):
+            result = self.evaluate(records)
+
+        self.assertTrue(result["passes"])
+        self.assertEqual(InstructorScheduleAvailability.objects.count(), before_count)
+
+    def test_evaluation_does_not_mutate_inputs(self):
+        occurrence = self.make_occurrence("mon_pm1", "mon_pm2")
+        records = [self.availability("mon_pm1"), self.availability("mon_pm2")]
+        occurrence_before = deepcopy(occurrence)
+        record_values_before = [
+            (record.pk, record.organization_id, record.instructor_id, record.schedule_id,
+             record.slot_key, record.state)
+            for record in records
+        ]
+        instructor_values_before = dict(self.instructor.__dict__)
+
+        self.evaluate(records, occurrence=occurrence)
+
+        self.assertEqual(occurrence, occurrence_before)
+        self.assertEqual(
+            [
+                (record.pk, record.organization_id, record.instructor_id, record.schedule_id,
+                 record.slot_key, record.state)
+                for record in records
+            ],
+            record_values_before,
+        )
+        self.assertEqual(self.instructor.__dict__, instructor_values_before)
+
+    def test_evaluator_does_not_invoke_qualification_or_overlap_logic(self):
+        records = [self.availability("mon_pm1")]
+
+        with patch(
+            "scheduler_app.instructor_assignment.evaluate_occurrence_qualifications"
+        ) as qualification, patch(
+            "scheduler_app.instructor_assignment.evaluate_instructor_assignment_overlap"
+        ) as overlap:
+            result = self.evaluate(records)
+
+        self.assertTrue(result["passes"])
+        qualification.assert_not_called()
+        overlap.assert_not_called()
+
+
+class InstructorAssignmentConstraintTests(TestCase):
+    def setUp(self):
+        self.organization = Organization.objects.create(name="Constraint Organization")
+        self.instructor = self.create_instructor("First")
+        self.other_instructor = self.create_instructor("Second")
+        self.occurrence = self.make_occurrence("proposed", "mon_pm1", "mon_pm2")
+
+    def create_instructor(self, first_name):
+        return Instructor.objects.create(
+            organization=self.organization,
+            fname=first_name,
+            lname="Instructor",
+            ropes_lead=False,
+            school_lead=False,
+            cpr=True,
+            firstaid="yes",
+        )
+
+    def make_occurrence(self, occurrence_id, *slot_keys, schedule_id=1):
+        return {
+            "schedule_id": schedule_id,
+            "organization_id": self.organization.pk,
+            "activity_id": 1,
+            "activity_display_name": occurrence_id,
+            "group_index": 0,
+            "group_label": "School 0",
+            "occurrence_id": occurrence_id,
+            "slot_footprint": [
+                {
+                    "block_id": f"0:{slot_key}",
+                    "slot_key": slot_key,
+                    "slot_label": slot_key,
+                    "position": position,
+                }
+                for position, slot_key in enumerate(slot_keys, start=1)
+            ],
+        }
+
+    def assignment(self, instructor, occurrence):
+        return {
+            "occurrence": occurrence,
+            "assigned_instructor": instructor,
+            "status": "assigned" if instructor else "unstaffed",
+            "reason": None,
+            "constraint_rejections": [],
+        }
+
+    def availability_records(self, instructors=None, occurrence=None):
+        instructors = instructors or (self.instructor, self.other_instructor)
+        occurrence = occurrence or self.occurrence
+        return [
+            InstructorScheduleAvailability(
+                organization_id=self.organization.pk,
+                instructor=instructor,
+                schedule_id=occurrence["schedule_id"],
+                slot_key=slot["slot_key"],
+                state="available",
+            )
+            for instructor in instructors
+            for slot in occurrence["slot_footprint"]
+        ]
+
+    def test_overlap_rule_passes_without_existing_assignments(self):
+        result = evaluate_instructor_assignment_overlap(
+            self.occurrence, self.instructor, []
+        )
+
+        self.assertTrue(result["passes"])
+
+    def test_overlap_rule_passes_for_non_overlapping_assignment(self):
+        existing = [self.assignment(
+            self.instructor,
+            self.make_occurrence("existing", "tue_am1"),
+        )]
+
+        result = evaluate_instructor_assignment_overlap(
+            self.occurrence, self.instructor, existing
+        )
+
+        self.assertTrue(result["passes"])
+
+    def test_overlap_rule_rejects_one_shared_slot_with_structured_details(self):
+        existing = [self.assignment(
+            self.instructor,
+            self.make_occurrence("existing", "mon_pm1"),
+        )]
+
+        result = evaluate_instructor_assignment_overlap(
+            self.occurrence, self.instructor, existing
+        )
+
+        self.assertFalse(result["passes"])
+        self.assertEqual(result["code"], "overlapping_assignment")
+        self.assertEqual(result["severity"], "blocking")
+        self.assertEqual(result["rule"], "no_overlapping_assignments")
+        self.assertEqual(result["details"]["conflicting_occurrence_id"], "existing")
+        self.assertEqual(result["details"]["overlapping_slot_keys"], ("mon_pm1",))
+
+    def test_overlap_rule_rejects_sorted_shared_slots_in_multi_block_occurrence(self):
+        existing = [self.assignment(
+            self.instructor,
+            self.make_occurrence("existing", "mon_pm2", "mon_pm1"),
+        )]
+
+        result = evaluate_instructor_assignment_overlap(
+            self.occurrence, self.instructor, existing
+        )
+
+        self.assertEqual(
+            result["details"]["overlapping_slot_keys"],
+            ("mon_pm1", "mon_pm2"),
+        )
+
+    def test_overlap_rule_ignores_unstaffed_and_other_instructor_assignments(self):
+        conflicting_occurrence = self.make_occurrence("existing", "mon_pm1")
+        existing = [
+            self.assignment(None, conflicting_occurrence),
+            self.assignment(self.other_instructor, conflicting_occurrence),
+        ]
+
+        result = evaluate_instructor_assignment_overlap(
+            self.occurrence, self.instructor, existing
+        )
+
+        self.assertTrue(result["passes"])
+
+    def test_overlap_rule_ignores_assignments_from_another_schedule(self):
+        existing = [self.assignment(
+            self.instructor,
+            self.make_occurrence("existing", "mon_pm1", schedule_id=2),
+        )]
+
+        result = evaluate_instructor_assignment_overlap(
+            self.occurrence, self.instructor, existing
+        )
+
+        self.assertTrue(result["passes"])
+
+    def test_overlap_rule_is_read_only_and_performs_no_queries(self):
+        existing = [self.assignment(
+            self.instructor,
+            self.make_occurrence("existing", "mon_pm1"),
+        )]
+        occurrence_before = deepcopy(self.occurrence)
+        assignments_before = deepcopy(existing)
+        instructor_count = Instructor.objects.count()
+
+        with self.assertNumQueries(0):
+            evaluate_instructor_assignment_overlap(
+                self.occurrence, self.instructor, existing
+            )
+
+        self.assertEqual(self.occurrence, occurrence_before)
+        self.assertEqual(existing, assignments_before)
+        self.assertEqual(Instructor.objects.count(), instructor_count)
+
+    def test_constraint_evaluator_preserves_order_and_structures_rejections(self):
+        existing = [self.assignment(
+            self.instructor,
+            self.make_occurrence("existing", "mon_pm1"),
+        )]
+
+        result = evaluate_occurrence_constraints(
+            self.occurrence,
+            [self.other_instructor, self.instructor],
+            existing,
+            self.availability_records(),
+        )
+
+        self.assertEqual(result["eligible_instructors"], [self.other_instructor])
+        self.assertEqual(result["rejected_instructors"][0]["instructor"], self.instructor)
+        self.assertEqual(
+            result["rejected_instructors"][0]["reasons"][0]["code"],
+            "overlapping_assignment",
+        )
+        self.assertEqual(result["warnings"], [])
+
+    def test_constraint_evaluation_is_repeatable(self):
+        existing = [self.assignment(
+            self.instructor,
+            self.make_occurrence("existing", "mon_pm1"),
+        )]
+
+        first = evaluate_occurrence_constraints(
+            self.occurrence,
+            [self.instructor, self.other_instructor],
+            existing,
+            self.availability_records(),
+        )
+        second = evaluate_occurrence_constraints(
+            self.occurrence,
+            [self.instructor, self.other_instructor],
+            existing,
+            self.availability_records(),
+        )
+
+        self.assertEqual(first, second)
+
+
+class InstructorAvailabilityConstraintIntegrationTests(TestCase):
+    def setUp(self):
+        self.organization = Organization.objects.create(name="Availability Integration Organization")
+        self.other_organization = Organization.objects.create(name="Other Integration Organization")
+        self.schedule = self.create_schedule("Integration Week", self.organization)
+        self.other_schedule = self.create_schedule("Other Integration Week", self.organization)
+        self.instructor = self.create_instructor("First", self.organization)
+        self.second_instructor = self.create_instructor("Second", self.organization)
+        self.course = Course.objects.create(
+            organization=self.organization,
+            course_name="Integration Activity",
+            abriviation="INTG",
+            course_len=1,
+        )
+        self.occurrence = self.make_occurrence("mon_pm1")
+
+    def create_schedule(self, name, organization):
+        return TheSched.objects.create(
+            organization=organization,
+            sched_name=name,
+            sched_data={},
+        )
+
+    def create_instructor(self, first_name, organization):
+        return Instructor.objects.create(
+            organization=organization,
+            fname=first_name,
+            lname="Instructor",
+            ropes_lead=False,
+            school_lead=False,
+            cpr=True,
+            firstaid="yes",
+        )
+
+    def make_occurrence(self, *slot_keys, schedule=None, organization=None):
+        schedule = schedule or self.schedule
+        organization = organization or self.organization
+        return {
+            "schedule_id": schedule.pk,
+            "organization_id": organization.pk,
+            "activity_id": self.course.pk,
+            "activity_display_name": self.course.course_name,
+            "group_index": 0,
+            "group_label": "School 0",
+            "occurrence_id": f"occurrence:0:{slot_keys[0]}",
+            "slot_footprint": [
+                {
+                    "block_id": f"0:{slot_key}",
+                    "slot_key": slot_key,
+                    "slot_label": slot_key.upper(),
+                    "position": position,
+                }
+                for position, slot_key in enumerate(slot_keys, start=1)
+            ],
+        }
+
+    def availability(self, instructor, slot_key, state="available", schedule=None):
+        return InstructorScheduleAvailability.objects.create(
+            organization=self.organization,
+            instructor=instructor,
+            schedule=schedule or self.schedule,
+            slot_key=slot_key,
+            state=state,
+        )
+
+    def assignment(self, instructor, occurrence):
+        return {
+            "occurrence": occurrence,
+            "assigned_instructor": instructor,
+            "status": "assigned",
+            "reason": None,
+            "constraint_rejections": [],
+        }
+
+    def assign(self, instructors, records, occurrence=None, certifications=None, required=()):
+        occurrence = occurrence or self.occurrence
+        return assign_occurrences_deterministically(
+            [occurrence],
+            instructors,
+            certifications or {},
+            {self.course.pk: required},
+            records,
+        )
+
+    def test_qualified_explicitly_available_instructor_is_eligible(self):
+        records = [self.availability(self.instructor, "mon_pm1")]
+
+        result = evaluate_occurrence_constraints(
+            self.occurrence, [self.instructor], [], records
+        )
+
+        self.assertEqual(result["eligible_instructors"], [self.instructor])
+        self.assertEqual(result["rejected_instructors"], [])
+
+    def test_missing_and_explicit_unavailability_are_structured_rejections(self):
+        missing = evaluate_occurrence_constraints(
+            self.occurrence, [self.instructor], [], []
+        )
+        unavailable_record = self.availability(
+            self.instructor, "mon_pm1", state="unavailable"
+        )
+        unavailable = evaluate_occurrence_constraints(
+            self.occurrence, [self.instructor], [], [unavailable_record]
+        )
+
+        missing_reason = missing["rejected_instructors"][0]["reasons"][0]
+        unavailable_reason = unavailable["rejected_instructors"][0]["reasons"][0]
+        self.assertEqual(missing_reason["rule"], "explicit_schedule_slot_availability")
+        self.assertEqual(missing_reason["code"], "missing_availability")
+        self.assertEqual(unavailable_reason["code"], "explicitly_unavailable")
+
+    def test_multi_slot_candidate_requires_every_slot(self):
+        occurrence = self.make_occurrence("mon_pm1", "mon_pm2")
+        records = [self.availability(self.instructor, "mon_pm1")]
+
+        result = evaluate_occurrence_constraints(
+            occurrence, [self.instructor], [], records
+        )
+
+        reason = result["rejected_instructors"][0]["reasons"][0]
+        self.assertEqual(reason["code"], "missing_availability")
+        self.assertEqual(reason["details"]["failed_slots"][0]["slot_key"], "mon_pm2")
+
+    def test_available_candidate_can_still_fail_overlap(self):
+        records = [self.availability(self.instructor, "mon_pm1")]
+        existing = [self.assignment(self.instructor, self.occurrence)]
+
+        result = evaluate_occurrence_constraints(
+            self.occurrence, [self.instructor], existing, records
+        )
+
+        reason = result["rejected_instructors"][0]["reasons"][0]
+        self.assertEqual(reason["rule"], "no_overlapping_assignments")
+        self.assertEqual(reason["code"], "overlapping_assignment")
+
+    def test_availability_runs_before_overlap_and_stops_first_failure(self):
+        events = []
+        with patch(
+            "scheduler_app.instructor_assignment.evaluate_instructor_availability",
+            side_effect=lambda *args: (
+                events.append("availability")
+                or {
+                    "passes": False,
+                    "code": "missing_availability",
+                    "message": "Missing.",
+                    "severity": "blocking",
+                    "rule": "explicit_schedule_slot_availability",
+                    "details": {"failed_slots": ()},
+                }
+            ),
+        ), patch(
+            "scheduler_app.instructor_assignment.evaluate_instructor_assignment_overlap"
+        ) as overlap:
+            evaluate_occurrence_constraints(
+                self.occurrence, [self.instructor], [], []
+            )
+
+        self.assertEqual(events, ["availability"])
+        overlap.assert_not_called()
+
+    def test_unqualified_instructor_is_not_sent_to_constraints(self):
+        records = [self.availability(self.instructor, "mon_pm1")]
+        captured = {}
+
+        def capture_constraints(occurrence, qualified, existing, availability):
+            captured.update({
+                "occurrence": occurrence,
+                "qualified": list(qualified),
+                "existing_count": len(existing),
+                "availability": availability,
+            })
+            return {
+                "eligible_instructors": [],
+                "rejected_instructors": [],
+                "warnings": [],
+            }
+
+        with patch(
+            "scheduler_app.instructor_assignment.evaluate_occurrence_constraints",
+            side_effect=capture_constraints,
+        ) as constraints:
+            assignment = self.assign(
+                [self.instructor], records, required={999}
+            )[0]
+
+        constraints.assert_called_once()
+        self.assertIs(captured["occurrence"], self.occurrence)
+        self.assertEqual(captured["qualified"], [])
+        self.assertEqual(captured["existing_count"], 0)
+        self.assertIs(captured["availability"], records)
+        self.assertIsNone(assignment["assigned_instructor"])
+        self.assertEqual(assignment["reason"], "No qualified instructors available.")
+
+    def test_qualification_runs_before_constraint_evaluation(self):
+        records = [self.availability(self.instructor, "mon_pm1")]
+        events = []
+
+        def qualification(*args):
+            events.append("qualification")
+            return evaluate_occurrence_qualifications(*args)
+
+        def constraints(*args):
+            events.append("constraints")
+            return evaluate_occurrence_constraints(*args)
+
+        with patch(
+            "scheduler_app.instructor_assignment.evaluate_occurrence_qualifications",
+            side_effect=qualification,
+        ), patch(
+            "scheduler_app.instructor_assignment.evaluate_occurrence_constraints",
+            side_effect=constraints,
+        ):
+            assignment = self.assign([self.instructor], records)[0]
+
+        self.assertIs(assignment["assigned_instructor"], self.instructor)
+        self.assertEqual(events, ["qualification", "constraints"])
+
+    def test_strategy_skips_earlier_qualified_unavailable_candidate(self):
+        records = [
+            self.availability(self.instructor, "mon_pm1", state="unavailable"),
+            self.availability(self.second_instructor, "mon_pm1"),
+        ]
+
+        assignment = self.assign(
+            [self.second_instructor, self.instructor], records
+        )[0]
+
+        self.assertIs(assignment["assigned_instructor"], self.second_instructor)
+
+    def test_all_unavailable_candidates_produce_unstaffed_structured_result(self):
+        records = [
+            self.availability(self.instructor, "mon_pm1", state="unavailable"),
+        ]
+
+        assignment = self.assign(
+            [self.instructor, self.second_instructor], records
+        )[0]
+
+        self.assertIsNone(assignment["assigned_instructor"])
+        self.assertEqual(assignment["reason"], "No eligible instructors available.")
+        rejection_codes = [
+            rejection["reasons"][0]["code"]
+            for rejection in assignment["constraint_rejections"]
+        ]
+        self.assertEqual(
+            rejection_codes,
+            ["explicitly_unavailable", "missing_availability"],
+        )
+
+    def test_preload_is_one_bounded_query_and_returns_materialized_tuple(self):
+        expected = self.availability(self.instructor, "mon_pm1")
+        self.availability(
+            self.second_instructor, "mon_pm1", schedule=self.other_schedule
+        )
+        other_instructor = self.create_instructor("Foreign", self.other_organization)
+        other_schedule = self.create_schedule("Foreign Week", self.other_organization)
+        InstructorScheduleAvailability.objects.create(
+            organization=self.other_organization,
+            instructor=other_instructor,
+            schedule=other_schedule,
+            slot_key="mon_pm1",
+            state="available",
+        )
+
+        with self.assertNumQueries(1):
+            records = preload_instructor_availability(
+                self.organization.pk,
+                self.schedule.pk,
+                [self.second_instructor, self.instructor],
+            )
+
+        self.assertIsInstance(records, tuple)
+        self.assertEqual(records, (expected,))
+
+    def test_preloaded_context_drives_assignment_without_more_queries_or_writes(self):
+        self.availability(self.instructor, "mon_pm1")
+        records = preload_instructor_availability(
+            self.organization.pk, self.schedule.pk, [self.instructor]
+        )
+        records_before = tuple(
+            (record.pk, record.slot_key, record.state) for record in records
+        )
+        availability_count = InstructorScheduleAvailability.objects.count()
+
+        with self.assertNumQueries(0):
+            assignment = self.assign([self.instructor], records)[0]
+
+        self.assertIs(assignment["assigned_instructor"], self.instructor)
+        self.assertEqual(
+            tuple((record.pk, record.slot_key, record.state) for record in records),
+            records_before,
+        )
+        self.assertEqual(
+            InstructorScheduleAvailability.objects.count(), availability_count
+        )
+
+    def test_identical_slot_availability_is_isolated_by_schedule(self):
+        self.availability(
+            self.instructor, "mon_pm1", schedule=self.other_schedule
+        )
+        records = preload_instructor_availability(
+            self.organization.pk, self.schedule.pk, [self.instructor]
+        )
+
+        assignment = self.assign([self.instructor], records)[0]
+
+        self.assertIsNone(assignment["assigned_instructor"])
+        self.assertEqual(
+            assignment["constraint_rejections"][0]["reasons"][0]["code"],
+            "missing_availability",
+        )
+
+
 class DeterministicAssignmentStrategyTests(TestCase):
     def setUp(self):
         self.organization = Organization.objects.create(name="Assignment Strategy Organization")
@@ -362,14 +1173,44 @@ class DeterministicAssignmentStrategyTests(TestCase):
             firstaid="yes",
         )
 
+    def availability_records(self, instructors, occurrences=None):
+        occurrences = occurrences or [self.occurrence]
+        records = {}
+        for instructor in instructors:
+            for occurrence in occurrences:
+                for slot in occurrence["slot_footprint"]:
+                    key = (instructor.pk, occurrence["schedule_id"], slot["slot_key"])
+                    records[key] = InstructorScheduleAvailability(
+                        organization_id=occurrence["organization_id"],
+                        instructor=instructor,
+                        schedule_id=occurrence["schedule_id"],
+                        slot_key=slot["slot_key"],
+                        state="available",
+                    )
+        return list(records.values())
+
     def assign(self, instructors, instructor_certifications=None, required=None):
+        instructors = tuple(instructors)
         with self.assertNumQueries(0):
             return assign_occurrences_deterministically(
                 [self.occurrence],
                 instructors,
                 instructor_certifications or {},
                 {self.course.pk: required or ()},
+                self.availability_records(instructors),
             )
+
+    def occurrence_at(self, occurrence_id, slot_key, group_index=0):
+        occurrence = deepcopy(self.occurrence)
+        occurrence["occurrence_id"] = occurrence_id
+        occurrence["group_index"] = group_index
+        occurrence["group_label"] = f"School {group_index}"
+        occurrence["slot_footprint"][0].update({
+            "block_id": f"{group_index}:{slot_key}",
+            "slot_key": slot_key,
+            "slot_label": slot_key,
+        })
+        return occurrence
 
     def test_assigns_one_qualified_instructor(self):
         instructor = self.create_instructor("Qualified")
@@ -422,11 +1263,105 @@ class DeterministicAssignmentStrategyTests(TestCase):
 
         self.assertEqual(
             set(assignment),
-            {"occurrence", "assigned_instructor", "status", "reason"},
+            {
+                "occurrence",
+                "assigned_instructor",
+                "status",
+                "reason",
+                "constraint_rejections",
+            },
         )
         self.assertIs(assignment["occurrence"], self.occurrence)
         self.assertEqual(assignment["status"], "assigned")
         self.assertIsNone(assignment["reason"])
+        self.assertEqual(assignment["constraint_rejections"], [])
+
+    def test_simultaneous_occurrences_receive_distinct_instructors(self):
+        first = self.create_instructor("First")
+        second = self.create_instructor("Second")
+        occurrences = [
+            self.occurrence_at("first", "mon_pm1", group_index=0),
+            self.occurrence_at("second", "mon_pm1", group_index=1),
+        ]
+
+        with self.assertNumQueries(0):
+            assignments = assign_occurrences_deterministically(
+                occurrences,
+                [second, first],
+                {},
+                {},
+                self.availability_records([first, second], occurrences),
+            )
+
+        self.assertEqual(
+            [assignment["assigned_instructor"] for assignment in assignments],
+            [first, second],
+        )
+
+    def test_non_overlapping_occurrences_can_use_same_instructor(self):
+        instructor = self.create_instructor("Available")
+        occurrences = [
+            self.occurrence_at("first", "mon_pm1"),
+            self.occurrence_at("second", "mon_pm2"),
+        ]
+
+        assignments = assign_occurrences_deterministically(
+            occurrences,
+            [instructor],
+            {},
+            {},
+            self.availability_records([instructor], occurrences),
+        )
+
+        self.assertEqual(
+            [assignment["assigned_instructor"] for assignment in assignments],
+            [instructor, instructor],
+        )
+
+    def test_all_overlapping_candidates_produce_eligibility_failure_details(self):
+        instructor = self.create_instructor("Only")
+        occurrences = [
+            self.occurrence_at("first", "mon_pm1", group_index=0),
+            self.occurrence_at("second", "mon_pm1", group_index=1),
+        ]
+
+        assignments = assign_occurrences_deterministically(
+            occurrences,
+            [instructor],
+            {},
+            {},
+            self.availability_records([instructor], occurrences),
+        )
+
+        unstaffed = assignments[1]
+        self.assertIsNone(unstaffed["assigned_instructor"])
+        self.assertEqual(unstaffed["status"], "unstaffed")
+        self.assertEqual(unstaffed["reason"], "No eligible instructors available.")
+        self.assertEqual(
+            unstaffed["constraint_rejections"][0]["reasons"][0]["code"],
+            "overlapping_assignment",
+        )
+
+    def test_three_simultaneous_occurrences_require_three_instructors(self):
+        instructors = [self.create_instructor(name) for name in ("First", "Second")]
+        occurrences = [
+            self.occurrence_at(f"occurrence-{index}", "mon_pm1", group_index=index)
+            for index in range(3)
+        ]
+
+        assignments = assign_occurrences_deterministically(
+            occurrences,
+            reversed(instructors),
+            {},
+            {},
+            self.availability_records(instructors, occurrences),
+        )
+
+        self.assertEqual(
+            [assignment["assigned_instructor"] for assignment in assignments],
+            [instructors[0], instructors[1], None],
+        )
+        self.assertEqual(assignments[2]["reason"], "No eligible instructors available.")
 
     def test_assignment_strategy_performs_no_database_writes(self):
         instructor = self.create_instructor("Read Only")
@@ -445,6 +1380,1091 @@ class DeterministicAssignmentStrategyTests(TestCase):
         second_result = self.assign([second, first], certifications, required={10})
 
         self.assertEqual(first_result, second_result)
+
+
+class InstructorOptionalLegacyFieldTests(TestCase):
+    def setUp(self):
+        self.organization = Organization.objects.create(name="Optional Legacy Organization")
+
+    def test_name_only_instructor_creation_leaves_legacy_fields_unknown(self):
+        instructor = Instructor.objects.create(
+            organization=self.organization,
+            fname="Name",
+            lname="Only",
+        )
+
+        self.assertIsNone(instructor.ropes_lead)
+        self.assertIsNone(instructor.school_lead)
+        self.assertIsNone(instructor.cpr)
+        self.assertIsNone(instructor.firstaid)
+
+    def test_existing_explicit_legacy_values_remain_supported(self):
+        instructor = Instructor.objects.create(
+            organization=self.organization,
+            fname="Legacy",
+            lname="Values",
+            ropes_lead=True,
+            school_lead=False,
+            cpr=True,
+            firstaid="yes",
+        )
+
+        instructor.refresh_from_db()
+        self.assertTrue(instructor.ropes_lead)
+        self.assertFalse(instructor.school_lead)
+        self.assertTrue(instructor.cpr)
+        self.assertEqual(instructor.firstaid, "yes")
+
+    def test_management_form_exposes_only_names(self):
+        form = InstructorManagementForm()
+
+        self.assertEqual(list(form.fields), ["fname", "lname"])
+
+
+@override_settings(ALLOWED_HOSTS=["testserver"])
+class InstructorManagementCrudTests(TestCase):
+    def setUp(self):
+        self.organization = Organization.objects.create(name="Instructor CRUD Organization")
+        self.other_organization = Organization.objects.create(name="Other Instructor CRUD Organization")
+        self.user = get_user_model().objects.create_user(
+            username="instructor-operator",
+            password="password",
+        )
+        OrganizationMembership.objects.create(
+            user=self.user,
+            organization=self.organization,
+        )
+        self.own_instructor = Instructor.objects.create(
+            organization=self.organization,
+            fname="Zoe",
+            lname="Alpha",
+            ropes_lead=True,
+            school_lead=False,
+            cpr=True,
+            firstaid="yes",
+        )
+        self.second_instructor = Instructor.objects.create(
+            organization=self.organization,
+            fname="Avery",
+            lname="Beta",
+        )
+        self.foreign_instructor = Instructor.objects.create(
+            organization=self.other_organization,
+            fname="Foreign",
+            lname="Instructor",
+        )
+
+    def login(self):
+        self.client.force_login(self.user)
+
+    def test_all_crud_routes_require_authentication(self):
+        routes = (
+            reverse("instructor-list"),
+            reverse("instructor-create"),
+            reverse("instructor-update", args=[self.own_instructor.pk]),
+            reverse("instructor-delete", args=[self.own_instructor.pk]),
+        )
+
+        for url in routes:
+            with self.subTest(url=url):
+                response = self.client.get(url)
+                self.assertEqual(response.status_code, 302)
+                self.assertIn(reverse("login"), response["Location"])
+
+    def test_list_is_scoped_ordered_and_has_crud_actions(self):
+        duplicate_name = Instructor.objects.create(
+            organization=self.organization,
+            fname="Avery",
+            lname="Beta",
+        )
+        self.login()
+
+        response = self.client.get(reverse("instructor-list"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            list(response.context["instructors"]),
+            [self.own_instructor, self.second_instructor, duplicate_name],
+        )
+        self.assertNotContains(response, self.foreign_instructor.fname)
+        self.assertContains(response, reverse("instructor-create"))
+        for instructor in (self.own_instructor, self.second_instructor):
+            self.assertContains(
+                response, reverse("instructor-update", args=[instructor.pk])
+            )
+            self.assertContains(
+                response, reverse("instructor-delete", args=[instructor.pk])
+            )
+
+    def test_list_empty_state(self):
+        Instructor.objects.filter(organization=self.organization).delete()
+        self.login()
+
+        response = self.client.get(reverse("instructor-list"))
+
+        self.assertContains(response, "No instructors have been added yet.")
+
+    def test_create_name_only_assigns_server_organization_and_redirects(self):
+        self.login()
+        before_count = Instructor.objects.count()
+
+        response = self.client.post(reverse("instructor-create"), {
+            "fname": "New",
+            "lname": "Instructor",
+            "organization": self.other_organization.pk,
+            "cpr": "True",
+            "firstaid": "yes",
+            "ropes_lead": "on",
+            "school_lead": "on",
+        })
+
+        self.assertRedirects(response, reverse("instructor-list"))
+        self.assertEqual(Instructor.objects.count(), before_count + 1)
+        instructor = Instructor.objects.get(fname="New", lname="Instructor")
+        self.assertEqual(instructor.organization, self.organization)
+        self.assertIsNone(instructor.ropes_lead)
+        self.assertIsNone(instructor.school_lead)
+        self.assertIsNone(instructor.cpr)
+        self.assertIsNone(instructor.firstaid)
+
+    def test_create_success_message_and_name_only_fields(self):
+        self.login()
+
+        get_response = self.client.get(reverse("instructor-create"))
+        post_response = self.client.post(
+            reverse("instructor-create"),
+            {"fname": "Message", "lname": "Test"},
+            follow=True,
+        )
+
+        self.assertEqual(list(get_response.context["form"].fields), ["fname", "lname"])
+        for excluded in (
+            "CPR", "First Aid", "Ropes Lead", "School Lead",
+            "certifications", "leadership_roles", "availability",
+        ):
+            self.assertNotContains(get_response, excluded)
+        self.assertContains(post_response, "Instructor added successfully.")
+
+    def test_invalid_create_preserves_values_errors_and_creates_nothing(self):
+        self.login()
+        before_count = Instructor.objects.count()
+
+        response = self.client.post(
+            reverse("instructor-create"),
+            {"fname": "Preserved", "lname": ""},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'value="Preserved"', html=False)
+        self.assertContains(response, "This field is required.")
+        self.assertEqual(Instructor.objects.count(), before_count)
+
+    def test_update_changes_only_names_and_preserves_organization_and_legacy_values(self):
+        self.login()
+
+        response = self.client.post(
+            reverse("instructor-update", args=[self.own_instructor.pk]),
+            {
+                "fname": "Updated",
+                "lname": "Name",
+                "organization": self.other_organization.pk,
+                "cpr": "False",
+            },
+        )
+
+        self.assertRedirects(response, reverse("instructor-list"))
+        self.own_instructor.refresh_from_db()
+        self.assertEqual((self.own_instructor.fname, self.own_instructor.lname), ("Updated", "Name"))
+        self.assertEqual(self.own_instructor.organization, self.organization)
+        self.assertTrue(self.own_instructor.ropes_lead)
+        self.assertFalse(self.own_instructor.school_lead)
+        self.assertTrue(self.own_instructor.cpr)
+        self.assertEqual(self.own_instructor.firstaid, "yes")
+
+    def test_update_success_message_and_invalid_update_behavior(self):
+        self.login()
+        success = self.client.post(
+            reverse("instructor-update", args=[self.own_instructor.pk]),
+            {"fname": "Success", "lname": "Message"},
+            follow=True,
+        )
+        self.assertContains(success, "Instructor updated successfully.")
+
+        self.own_instructor.refresh_from_db()
+        original_values = (self.own_instructor.fname, self.own_instructor.lname)
+        invalid = self.client.post(
+            reverse("instructor-update", args=[self.own_instructor.pk]),
+            {"fname": "Entered", "lname": ""},
+        )
+        self.own_instructor.refresh_from_db()
+
+        self.assertEqual(invalid.status_code, 200)
+        self.assertContains(invalid, 'value="Entered"', html=False)
+        self.assertContains(invalid, "This field is required.")
+        self.assertEqual(
+            (self.own_instructor.fname, self.own_instructor.lname),
+            original_values,
+        )
+
+    def test_foreign_update_and_delete_return_not_found(self):
+        self.login()
+
+        update = self.client.get(
+            reverse("instructor-update", args=[self.foreign_instructor.pk])
+        )
+        delete = self.client.get(
+            reverse("instructor-delete", args=[self.foreign_instructor.pk])
+        )
+        delete_post = self.client.post(
+            reverse("instructor-delete", args=[self.foreign_instructor.pk])
+        )
+
+        self.assertEqual(update.status_code, 404)
+        self.assertEqual(delete.status_code, 404)
+        self.assertEqual(delete_post.status_code, 404)
+        self.assertTrue(
+            Instructor.objects.filter(pk=self.foreign_instructor.pk).exists()
+        )
+
+    def test_delete_get_confirms_without_deleting(self):
+        self.login()
+
+        response = self.client.get(
+            reverse("instructor-delete", args=[self.own_instructor.pk])
+        )
+
+        self.assertContains(response, "Confirm Instructor Deletion")
+        self.assertContains(response, str(self.own_instructor))
+        self.assertContains(response, "Certification and leadership-role definitions will not be deleted.")
+        self.assertTrue(
+            Instructor.objects.filter(pk=self.own_instructor.pk).exists()
+        )
+
+    def test_delete_cascades_relationship_rows_but_preserves_definitions_and_others(self):
+        certification = Certification.objects.create(
+            organization=self.organization,
+            name="Delete Test Certification",
+        )
+        leadership_role = LeadershipRole.objects.create(
+            organization=self.organization,
+            name="Delete Test Role",
+        )
+        InstructorCertification.objects.create(
+            instructor=self.own_instructor,
+            certification=certification,
+        )
+        InstructorLeadershipRole.objects.create(
+            instructor=self.own_instructor,
+            leadership_role=leadership_role,
+        )
+        schedule = TheSched.objects.create(
+            organization=self.organization,
+            sched_name="Delete Test Schedule",
+            sched_data={},
+        )
+        InstructorScheduleAvailability.objects.create(
+            organization=self.organization,
+            instructor=self.own_instructor,
+            schedule=schedule,
+            slot_key="mon_pm1",
+            state="available",
+        )
+        other_availability = InstructorScheduleAvailability.objects.create(
+            organization=self.organization,
+            instructor=self.second_instructor,
+            schedule=schedule,
+            slot_key="mon_pm1",
+            state="available",
+        )
+        self.login()
+
+        response = self.client.post(
+            reverse("instructor-delete", args=[self.own_instructor.pk]),
+            follow=True,
+        )
+
+        self.assertRedirects(
+            response,
+            reverse("instructor-list"),
+            status_code=302,
+            target_status_code=200,
+        )
+        self.assertContains(response, "was deleted successfully.")
+        self.assertFalse(Instructor.objects.filter(pk=self.own_instructor.pk).exists())
+        self.assertFalse(InstructorCertification.objects.exists())
+        self.assertFalse(InstructorLeadershipRole.objects.exists())
+        self.assertFalse(
+            InstructorScheduleAvailability.objects.filter(
+                instructor_id=self.own_instructor.pk
+            ).exists()
+        )
+        self.assertTrue(Certification.objects.filter(pk=certification.pk).exists())
+        self.assertTrue(LeadershipRole.objects.filter(pk=leadership_role.pk).exists())
+        self.assertTrue(
+            InstructorScheduleAvailability.objects.filter(pk=other_availability.pk).exists()
+        )
+
+    def test_navigation_and_legacy_route(self):
+        schedule = TheSched.objects.create(
+            organization=self.organization,
+            sched_name="Navigation Schedule",
+            sched_data={},
+        )
+        self.login()
+
+        dashboard = self.client.get(reverse("home-paid"))
+        Instructor.objects.filter(organization=self.organization).delete()
+        availability = self.client.get(
+            reverse("instructor-availability", args=[schedule.pk])
+        )
+        legacy = self.client.get(reverse("add-instructor"))
+        schedule_detail = self.client.get(
+            reverse("sched-detail", args=[schedule.pk])
+        )
+
+        for response in (dashboard, availability):
+            self.assertContains(response, reverse("instructor-list"))
+            self.assertContains(response, reverse("instructor-create"))
+        self.assertContains(dashboard, ">Instructors</a>", html=False)
+        self.assertRedirects(legacy, reverse("instructor-create"))
+        self.assertContains(schedule_detail, "Manage Instructor Availability")
+
+
+@override_settings(ALLOWED_HOSTS=["testserver"])
+class InstructorAvailabilityViewTests(TestCase):
+    def setUp(self):
+        self.organization = Organization.objects.create(name="Availability View Organization")
+        self.other_organization = Organization.objects.create(name="Other View Organization")
+        self.user = get_user_model().objects.create_user(
+            username="availability-operator",
+            password="password",
+        )
+        OrganizationMembership.objects.create(
+            user=self.user,
+            organization=self.organization,
+        )
+        self.schedule = TheSched.objects.create(
+            organization=self.organization,
+            sched_name="Operator Availability Week",
+            sched_data={},
+        )
+        self.other_schedule = TheSched.objects.create(
+            organization=self.organization,
+            sched_name="Other Operator Week",
+            sched_data={},
+        )
+        self.foreign_schedule = TheSched.objects.create(
+            organization=self.other_organization,
+            sched_name="Foreign Operator Week",
+            sched_data={},
+        )
+        self.zoe = self.create_instructor("Zoe", "Alpha", self.organization)
+        self.avery = self.create_instructor("Avery", "Beta", self.organization)
+        self.foreign_instructor = self.create_instructor(
+            "Foreign", "Instructor", self.other_organization
+        )
+        self.url = reverse("instructor-availability", args=[self.schedule.pk])
+
+    def create_instructor(self, first_name, last_name, organization):
+        return Instructor.objects.create(
+            organization=organization,
+            fname=first_name,
+            lname=last_name,
+            ropes_lead=False,
+            school_lead=False,
+            cpr=True,
+            firstaid="yes",
+        )
+
+    def login(self):
+        self.client.force_login(self.user)
+
+    def full_post(self, overrides=None):
+        data = {
+            f"availability_{instructor.pk}_{slot_key}": "clear"
+            for instructor in (self.zoe, self.avery)
+            for slot_key in SCHEDULE_SLOT_KEYS
+        }
+        data.update(overrides or {})
+        return data
+
+    def field(self, instructor, slot_key):
+        return f"availability_{instructor.pk}_{slot_key}"
+
+    def test_access_requires_login_and_foreign_schedule_returns_not_found(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(reverse("login"), response["Location"])
+
+        self.login()
+        own_response = self.client.get(self.url)
+        foreign_response = self.client.get(
+            reverse("instructor-availability", args=[self.foreign_schedule.pk])
+        )
+
+        self.assertEqual(own_response.status_code, 200)
+        self.assertEqual(foreign_response.status_code, 404)
+
+    def test_get_displays_schedule_instructors_slots_and_all_cell_states(self):
+        InstructorScheduleAvailability.objects.create(
+            organization=self.organization,
+            instructor=self.zoe,
+            schedule=self.schedule,
+            slot_key="mon_pm1",
+            state="available",
+        )
+        InstructorScheduleAvailability.objects.create(
+            organization=self.organization,
+            instructor=self.zoe,
+            schedule=self.schedule,
+            slot_key="mon_pm2",
+            state="unavailable",
+        )
+        before_count = InstructorScheduleAvailability.objects.count()
+        self.login()
+
+        response = self.client.get(self.url)
+
+        self.assertContains(response, "Instructor Availability")
+        self.assertContains(response, self.schedule.sched_name)
+        content = response.content.decode()
+        self.assertLess(content.index(str(self.zoe)), content.index(str(self.avery)))
+        slot_positions = [content.index(f"<code>{slot_key}</code>") for slot_key in SCHEDULE_SLOT_KEYS]
+        self.assertEqual(slot_positions, sorted(slot_positions))
+        self.assertIn('<option value="available" selected>Available</option>', content)
+        self.assertIn('<option value="unavailable" selected>Unavailable</option>', content)
+        self.assertIn('<option value="clear" selected>Missing</option>', content)
+        self.assertNotContains(response, self.foreign_instructor.fname)
+        self.assertEqual(
+            InstructorScheduleAvailability.objects.count(), before_count
+        )
+
+    def test_get_empty_instructor_state_is_clear(self):
+        self.zoe.delete()
+        self.avery.delete()
+        self.login()
+
+        response = self.client.get(self.url)
+
+        self.assertContains(
+            response,
+            "No instructors belong to this schedule’s organization yet.",
+        )
+        self.assertNotContains(response, "Save Instructor Availability")
+
+    def test_post_creates_available_and_unavailable_and_redirects(self):
+        self.login()
+        response = self.client.post(self.url, self.full_post({
+            self.field(self.zoe, "mon_pm1"): "available",
+            self.field(self.avery, "mon_pm2"): "unavailable",
+        }))
+
+        self.assertRedirects(response, self.url)
+        self.assertEqual(
+            InstructorScheduleAvailability.objects.get(
+                instructor=self.zoe, schedule=self.schedule, slot_key="mon_pm1"
+            ).state,
+            "available",
+        )
+        self.assertEqual(
+            InstructorScheduleAvailability.objects.get(
+                instructor=self.avery, schedule=self.schedule, slot_key="mon_pm2"
+            ).state,
+            "unavailable",
+        )
+
+    def test_missing_selection_clears_existing_record(self):
+        record = InstructorScheduleAvailability.objects.create(
+            organization=self.organization,
+            instructor=self.zoe,
+            schedule=self.schedule,
+            slot_key="mon_pm1",
+            state="available",
+        )
+        self.login()
+
+        response = self.client.post(self.url, self.full_post())
+
+        self.assertRedirects(response, self.url)
+        self.assertFalse(
+            InstructorScheduleAvailability.objects.filter(pk=record.pk).exists()
+        )
+
+    def test_success_feedback_appears_after_redirect(self):
+        self.login()
+
+        response = self.client.post(
+            self.url,
+            self.full_post({self.field(self.zoe, "mon_pm1"): "available"}),
+            follow=True,
+        )
+
+        self.assertContains(response, "Instructor availability saved successfully")
+        self.assertContains(response, '<option value="available" selected>Available</option>')
+
+    def assert_invalid_post_preserves(self, data):
+        existing = InstructorScheduleAvailability.objects.create(
+            organization=self.organization,
+            instructor=self.zoe,
+            schedule=self.schedule,
+            slot_key="mon_pm1",
+            state="available",
+        )
+        before = (
+            existing.organization_id,
+            existing.instructor_id,
+            existing.schedule_id,
+            existing.slot_key,
+            existing.state,
+        )
+        self.login()
+
+        response = self.client.post(self.url, data)
+
+        existing.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Instructor availability was not saved")
+        self.assertEqual(
+            (
+                existing.organization_id,
+                existing.instructor_id,
+                existing.schedule_id,
+                existing.slot_key,
+                existing.state,
+            ),
+            before,
+        )
+        self.assertEqual(InstructorScheduleAvailability.objects.count(), 1)
+
+    def test_malformed_field_name_rejects_complete_submission(self):
+        data = self.full_post()
+        data["availability_not_a_real_cell"] = "available"
+        self.assert_invalid_post_preserves(data)
+
+    def test_malformed_value_rejects_complete_submission(self):
+        data = self.full_post({self.field(self.avery, "mon_pm2"): "tentative"})
+        self.assert_invalid_post_preserves(data)
+
+    def test_missing_matrix_field_rejects_complete_submission(self):
+        data = self.full_post()
+        data.pop(self.field(self.avery, "fri_am2"))
+        self.assert_invalid_post_preserves(data)
+
+    def test_foreign_instructor_field_cannot_be_submitted(self):
+        data = self.full_post()
+        data[self.field(self.foreign_instructor, "mon_pm1")] = "available"
+        self.assert_invalid_post_preserves(data)
+
+    def test_submitted_organization_cannot_override_server_ownership(self):
+        self.login()
+        data = self.full_post({
+            self.field(self.zoe, "mon_pm1"): "available",
+            "organization_id": self.other_organization.pk,
+        })
+
+        response = self.client.post(self.url, data)
+
+        self.assertRedirects(response, self.url)
+        record = InstructorScheduleAvailability.objects.get(
+            instructor=self.zoe,
+            schedule=self.schedule,
+            slot_key="mon_pm1",
+        )
+        self.assertEqual(record.organization, self.organization)
+
+    def test_post_changes_only_selected_schedule(self):
+        other_record = InstructorScheduleAvailability.objects.create(
+            organization=self.organization,
+            instructor=self.zoe,
+            schedule=self.other_schedule,
+            slot_key="mon_pm1",
+            state="unavailable",
+        )
+        self.login()
+
+        self.client.post(self.url, self.full_post({
+            self.field(self.zoe, "mon_pm1"): "available",
+        }))
+
+        other_record.refresh_from_db()
+        self.assertEqual(other_record.state, "unavailable")
+
+    def test_view_delegates_writes_to_application_service(self):
+        self.login()
+        with patch(
+            "scheduler_app.views.apply_instructor_availability_changes",
+            wraps=apply_instructor_availability_changes,
+        ) as service:
+            response = self.client.post(self.url, self.full_post())
+
+        self.assertEqual(response.status_code, 302)
+        service.assert_called_once()
+
+    def test_schedule_detail_links_to_availability_page(self):
+        self.login()
+
+        response = self.client.get(
+            reverse("sched-detail", args=[self.schedule.pk])
+        )
+
+        self.assertContains(response, "Manage Instructor Availability")
+        self.assertContains(response, self.url)
+
+
+class InstructorAvailabilityMatrixServiceTests(TestCase):
+    def setUp(self):
+        self.organization = Organization.objects.create(name="Matrix Organization")
+        self.other_organization = Organization.objects.create(name="Other Matrix Organization")
+        self.schedule = self.create_schedule("Matrix Week", self.organization)
+        self.other_schedule = self.create_schedule("Other Matrix Week", self.organization)
+        self.foreign_schedule = self.create_schedule("Foreign Matrix Week", self.other_organization)
+        self.zoe = self.create_instructor("Zoe", "Alpha", self.organization)
+        self.avery = self.create_instructor("Avery", "Beta", self.organization)
+        self.alex = self.create_instructor("Alex", "Beta", self.organization)
+        self.foreign_instructor = self.create_instructor(
+            "Foreign", "Instructor", self.other_organization
+        )
+
+    def create_schedule(self, name, organization):
+        return TheSched.objects.create(
+            organization=organization,
+            sched_name=name,
+            sched_data={},
+        )
+
+    def create_instructor(self, first_name, last_name, organization):
+        return Instructor.objects.create(
+            organization=organization,
+            fname=first_name,
+            lname=last_name,
+            ropes_lead=False,
+            school_lead=False,
+            cpr=True,
+            firstaid="yes",
+        )
+
+    def availability(self, instructor, slot_key, state, schedule=None, organization=None):
+        return InstructorScheduleAvailability.objects.create(
+            organization=organization or self.organization,
+            instructor=instructor,
+            schedule=schedule or self.schedule,
+            slot_key=slot_key,
+            state=state,
+        )
+
+    def test_matrix_has_canonical_slots_deterministic_instructors_and_all_states(self):
+        self.availability(self.zoe, "mon_pm1", "available")
+        self.availability(self.zoe, "mon_pm2", "unavailable")
+        before_count = InstructorScheduleAvailability.objects.count()
+
+        with self.assertNumQueries(2):
+            matrix = build_instructor_availability_matrix(
+                self.organization, self.schedule
+            )
+
+        self.assertEqual(matrix.slot_keys, tuple(SCHEDULE_SLOT_KEYS))
+        self.assertEqual(
+            [row.instructor for row in matrix.rows],
+            [self.zoe, self.alex, self.avery],
+        )
+        zoe_states = {cell.slot_key: cell.state for cell in matrix.rows[0].cells}
+        self.assertEqual(zoe_states["mon_pm1"], "available")
+        self.assertEqual(zoe_states["mon_pm2"], "unavailable")
+        self.assertIsNone(zoe_states["mon_night"])
+        self.assertEqual(
+            InstructorScheduleAvailability.objects.count(), before_count
+        )
+
+    def test_matrix_ignores_other_schedule_with_identical_slot(self):
+        self.availability(
+            self.zoe, "mon_pm1", "available", schedule=self.other_schedule
+        )
+
+        matrix = build_instructor_availability_matrix(
+            self.organization, self.schedule
+        )
+
+        self.assertIsNone(matrix.rows[0].cells[0].state)
+
+    def test_matrix_rejects_foreign_schedule(self):
+        with self.assertRaises(ValidationError):
+            build_instructor_availability_matrix(
+                self.organization, self.foreign_schedule
+            )
+
+    def test_matrix_rejects_supplied_foreign_instructor(self):
+        with self.assertRaises(ValidationError):
+            build_instructor_availability_matrix(
+                self.organization,
+                self.schedule,
+                [self.zoe, self.foreign_instructor],
+            )
+
+    def test_matrix_never_returns_foreign_organization_records(self):
+        self.availability(
+            self.foreign_instructor,
+            "mon_pm1",
+            "available",
+            schedule=self.foreign_schedule,
+            organization=self.other_organization,
+        )
+
+        matrix = build_instructor_availability_matrix(
+            self.organization, self.schedule
+        )
+
+        self.assertNotIn(
+            self.foreign_instructor,
+            [row.instructor for row in matrix.rows],
+        )
+        self.assertTrue(all(
+            cell.state is None
+            for row in matrix.rows
+            for cell in row.cells
+        ))
+
+
+class InstructorAvailabilityChangeServiceTests(TestCase):
+    def setUp(self):
+        self.organization = Organization.objects.create(name="Change Organization")
+        self.other_organization = Organization.objects.create(name="Other Change Organization")
+        self.schedule = self.create_schedule("Change Week", self.organization)
+        self.other_schedule = self.create_schedule("Other Change Week", self.organization)
+        self.foreign_schedule = self.create_schedule("Foreign Change Week", self.other_organization)
+        self.instructor = self.create_instructor("Avery", self.organization)
+        self.second_instructor = self.create_instructor("Blake", self.organization)
+        self.foreign_instructor = self.create_instructor("Foreign", self.other_organization)
+
+    def create_schedule(self, name, organization):
+        return TheSched.objects.create(
+            organization=organization,
+            sched_name=name,
+            sched_data={},
+        )
+
+    def create_instructor(self, first_name, organization):
+        return Instructor.objects.create(
+            organization=organization,
+            fname=first_name,
+            lname="Instructor",
+            ropes_lead=False,
+            school_lead=False,
+            cpr=True,
+            firstaid="yes",
+        )
+
+    def change(self, instructor=None, slot_key="mon_pm1", action="available", **extra):
+        return {
+            "instructor_id": (instructor or self.instructor).pk,
+            "slot_key": slot_key,
+            "action": action,
+            **extra,
+        }
+
+    def apply(self, changes, schedule=None):
+        return apply_instructor_availability_changes(
+            self.organization,
+            schedule or self.schedule,
+            changes,
+        )
+
+    def get_record(self, instructor=None, schedule=None, slot_key="mon_pm1"):
+        return InstructorScheduleAvailability.objects.get(
+            instructor=instructor or self.instructor,
+            schedule=schedule or self.schedule,
+            slot_key=slot_key,
+        )
+
+    def test_creates_available_and_assigns_organization_server_side(self):
+        result = self.apply([
+            self.change(organization_id=self.other_organization.pk)
+        ])
+
+        record = self.get_record()
+        self.assertEqual(record.state, "available")
+        self.assertEqual(record.organization, self.organization)
+        self.assertEqual(result.created, 1)
+
+    def test_creates_unavailable(self):
+        self.apply([self.change(action="unavailable")])
+
+        self.assertEqual(self.get_record().state, "unavailable")
+
+    def test_updates_available_to_unavailable_and_back(self):
+        self.apply([self.change(action="available")])
+
+        first_result = self.apply([self.change(action="unavailable")])
+        self.assertEqual(self.get_record().state, "unavailable")
+        second_result = self.apply([self.change(action="available")])
+
+        self.assertEqual(self.get_record().state, "available")
+        self.assertEqual(first_result.updated, 1)
+        self.assertEqual(second_result.updated, 1)
+
+    def test_clear_deletes_existing_and_missing_is_safe_noop(self):
+        self.apply([self.change(action="available")])
+
+        deleted = self.apply([self.change(action="clear")])
+        missing = self.apply([self.change(action="clear")])
+
+        self.assertFalse(InstructorScheduleAvailability.objects.exists())
+        self.assertEqual(deleted.deleted, 1)
+        self.assertEqual(missing.unchanged, 1)
+
+    def test_multiple_valid_changes_apply_together(self):
+        result = self.apply([
+            self.change(slot_key="mon_pm1", action="available"),
+            self.change(
+                instructor=self.second_instructor,
+                slot_key="mon_pm2",
+                action="unavailable",
+            ),
+        ])
+
+        self.assertEqual(result.created, 2)
+        self.assertEqual(
+            set(InstructorScheduleAvailability.objects.values_list("state", flat=True)),
+            {"available", "unavailable"},
+        )
+
+    def assert_invalid_batch_preserves_existing(self, invalid_change):
+        self.apply([self.change(action="available")])
+        before = list(
+            InstructorScheduleAvailability.objects.values_list(
+                "organization_id", "instructor_id", "schedule_id", "slot_key", "state"
+            )
+        )
+
+        with self.assertRaises(ValidationError):
+            self.apply([
+                self.change(slot_key="mon_pm2", action="unavailable"),
+                invalid_change,
+            ])
+
+        self.assertEqual(
+            list(InstructorScheduleAvailability.objects.values_list(
+                "organization_id", "instructor_id", "schedule_id", "slot_key", "state"
+            )),
+            before,
+        )
+
+    def test_invalid_slot_rejects_entire_operation(self):
+        self.assert_invalid_batch_preserves_existing(
+            self.change(slot_key="sat_am1")
+        )
+
+    def test_invalid_action_rejects_entire_operation(self):
+        self.assert_invalid_batch_preserves_existing(
+            self.change(action="tentative")
+        )
+
+    def test_duplicate_cell_rejects_entire_operation(self):
+        with self.assertRaises(ValidationError):
+            self.apply([
+                self.change(action="available"),
+                self.change(action="unavailable"),
+            ])
+
+        self.assertFalse(InstructorScheduleAvailability.objects.exists())
+
+    def test_cross_organization_instructor_rejects_entire_operation(self):
+        self.assert_invalid_batch_preserves_existing(
+            self.change(instructor=self.foreign_instructor)
+        )
+
+    def test_cross_organization_schedule_is_rejected(self):
+        before_count = InstructorScheduleAvailability.objects.count()
+
+        with self.assertRaises(ValidationError):
+            self.apply([self.change()], schedule=self.foreign_schedule)
+
+        self.assertEqual(
+            InstructorScheduleAvailability.objects.count(), before_count
+        )
+
+    def test_changes_affect_only_selected_schedule(self):
+        InstructorScheduleAvailability.objects.create(
+            organization=self.organization,
+            instructor=self.instructor,
+            schedule=self.other_schedule,
+            slot_key="mon_pm1",
+            state="unavailable",
+        )
+
+        self.apply([self.change(action="available")])
+
+        self.assertEqual(self.get_record().state, "available")
+        self.assertEqual(
+            self.get_record(schedule=self.other_schedule).state,
+            "unavailable",
+        )
+
+    def test_unchanged_cell_is_not_rewritten(self):
+        self.apply([self.change(action="available")])
+
+        result = self.apply([self.change(action="available")])
+
+        self.assertEqual(result.unchanged, 1)
+        self.assertEqual(result.updated, 0)
+
+
+class InstructorScheduleAvailabilityModelTests(TestCase):
+    def setUp(self):
+        self.organization = Organization.objects.create(name="Availability Organization")
+        self.other_organization = Organization.objects.create(name="Other Availability Organization")
+        self.instructor = self.create_instructor("Avery", self.organization)
+        self.other_instructor = self.create_instructor("Blake", self.other_organization)
+        self.schedule = self.create_schedule("Availability Week", self.organization)
+        self.other_schedule = self.create_schedule("Other Availability Week", self.other_organization)
+
+    def create_instructor(self, first_name, organization):
+        return Instructor.objects.create(
+            organization=organization,
+            fname=first_name,
+            lname="Instructor",
+            ropes_lead=False,
+            school_lead=False,
+            cpr=True,
+            firstaid="yes",
+        )
+
+    def create_schedule(self, name, organization):
+        return TheSched.objects.create(
+            organization=organization,
+            sched_name=name,
+            sched_data={},
+        )
+
+    def create_availability(self, **overrides):
+        values = {
+            "organization": self.organization,
+            "instructor": self.instructor,
+            "schedule": self.schedule,
+            "slot_key": "mon_pm1",
+            "state": InstructorScheduleAvailability.AVAILABLE,
+        }
+        values.update(overrides)
+        return InstructorScheduleAvailability.objects.create(**values)
+
+    def test_valid_matching_organization_record_can_be_created(self):
+        availability = self.create_availability()
+
+        self.assertEqual(availability.organization, self.organization)
+        self.assertEqual(availability.instructor, self.instructor)
+        self.assertEqual(availability.schedule, self.schedule)
+        self.assertEqual(availability.slot_key, "mon_pm1")
+        self.assertEqual(availability.state, InstructorScheduleAvailability.AVAILABLE)
+
+    def test_organization_is_required_and_is_not_defaulted(self):
+        with self.assertRaises(IntegrityError):
+            InstructorScheduleAvailability.objects.create(
+                instructor=self.instructor,
+                schedule=self.schedule,
+                slot_key="mon_pm1",
+                state=InstructorScheduleAvailability.AVAILABLE,
+            )
+
+    def test_every_canonical_slot_key_can_be_accepted(self):
+        for slot_key in SCHEDULE_SLOT_KEYS:
+            with self.subTest(slot_key=slot_key):
+                availability = self.create_availability(slot_key=slot_key)
+                self.assertEqual(availability.slot_key, slot_key)
+
+    def test_invalid_slot_key_is_rejected(self):
+        with self.assertRaises(ValidationError):
+            self.create_availability(slot_key="saturday_morning")
+
+        self.assertFalse(InstructorScheduleAvailability.objects.exists())
+
+    def test_invalid_state_is_rejected(self):
+        with self.assertRaises(ValidationError):
+            self.create_availability(state="unknown")
+
+        self.assertFalse(InstructorScheduleAvailability.objects.exists())
+
+    def test_duplicate_instructor_schedule_slot_is_rejected(self):
+        self.create_availability()
+
+        with self.assertRaises(IntegrityError):
+            self.create_availability(state=InstructorScheduleAvailability.UNAVAILABLE)
+
+    def test_instructor_from_another_organization_is_rejected(self):
+        with self.assertRaises(ValidationError):
+            self.create_availability(instructor=self.other_instructor)
+
+        self.assertFalse(InstructorScheduleAvailability.objects.exists())
+
+    def test_schedule_from_another_organization_is_rejected(self):
+        with self.assertRaises(ValidationError):
+            self.create_availability(schedule=self.other_schedule)
+
+        self.assertFalse(InstructorScheduleAvailability.objects.exists())
+
+    def test_deleting_instructor_deletes_availability_records(self):
+        availability = self.create_availability()
+
+        self.instructor.delete()
+
+        self.assertFalse(
+            InstructorScheduleAvailability.objects.filter(pk=availability.pk).exists()
+        )
+
+    def test_deleting_schedule_deletes_availability_records(self):
+        availability = self.create_availability()
+
+        self.schedule.delete()
+
+        self.assertFalse(
+            InstructorScheduleAvailability.objects.filter(pk=availability.pk).exists()
+        )
+
+    def test_same_instructor_and_slot_can_exist_in_different_schedules(self):
+        second_schedule = self.create_schedule("Second Week", self.organization)
+
+        first = self.create_availability()
+        second = self.create_availability(schedule=second_schedule)
+
+        self.assertNotEqual(first.schedule_id, second.schedule_id)
+        self.assertEqual(InstructorScheduleAvailability.objects.count(), 2)
+
+    def test_different_instructors_can_share_schedule_and_slot(self):
+        second_instructor = self.create_instructor("Casey", self.organization)
+
+        first = self.create_availability()
+        second = self.create_availability(instructor=second_instructor)
+
+        self.assertNotEqual(first.instructor_id, second.instructor_id)
+        self.assertEqual(InstructorScheduleAvailability.objects.count(), 2)
+
+    def test_missing_availability_does_not_create_implicit_record(self):
+        self.assertFalse(
+            InstructorScheduleAvailability.objects.filter(
+                instructor=self.instructor,
+                schedule=self.schedule,
+                slot_key="mon_pm1",
+            ).exists()
+        )
+
+    def test_explicit_unavailable_is_distinguishable_from_no_record(self):
+        unavailable = self.create_availability(
+            state=InstructorScheduleAvailability.UNAVAILABLE,
+        )
+
+        self.assertEqual(
+            InstructorScheduleAvailability.objects.get(
+                instructor=self.instructor,
+                schedule=self.schedule,
+                slot_key="mon_pm1",
+            ),
+            unavailable,
+        )
+        self.assertFalse(
+            InstructorScheduleAvailability.objects.filter(
+                instructor=self.instructor,
+                schedule=self.schedule,
+                slot_key="mon_pm2",
+            ).exists()
+        )
 
 
 class CertificationModelTests(TestCase):
@@ -852,7 +2872,7 @@ class PublicLandingPageTests(TestCase):
         response = self.client.get(reverse("home"))
 
         self.assertEqual(response.status_code, 200)
-        for workflow in ("Locations", "Activities", "Schools", "Schedules"):
+        for workflow in ("Locations", "Activities", "Schools", "Schedules", "Instructors"):
             with self.subTest(workflow=workflow):
                 self.assertContains(response, f'<h3 class="h5 card-title">{workflow}</h3>', html=True)
         for operational_route in (
@@ -1376,6 +3396,7 @@ class OperationalNavigationTests(TestCase):
             "Schools": reverse("school-list"),
             "Activities": reverse("course-list"),
             "Locations": reverse("location-list"),
+            "Instructors": reverse("instructor-list"),
         }
         for label, url in expected_links.items():
             with self.subTest(label=label):
@@ -1385,7 +3406,7 @@ class OperationalNavigationTests(TestCase):
         response = self.client.get(reverse("home-paid"))
 
         self.assertEqual(response.status_code, 200)
-        for removed_label in ("Forms_Add", "Crud", "og_home", "Add Instructor"):
+        for removed_label in ("Forms_Add", "Crud", "og_home"):
             with self.subTest(label=removed_label):
                 self.assertNotContains(response, removed_label)
         for legacy_url in (
@@ -1439,7 +3460,7 @@ class OperationalDashboardTests(TestCase):
         for workflow in ("Locations", "Activities", "Schools", "Schedules"):
             with self.subTest(workflow=workflow):
                 self.assertContains(response, f'<h3 class="h5 card-title">{workflow}</h3>', html=True)
-        self.assertContains(response, 'class="card h-100"', count=3, html=False)
+        self.assertContains(response, 'class="card h-100"', count=4, html=False)
         self.assertContains(response, 'class="card h-100 border-primary"', count=1, html=False)
 
     def test_dashboard_renders_primary_schedule_actions_with_canonical_routes(self):
@@ -1462,6 +3483,8 @@ class OperationalDashboardTests(TestCase):
             ("school-create", "Add School"),
             ("sched-list", "View Schedules"),
             ("sched-create", "Create Schedule"),
+            ("instructor-list", "View Instructors"),
+            ("instructor-create", "Add Instructor"),
         )
         for route, label in expected_actions:
             with self.subTest(route=route):

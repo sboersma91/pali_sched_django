@@ -4,10 +4,17 @@ from collections import Counter
 from urllib.parse import urlencode
 
 from django.contrib import messages
+from django.core.exceptions import ValidationError
 from django.shortcuts import get_object_or_404, render
 from members.models import get_user_organization
 from .models import Instructor, Locations, Course, Schools, TheSched
-from .forms import CourseForm, InstructorForm, LocationsForm, SchedForm, SchoolsForm
+from .forms import (
+    CourseForm,
+    InstructorManagementForm,
+    LocationsForm,
+    SchedForm,
+    SchoolsForm,
+)
 from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
 from django.urls import reverse, reverse_lazy
 from django.utils.text import slugify
@@ -15,6 +22,10 @@ from django.db.models import Prefetch
 from django.db.models.functions import Lower
 
 from .school_accounting import school_slot_accounting_summary
+from .instructor_availability import (
+    apply_instructor_availability_changes,
+    build_instructor_availability_matrix,
+)
 from .schedule_blocks import SCHEDULE_LEGEND
 from .schedule_operations import (
     DEFAULT_NEW_MOVE_ACTION,
@@ -48,6 +59,7 @@ Since there is a unique field, there will need to be some sort of validation fun
 from django.views.generic.list import ListView
 from django.views.generic.detail import DetailView
 from django.views.generic.edit import CreateView, UpdateView, DeleteView
+from django.contrib.messages.views import SuccessMessageMixin
 
 
 class OrganizationScopedMixin:
@@ -75,6 +87,80 @@ class OrganizationScopedMixin:
         if hasattr(form, 'instance') and hasattr(form.instance, 'organization_id'):
             form.instance.organization = self.get_organization()
         return super().form_valid(form)
+
+
+def _parse_instructor_availability_post(post_data, matrix):
+    expected_fields = {
+        f'availability_{row.instructor.pk}_{slot_key}': (row.instructor.pk, slot_key)
+        for row in matrix.rows
+        for slot_key in matrix.slot_keys
+    }
+    submitted_availability_fields = {
+        key for key in post_data if key.startswith('availability_')
+    }
+    missing_fields = set(expected_fields) - submitted_availability_fields
+    unexpected_fields = submitted_availability_fields - set(expected_fields)
+    if missing_fields or unexpected_fields:
+        raise ValidationError(
+            'The submitted availability matrix is incomplete or contains invalid cells.'
+        )
+
+    changes = []
+    for field_name, (instructor_id, slot_key) in expected_fields.items():
+        submitted_values = post_data.getlist(field_name)
+        if len(submitted_values) != 1:
+            raise ValidationError(
+                f'Availability for instructor {instructor_id}, slot {slot_key} '
+                'must have exactly one value.'
+            )
+        changes.append({
+            'instructor_id': instructor_id,
+            'slot_key': slot_key,
+            'action': submitted_values[0],
+        })
+    return tuple(changes)
+
+
+def instructor_availability_edit(request, pk):
+    organization = get_user_organization(request.user)
+    schedule = get_object_or_404(
+        TheSched,
+        pk=pk,
+        organization=organization,
+    )
+    matrix = build_instructor_availability_matrix(organization, schedule)
+    availability_error = None
+
+    if request.method == 'POST':
+        try:
+            changes = _parse_instructor_availability_post(request.POST, matrix)
+            result = apply_instructor_availability_changes(
+                organization,
+                schedule,
+                changes,
+            )
+        except ValidationError as error:
+            availability_error = str(error)
+            messages.error(
+                request,
+                f'Instructor availability was not saved: {availability_error}',
+            )
+        else:
+            messages.success(
+                request,
+                'Instructor availability saved successfully '
+                f'({result.created} created, {result.updated} updated, '
+                f'{result.deleted} cleared).',
+            )
+            return HttpResponseRedirect(
+                reverse('instructor-availability', args=[schedule.pk])
+            )
+
+    return render(request, 'pay_end/instructor_availability.html', {
+        'schedule': schedule,
+        'availability_matrix': matrix,
+        'availability_error': availability_error,
+    })
 
 
 # Locations 
@@ -178,6 +264,45 @@ class SchoolDelete(OrganizationScopedMixin, DeleteView):
     fields = "__all__"
     success_url = reverse_lazy('school-list')
     context_object_name = "school"
+
+
+class InstructorList(OrganizationScopedMixin, ListView):
+    model = Instructor
+    template_name = 'pay_end/instructor_list.html'
+    context_object_name = 'instructors'
+    ordering = ('lname', 'fname', 'pk')
+
+
+class InstructorCreate(SuccessMessageMixin, OrganizationScopedMixin, CreateView):
+    model = Instructor
+    form_class = InstructorManagementForm
+    template_name = 'pay_end/instructor_form.html'
+    success_url = reverse_lazy('instructor-list')
+    success_message = 'Instructor added successfully.'
+
+
+class InstructorUpdate(SuccessMessageMixin, OrganizationScopedMixin, UpdateView):
+    model = Instructor
+    form_class = InstructorManagementForm
+    template_name = 'pay_end/instructor_form.html'
+    success_url = reverse_lazy('instructor-list')
+    success_message = 'Instructor updated successfully.'
+
+
+class InstructorDelete(OrganizationScopedMixin, DeleteView):
+    model = Instructor
+    template_name = 'pay_end/instructor_confirm_delete.html'
+    context_object_name = 'instructor'
+    success_url = reverse_lazy('instructor-list')
+
+    def form_valid(self, form):
+        instructor_name = str(self.object)
+        response = super().form_valid(form)
+        messages.success(
+            self.request,
+            f'{instructor_name} was deleted successfully.',
+        )
+        return response
 
 CSV_ACTIVITY_VALUES = {'g_box': 'Unavailable / Not present', 'empty': 'Unassigned'}
 GENERATION_COLLAPSE_COMPLETION_THRESHOLD = 10.0
@@ -1074,22 +1199,7 @@ def add_course(request):
     return render(request, 'pay_end/add_course.html', {'form': form, 'submitted' : submitted })
 
 def add_instructor(request):
-    organization = get_user_organization(request.user)
-    submitted=False
-    if request.method == "POST":
-        form = InstructorForm(request.POST, organization=organization)
-        if form.is_valid():
-            instructor = form.save(commit=False)
-            instructor.organization = organization
-            instructor.save()
-            return HttpResponseRedirect('/add_instructor.html?sumbitted=True')
-        else:
-            return render(request, 'pay_end/home_pay.html',{})
-    else:
-        form = InstructorForm(organization=organization)
-        if 'submitted' in request.GET:
-            submitted=True
-    return render(request, 'pay_end/add_instructor.html',{'form':form, 'submitted': submitted})
+    return HttpResponseRedirect(reverse('instructor-create'))
 
 def add_school(request):
     organization = get_user_organization(request.user)

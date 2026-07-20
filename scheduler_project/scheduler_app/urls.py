@@ -13,6 +13,10 @@ from .views import (
     LocationList,
     LocationCreate,
     LocationUpdate,
+    InstructorCreate,
+    InstructorDelete,
+    InstructorList,
+    InstructorUpdate,
     SchoolCreate,
     SchoolDelete,
     SchoolDetail,
@@ -36,7 +40,11 @@ urlpatterns = [
     path("add_school", login_required(views.add_school), name="add-school"),
     path("add_location", login_required(views.add_location), name="add-location"),
     path("home_paid", login_required(views.home_paid), name="home-paid"),
-    path("add_instructor", login_required(views.add_instructor), name="add-instructor"),
+    path(
+        "add_instructor",
+        login_required(views.add_instructor),
+        name="add-instructor",
+    ),
     path("search_results", login_required(views.search_results), name="search-results"),
     path("class_view", login_required(views.class_view), name="class-view"),
     # class Based views below
@@ -57,9 +65,27 @@ urlpatterns = [
     path("school_create", login_required(SchoolCreate.as_view()), name="school-create"),
     path("school_update/<int:pk>/", login_required(SchoolUpdate.as_view()), name="school-update"),
     path("school_delete/<int:pk>/", login_required(SchoolDelete.as_view()), name="school-delete"),
+    # Instructor views
+    path("instructor_list", login_required(InstructorList.as_view()), name="instructor-list"),
+    path("instructor_create", login_required(InstructorCreate.as_view()), name="instructor-create"),
+    path(
+        "instructor_update/<int:pk>/",
+        login_required(InstructorUpdate.as_view()),
+        name="instructor-update",
+    ),
+    path(
+        "instructor_delete/<int:pk>/",
+        login_required(InstructorDelete.as_view()),
+        name="instructor-delete",
+    ),
     # Schedule views
     path("schedule_list", login_required(SchedList.as_view()), name="sched-list"),
     path("schedule_detail/<int:pk>/", login_required(SchedDetail.as_view()), name="sched-detail"),
+    path(
+        "schedule_detail/<int:pk>/instructor-availability/",
+        login_required(views.instructor_availability_edit),
+        name="instructor-availability",
+    ),
     path("schedule_detail/<int:pk>/generate/", login_required(SchedGenerate.as_view()), name="sched-generate"),
     path("schedule_detail/<int:pk>/confirm-move/", login_required(SchedMoveConfirm.as_view()), name="sched-move-confirm"),
     path("schedule_detail/<int:pk>/save-move/", login_required(SchedMoveSave.as_view()), name="sched-move-save"),
