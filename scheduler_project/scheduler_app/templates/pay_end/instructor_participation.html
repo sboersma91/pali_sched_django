@@ -1,0 +1,60 @@
+{% extends 'pay_end/base_pay.html' %}
+{% block title %}Instructor Participation — {{ schedule.sched_name }}{% endblock title %}
+{% block content %}
+  <div class="mt-4 mb-3">
+    <p class="text-uppercase text-muted small mb-1">{{ schedule.sched_name }}</p>
+    <h1>Instructor Participation</h1>
+    <p class="text-muted">All organization instructors participate in this schedule’s staffing pool by default. Choose Not participating only to opt an instructor out. Detailed availability exceptions are managed separately.</p>
+  </div>
+
+  {% if participation_error %}
+    <div class="alert alert-danger" role="alert">{{ participation_error }}</div>
+  {% endif %}
+
+  {% if participation_matrix.rows %}
+    <form method="post">
+      {% csrf_token %}
+      <div class="table-responsive">
+        <table class="table table-bordered align-middle">
+          <thead>
+            <tr>
+              <th scope="col">Instructor</th>
+              <th scope="col">Participation state</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in participation_matrix.rows %}
+              <tr>
+                <th scope="row">{{ row.instructor }}</th>
+                <td>
+                  <label class="visually-hidden" for="participation_{{ row.instructor.pk }}">Participation for {{ row.instructor }}</label>
+                  <select
+                    class="form-select"
+                    id="participation_{{ row.instructor.pk }}"
+                    name="participation_{{ row.instructor.pk }}"
+                    aria-label="Participation for {{ row.instructor }}"
+                  >
+                    <option value="participating"{% if row.state == 'participating' %} selected{% endif %}>Participating</option>
+                    <option value="not_participating"{% if row.state == 'not_participating' %} selected{% endif %}>Not participating</option>
+                  </select>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <button type="submit" class="btn btn-primary">Save Instructor Participation</button>
+    </form>
+  {% else %}
+    <div class="alert alert-info" role="status">
+      <p>No instructors belong to this schedule’s organization yet.</p>
+      <a href="{% url 'instructor-create' %}" class="btn btn-primary btn-sm">Add Instructor</a>
+      <a href="{% url 'instructor-list' %}" class="btn btn-outline-primary btn-sm">View Instructors</a>
+    </div>
+  {% endif %}
+
+  <div class="d-flex flex-wrap gap-2 mt-3">
+    <a href="{% url 'instructor-availability' schedule.pk %}" class="btn btn-outline-secondary">Manage detailed availability exceptions</a>
+    <a href="{% url 'sched-detail' schedule.pk %}" class="btn btn-link">Back to Schedule</a>
+  </div>
+{% endblock content %}

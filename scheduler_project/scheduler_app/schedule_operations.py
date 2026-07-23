@@ -3,6 +3,7 @@ from copy import deepcopy
 from django.db import transaction
 from django.utils import timezone
 
+from .group_colors import group_accent_class
 from .models import Course
 
 
@@ -178,6 +179,7 @@ def build_schedule_blocks(schedule, organization=None):
         schedule_rows.append({
             'ag': group_label,
             'group_index': group_index,
+            'group_accent_class': group_accent_class(group_index),
             'cells': cells,
         })
 
@@ -843,7 +845,6 @@ def build_holding_area_item(block_or_blocks, override_index, displacement_positi
     block = occurrence_blocks[0]
     occurrence_length = block.get('occurrence_length') or len(occurrence_blocks)
     origin_group_index = block.get('group_index')
-    group_accent_number = ((origin_group_index or 0) % 4) + 1
     return {
         'holding_id': (
             f'holding:override:{override_index}:{block["group_index"]}:'
@@ -863,7 +864,7 @@ def build_holding_area_item(block_or_blocks, override_index, displacement_positi
         'origin_group_label': block.get('group_label'),
         'origin_slot_key': block.get('slot_key'),
         'origin_slot_label': block.get('slot_label'),
-        'group_accent_class': f'schedule-row-accent-{group_accent_number}',
+        'group_accent_class': group_accent_class(origin_group_index),
         'displaced_by_override_index': override_index,
         'holding_status': 'awaiting_assignment',
         'is_holding': True,

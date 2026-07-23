@@ -120,6 +120,12 @@ class Course(models.Model):
         default=1, 
         validators=[MaxValueValidator(2), MinValueValidator(0)]
     )
+    required_instructor_count = models.PositiveIntegerField(
+        default=1,
+        validators=[MinValueValidator(1)],
+        verbose_name='Required instructor count',
+        help_text='Number of distinct instructors required for each occurrence of this activity.',
+    )
     # need to restrict range currently select outside of range, and unknown what not_valid will do.
 
     def __str__(self):
@@ -963,6 +969,74 @@ class Instructor(models.Model):
     
     def __str__(self):
         return self.fname + ' ' + self.lname
+
+
+class InstructorScheduleParticipation(models.Model):
+    PARTICIPATING = 'participating'
+    NOT_PARTICIPATING = 'not_participating'
+    PARTICIPATION_STATE_CHOICES = (
+        (PARTICIPATING, 'Participating'),
+        (NOT_PARTICIPATING, 'Not participating'),
+    )
+
+    organization = ForeignKey(
+        'members.Organization',
+        on_delete=PROTECT,
+        related_name='instructor_schedule_participation_records',
+    )
+    instructor = ForeignKey(
+        Instructor,
+        on_delete=CASCADE,
+        related_name='schedule_participation_records',
+    )
+    schedule = ForeignKey(
+        TheSched,
+        on_delete=CASCADE,
+        related_name='instructor_participation_records',
+    )
+    state = CharField(max_length=17, choices=PARTICIPATION_STATE_CHOICES)
+
+    def clean(self):
+        super().clean()
+        errors = {}
+
+        if self.state not in {self.PARTICIPATING, self.NOT_PARTICIPATING}:
+            errors['state'] = 'State must be participating or not participating.'
+        if (
+            self.organization_id
+            and self.instructor_id
+            and self.organization_id != self.instructor.organization_id
+        ):
+            errors['instructor'] = (
+                'Instructor and participation record must belong to the same organization.'
+            )
+        if (
+            self.organization_id
+            and self.schedule_id
+            and self.organization_id != self.schedule.organization_id
+        ):
+            errors['schedule'] = (
+                'Schedule and participation record must belong to the same organization.'
+            )
+
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f'{self.instructor} — {self.schedule}: {self.state}'
+
+    class Meta:
+        ordering = ['instructor__lname', 'instructor__fname', 'instructor_id', 'pk']
+        constraints = [
+            UniqueConstraint(
+                fields=['instructor', 'schedule'],
+                name='unique_instructor_schedule_participation',
+            ),
+        ]
 
 
 class InstructorScheduleAvailability(models.Model):

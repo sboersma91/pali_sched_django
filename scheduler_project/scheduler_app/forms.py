@@ -122,7 +122,12 @@ class CourseForm(ModelForm):
 
     class Meta:
         model = Course
-        fields = ('course_name', 'abriviation', 'primary_locs', 'course_len')
+        fields = (
+            'course_name',
+            'abriviation',
+            'primary_locs',
+            'course_len',
+        )
         labels = {
             'course_name': 'Activity Name',
             'abriviation': 'Abbreviation',

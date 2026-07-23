@@ -3,8 +3,10 @@
 {% block content %}
   <div class="mt-4 mb-3">
     <p class="text-uppercase text-muted small mb-1">{{ schedule.sched_name }}</p>
-    <h1>Instructor Availability</h1>
-    <p class="text-muted">Set an explicit state for each instructor and operational schedule slot. Missing availability blocks automatic assignment.</p>
+    <h1>Detailed Instructor Availability</h1>
+    <p class="text-muted mb-1">Participating instructors are available across this schedule by default. Use this page to record unavailable exceptions. Explicit available records remain compatible but are not normally necessary.</p>
+    <p class="text-muted">An unavailable slot blocks assignment for that slot. Staffing-pool participation is managed separately.</p>
+    <a href="{% url 'instructor-participation' schedule.pk %}" class="btn btn-outline-primary btn-sm">Manage Instructor Participation</a>
   </div>
 
   {% if availability_error %}
@@ -41,7 +43,6 @@
                       name="availability_{{ row.instructor.pk }}_{{ cell.slot_key }}"
                       aria-label="{{ row.instructor }} — {{ cell.slot_key }}"
                     >
-                      <option value="clear"{% if cell.state == None %} selected{% endif %}>Missing</option>
                       <option value="available"{% if cell.state == 'available' %} selected{% endif %}>Available</option>
                       <option value="unavailable"{% if cell.state == 'unavailable' %} selected{% endif %}>Unavailable</option>
                     </select>

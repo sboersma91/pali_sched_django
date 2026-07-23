@@ -124,13 +124,22 @@ for the current model, authorization rules, known limitations, and architecture 
 
 Instructor assignment is a separate, read-only pipeline built on the displayed
 Operational Schedule. It extracts activity occurrences, evaluates certification
-and organization qualification, applies operational constraints, and selects
-eligible instructors deterministically. Assignment results remain in memory and
-do not alter the Activity Scheduling Engine or persist instructor assignments.
+and organization qualification, applies opt-out schedule participation,
+resolves default availability plus restrictive slot exceptions, applies
+same-slot overlap constraints, and selects eligible instructors
+deterministically. Assignment results remain in memory and do not alter the
+Activity Scheduling Engine or persist instructor assignments.
+
+Operators manage availability from one Schedule through server-rendered
+participation and instructor-by-slot forms. Instructors and their slots are
+included and available by default; explicit participation opt-outs and
+unavailable slot exceptions restrict automatic assignment. Availability is
+scoped to one organization, instructor, Schedule, and canonical slot; it does
+not claim calendar dates or recurring patterns.
 
 See [Instructor Assignment Architecture](docs/instructor-assignment-architecture.md)
-for the current layer contracts, first overlap constraint, limitations, and
-extension guidance.
+for the current pipeline, availability model and evaluator, operator workflow,
+overlap constraint, limitations, and extension guidance.
 
 ## Compatibility and known limitations
 

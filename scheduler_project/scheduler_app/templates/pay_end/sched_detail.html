@@ -1,6 +1,7 @@
 {% extends 'pay_end/base_pay.html' %}
 {% block title %}{{ sched.sched_name }}{% endblock title %}
 {% block content %}
+  {% include 'pay_end/_group_accent_palette.html' %}
   <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-4 mb-3">
     <div>
       <p class="text-uppercase text-muted small mb-1">Generated Schedule</p>
@@ -15,7 +16,9 @@
       {% if has_generated_schedule and not generation_blocked %}
         <a href="{% url 'sched-export' sched.id %}" class="btn btn-outline-success">Export CSV</a>
       {% endif %}
-      <a href="{% url 'instructor-availability' sched.id %}" class="btn btn-outline-primary">Manage Instructor Availability</a>
+      <a href="{% url 'instructor-participation' sched.id %}" class="btn btn-outline-primary">Manage Instructor Participation</a>
+      <a href="{% url 'instructor-availability' sched.id %}" class="btn btn-outline-secondary">Manage Detailed Availability Exceptions</a>
+      <a href="{% url 'instructor-assignment-schedule' sched.id %}" class="btn btn-outline-success">View Instructor Assignment Schedule</a>
       <a href="{% url 'sched-update' sched.id %}" class="btn btn-secondary">Edit Schedule Record</a>
       <a href="{% url 'sched-delete' sched.id %}" class="btn btn-outline-danger">Delete Schedule</a>
       <a href="{% url 'sched-list' %}" class="btn btn-outline-primary">Back to Schedules</a>
@@ -44,31 +47,6 @@
         .schedule-table td {
           min-width: 5.75rem;
           vertical-align: middle;
-        }
-        .schedule-table tbody tr,
-        .holding-area-item {
-          --group-accent: #6c757d;
-          --group-soft: #f8f9fa;
-        }
-        .schedule-table tbody tr.schedule-row-accent-1,
-        .holding-area-item.schedule-row-accent-1 {
-          --group-accent: #0d6efd;
-          --group-soft: #eef5ff;
-        }
-        .schedule-table tbody tr.schedule-row-accent-2,
-        .holding-area-item.schedule-row-accent-2 {
-          --group-accent: #198754;
-          --group-soft: #edf8f2;
-        }
-        .schedule-table tbody tr.schedule-row-accent-3,
-        .holding-area-item.schedule-row-accent-3 {
-          --group-accent: #6f42c1;
-          --group-soft: #f3effb;
-        }
-        .schedule-table tbody tr.schedule-row-accent-4,
-        .holding-area-item.schedule-row-accent-4 {
-          --group-accent: #fd7e14;
-          --group-soft: #fff4e8;
         }
         .schedule-row-header {
           background: var(--group-soft);
@@ -290,7 +268,7 @@
           <p class="mb-3">These activities were pushed out by saved displacement moves. They stay visible here until an operator assigns them back into the schedule grid.</p>
           <ul class="list-group list-group-flush">
             {% for item in holding_area_preview %}
-              <li class="list-group-item px-0 holding-area-item {{ item.group_accent_class }}">
+              <li class="list-group-item px-0 holding-area-item group-accent {{ item.group_accent_class }}">
                 <div
                   class="schedule-activity-card holding-activity-card"
                   title="{{ item.display_value }}"
@@ -384,7 +362,7 @@
         </thead>
         <tbody>
           {% for row in schedule_rows %}
-            <tr class="{% cycle 'schedule-row-accent-1' 'schedule-row-accent-2' 'schedule-row-accent-3' 'schedule-row-accent-4' %}">
+            <tr class="group-accent {{ row.group_accent_class }}">
               <th scope="row" class="schedule-row-header">
                 <span class="schedule-group-badge">Group {{ row.group_index|add:"1" }}</span>
                 <span class="schedule-group-name">{{ row.ag }}</span>

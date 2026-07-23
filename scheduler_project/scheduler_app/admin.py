@@ -41,6 +41,7 @@ class CourseAdmin(admin.ModelAdmin):
     list_filter = ('organization', 'course_len')
     ordering = ('organization__name', 'course_name', 'course_len')
     search_fields = ('course_name', 'abriviation', 'organization__name')
+    exclude = ('required_instructor_count',)
     inlines = (ActivityCertificationRequirementInline,)
 
 

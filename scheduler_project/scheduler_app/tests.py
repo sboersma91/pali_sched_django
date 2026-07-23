@@ -31,6 +31,7 @@ from .instructor_availability import (
     apply_instructor_availability_changes,
     build_instructor_availability_matrix,
 )
+from .group_colors import group_accent_class
 from .views import (
     SchedDetail,
     SchedList,
@@ -129,6 +130,7 @@ class OperationalOccurrenceExtractionTests(TestCase):
             "group_index": 0,
             "group_label": "School 0",
             "occurrence_id": "occurrence:0:mon_pm1",
+            "required_instructor_count": 1,
             "slot_footprint": [{
                 "block_id": "0:mon_pm1",
                 "slot_key": "mon_pm1",
@@ -1727,7 +1729,8 @@ class InstructorManagementCrudTests(TestCase):
             self.assertContains(response, reverse("instructor-create"))
         self.assertContains(dashboard, ">Instructors</a>", html=False)
         self.assertRedirects(legacy, reverse("instructor-create"))
-        self.assertContains(schedule_detail, "Manage Instructor Availability")
+        self.assertContains(schedule_detail, "Manage Instructor Participation")
+        self.assertContains(schedule_detail, "Manage Detailed Availability Exceptions")
 
 
 @override_settings(ALLOWED_HOSTS=["testserver"])
@@ -1781,7 +1784,7 @@ class InstructorAvailabilityViewTests(TestCase):
 
     def full_post(self, overrides=None):
         data = {
-            f"availability_{instructor.pk}_{slot_key}": "clear"
+            f"availability_{instructor.pk}_{slot_key}": "available"
             for instructor in (self.zoe, self.avery)
             for slot_key in SCHEDULE_SLOT_KEYS
         }
@@ -1833,7 +1836,7 @@ class InstructorAvailabilityViewTests(TestCase):
         self.assertEqual(slot_positions, sorted(slot_positions))
         self.assertIn('<option value="available" selected>Available</option>', content)
         self.assertIn('<option value="unavailable" selected>Unavailable</option>', content)
-        self.assertIn('<option value="clear" selected>Missing</option>', content)
+        self.assertNotContains(response, 'Missing')
         self.assertNotContains(response, self.foreign_instructor.fname)
         self.assertEqual(
             InstructorScheduleAvailability.objects.count(), before_count
@@ -1852,7 +1855,7 @@ class InstructorAvailabilityViewTests(TestCase):
         )
         self.assertNotContains(response, "Save Instructor Availability")
 
-    def test_post_creates_available_and_unavailable_and_redirects(self):
+    def test_post_preserves_inherited_available_and_creates_unavailable(self):
         self.login()
         response = self.client.post(self.url, self.full_post({
             self.field(self.zoe, "mon_pm1"): "available",
@@ -1860,11 +1863,10 @@ class InstructorAvailabilityViewTests(TestCase):
         }))
 
         self.assertRedirects(response, self.url)
-        self.assertEqual(
-            InstructorScheduleAvailability.objects.get(
+        self.assertFalse(
+            InstructorScheduleAvailability.objects.filter(
                 instructor=self.zoe, schedule=self.schedule, slot_key="mon_pm1"
-            ).state,
-            "available",
+            ).exists()
         )
         self.assertEqual(
             InstructorScheduleAvailability.objects.get(
@@ -1873,7 +1875,7 @@ class InstructorAvailabilityViewTests(TestCase):
             "unavailable",
         )
 
-    def test_missing_selection_clears_existing_record(self):
+    def test_available_selection_clears_existing_record(self):
         record = InstructorScheduleAvailability.objects.create(
             organization=self.organization,
             instructor=self.zoe,
@@ -1958,7 +1960,7 @@ class InstructorAvailabilityViewTests(TestCase):
     def test_submitted_organization_cannot_override_server_ownership(self):
         self.login()
         data = self.full_post({
-            self.field(self.zoe, "mon_pm1"): "available",
+            self.field(self.zoe, "mon_pm1"): "unavailable",
             "organization_id": self.other_organization.pk,
         })
 
@@ -2007,7 +2009,7 @@ class InstructorAvailabilityViewTests(TestCase):
             reverse("sched-detail", args=[self.schedule.pk])
         )
 
-        self.assertContains(response, "Manage Instructor Availability")
+        self.assertContains(response, "Manage Detailed Availability Exceptions")
         self.assertContains(response, self.url)
 
 
@@ -2070,7 +2072,7 @@ class InstructorAvailabilityMatrixServiceTests(TestCase):
         zoe_states = {cell.slot_key: cell.state for cell in matrix.rows[0].cells}
         self.assertEqual(zoe_states["mon_pm1"], "available")
         self.assertEqual(zoe_states["mon_pm2"], "unavailable")
-        self.assertIsNone(zoe_states["mon_night"])
+        self.assertEqual(zoe_states["mon_night"], "available")
         self.assertEqual(
             InstructorScheduleAvailability.objects.count(), before_count
         )
@@ -2084,7 +2086,7 @@ class InstructorAvailabilityMatrixServiceTests(TestCase):
             self.organization, self.schedule
         )
 
-        self.assertIsNone(matrix.rows[0].cells[0].state)
+        self.assertEqual(matrix.rows[0].cells[0].state, "available")
 
     def test_matrix_rejects_foreign_schedule(self):
         with self.assertRaises(ValidationError):
@@ -2118,7 +2120,7 @@ class InstructorAvailabilityMatrixServiceTests(TestCase):
             [row.instructor for row in matrix.rows],
         )
         self.assertTrue(all(
-            cell.state is None
+            cell.state == "available"
             for row in matrix.rows
             for cell in row.cells
         ))
@@ -2175,34 +2177,30 @@ class InstructorAvailabilityChangeServiceTests(TestCase):
             slot_key=slot_key,
         )
 
-    def test_creates_available_and_assigns_organization_server_side(self):
+    def test_available_without_exception_is_unchanged_and_creates_no_row(self):
         result = self.apply([
             self.change(organization_id=self.other_organization.pk)
         ])
 
-        record = self.get_record()
-        self.assertEqual(record.state, "available")
-        self.assertEqual(record.organization, self.organization)
-        self.assertEqual(result.created, 1)
+        self.assertFalse(InstructorScheduleAvailability.objects.exists())
+        self.assertEqual(result.unchanged, 1)
 
     def test_creates_unavailable(self):
         self.apply([self.change(action="unavailable")])
 
         self.assertEqual(self.get_record().state, "unavailable")
 
-    def test_updates_available_to_unavailable_and_back(self):
-        self.apply([self.change(action="available")])
-
+    def test_creates_unavailable_and_available_deletes_exception(self):
         first_result = self.apply([self.change(action="unavailable")])
         self.assertEqual(self.get_record().state, "unavailable")
         second_result = self.apply([self.change(action="available")])
 
-        self.assertEqual(self.get_record().state, "available")
-        self.assertEqual(first_result.updated, 1)
-        self.assertEqual(second_result.updated, 1)
+        self.assertFalse(InstructorScheduleAvailability.objects.exists())
+        self.assertEqual(first_result.created, 1)
+        self.assertEqual(second_result.deleted, 1)
 
     def test_clear_deletes_existing_and_missing_is_safe_noop(self):
-        self.apply([self.change(action="available")])
+        self.apply([self.change(action="unavailable")])
 
         deleted = self.apply([self.change(action="clear")])
         missing = self.apply([self.change(action="clear")])
@@ -2221,14 +2219,14 @@ class InstructorAvailabilityChangeServiceTests(TestCase):
             ),
         ])
 
-        self.assertEqual(result.created, 2)
+        self.assertEqual(result.created, 1)
         self.assertEqual(
             set(InstructorScheduleAvailability.objects.values_list("state", flat=True)),
-            {"available", "unavailable"},
+            {"unavailable"},
         )
 
     def assert_invalid_batch_preserves_existing(self, invalid_change):
-        self.apply([self.change(action="available")])
+        self.apply([self.change(action="unavailable")])
         before = list(
             InstructorScheduleAvailability.objects.values_list(
                 "organization_id", "instructor_id", "schedule_id", "slot_key", "state"
@@ -2293,15 +2291,19 @@ class InstructorAvailabilityChangeServiceTests(TestCase):
 
         self.apply([self.change(action="available")])
 
-        self.assertEqual(self.get_record().state, "available")
+        self.assertFalse(
+            InstructorScheduleAvailability.objects.filter(
+                instructor=self.instructor,
+                schedule=self.schedule,
+                slot_key="mon_pm1",
+            ).exists()
+        )
         self.assertEqual(
             self.get_record(schedule=self.other_schedule).state,
             "unavailable",
         )
 
     def test_unchanged_cell_is_not_rewritten(self):
-        self.apply([self.change(action="available")])
-
         result = self.apply([self.change(action="available")])
 
         self.assertEqual(result.unchanged, 1)
@@ -3494,6 +3496,53 @@ class OperationalDashboardTests(TestCase):
 
 
 class ScheduleOperationsTests(TestCase):
+    def test_schedule_rows_use_shared_group_index_accents(self):
+        rows = build_schedule_blocks({
+            "ags": ["Same Label", "Same Label", "Third", "Fourth", "Fifth"],
+        })
+
+        self.assertEqual(
+            [row["group_accent_class"] for row in rows],
+            [group_accent_class(index) for index in range(5)],
+        )
+        self.assertEqual(rows[0]["group_accent_class"], rows[4]["group_accent_class"])
+        self.assertNotEqual(rows[0]["group_accent_class"], rows[1]["group_accent_class"])
+
+    def test_schedule_row_accents_are_stable_when_blocks_are_rebuilt(self):
+        schedule = {"ags": ["First", "Second", "Third", "Fourth", "Fifth"]}
+
+        first_build = build_schedule_blocks(schedule)
+        refreshed_build = build_schedule_blocks(schedule)
+
+        self.assertEqual(
+            [row["group_accent_class"] for row in first_build],
+            [row["group_accent_class"] for row in refreshed_build],
+        )
+
+    def test_move_to_another_group_uses_target_row_accent(self):
+        activity = Course.objects.create(
+            course_name="Target Accent Activity",
+            abriviation="TAA",
+            course_len=1,
+        )
+        rows = build_schedule_blocks({
+            "ags": ["Duplicate Label", "Duplicate Label"],
+            "mon_pm1": [activity.course_name, "empty"],
+        })
+
+        result = apply_move_proposal(rows, {
+            "source_block_id": "0:mon_pm1",
+            "source_activity_id": activity.pk,
+            "source_activity_name": activity.course_name,
+            "source_occurrence_id": "occurrence:0:mon_pm1",
+            "target_slot_key": "mon_pm1",
+            "target_group_index": 1,
+        })
+
+        self.assertTrue(result["applied"])
+        self.assertEqual(rows[1]["cells"][0]["group_index"], 1)
+        self.assertEqual(rows[1]["group_accent_class"], "schedule-row-accent-2")
+
     def test_build_schedule_blocks_creates_metadata_for_resolvable_activity(self):
         activity = Course.objects.create(course_name="Adapter Activity", abriviation="AA", course_len=1)
 
@@ -3534,6 +3583,7 @@ class ScheduleOperationsTests(TestCase):
             "conflicts": [],
         })
         self.assertEqual(rows[0]["ag"], "Adapter School 0")
+        self.assertEqual(rows[0]["group_accent_class"], "schedule-row-accent-1")
         self.assertEqual(len(rows[0]["cells"]), 20)
 
     def test_build_schedule_blocks_preserves_empty_and_unavailable_display_values(self):
@@ -5474,7 +5524,11 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, "Activity Group")
         self.assertContains(response, "Monday")
         self.assertContains(response, "Example School 0")
-        self.assertContains(response, 'class="schedule-row-accent-1"', html=False)
+        self.assertContains(
+            response,
+            'class="group-accent schedule-row-accent-1"',
+            html=False,
+        )
         self.assertContains(response, 'class="schedule-row-header"', html=False)
         self.assertContains(response, "Group 1")
         self.assertContains(response, "Archery")
@@ -7122,7 +7176,7 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, "Supporting Workspace")
         self.assertContains(response, "Displaced Activities Awaiting Reassignment")
         self.assertContains(response, "Displaced")
-        self.assertContains(response, 'class="list-group-item px-0 holding-area-item schedule-row-accent-1"', html=False)
+        self.assertContains(response, 'class="list-group-item px-0 holding-area-item group-accent schedule-row-accent-1"', html=False)
         self.assertContains(response, 'class="schedule-activity-card holding-activity-card"', html=False)
         self.assertContains(response, 'draggable="true"', html=False)
         self.assertContains(response, 'data-source-kind="holding"', html=False)
@@ -9130,6 +9184,7 @@ class CourseFormWorkflowTests(TestCase):
         self.assertContains(response, "View")
         self.assertContains(response, "Edit")
         self.assertContains(response, "Delete")
+        self.assertNotContains(response, "Required Instructors")
 
     def test_course_list_renders_human_readable_schedule_length_labels(self):
         Course.objects.create(course_name="One Block Course", abriviation="ONE", course_len=1)
@@ -9158,6 +9213,7 @@ class CourseFormWorkflowTests(TestCase):
         self.assertContains(response, "Edit Activity")
         self.assertContains(response, "Delete Activity")
         self.assertContains(response, "Back to Activities")
+        self.assertNotContains(response, "Required Instructors")
 
     def test_course_delete_confirmation_renders_destructive_warning(self):
         response = self.client.get(reverse("course-delete", args=[self.course.id]))
@@ -9186,6 +9242,8 @@ class CourseFormWorkflowTests(TestCase):
         self.assertContains(response, "One-block daytime activity")
         self.assertContains(response, "Night activity")
         self.assertNotContains(response, '<select name="primary_locs"')
+        self.assertNotContains(response, 'required_instructor_count')
+        self.assertNotContains(response, 'Required Instructors')
 
     def test_canonical_course_create_post_saves_primary_locations(self):
         response = self.client.post(

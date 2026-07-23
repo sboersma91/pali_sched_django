@@ -1,8 +1,135 @@
 """Read-only boundaries for future instructor assignment workflows."""
 
-from .schedule_blocks import SCHEDULE_SLOT_KEYS
+from dataclasses import dataclass
+
+from django.core.exceptions import ValidationError
+
+from .schedule_blocks import (
+    DAILY_OFF_ELIGIBLE_SLOT_KEYS_BY_DAY,
+    SCHEDULE_SLOT_KEYS,
+)
 from .schedule_operations import iter_schedule_blocks
-from .models import InstructorScheduleAvailability
+from .instructor_availability import (
+    preload_instructor_schedule_participation,
+    resolve_schedule_participating_instructors,
+)
+from .models import (
+    ActivityCertificationRequirement,
+    Course,
+    InstructorCertification,
+    Instructor,
+    InstructorScheduleAvailability,
+    InstructorScheduleParticipation,
+)
+
+
+@dataclass(frozen=True)
+class _ResolvedAvailabilityRecord:
+    organization_id: int
+    instructor_id: int
+    schedule_id: int
+    slot_key: str
+    state: str
+
+
+DAILY_OFF_SATISFIED_BY_AVAILABILITY = 'satisfied_by_availability'
+DAILY_OFF_RESERVATION_REQUIRED = 'reservation_required'
+
+
+def normalize_daily_off_requirements(
+    organization_id,
+    schedule_id,
+    participating_instructors,
+    availability_records,
+):
+    """Normalize daily OFF evidence from preloaded participation and availability."""
+    if not isinstance(participating_instructors, (list, tuple)):
+        raise TypeError('participating_instructors must be a preloaded list or tuple.')
+    if not isinstance(availability_records, (list, tuple)):
+        raise TypeError('availability_records must be a preloaded list or tuple.')
+
+    instructors_by_id = {
+        instructor.pk: instructor
+        for instructor in participating_instructors
+        if instructor.organization_id == organization_id
+    }
+    unavailable_slot_keys_by_instructor = {
+        instructor_id: [] for instructor_id in instructors_by_id
+    }
+    seen_cells = set()
+
+    for record in availability_records:
+        if getattr(record, 'organization_id', None) != organization_id:
+            continue
+        if getattr(record, 'schedule_id', None) != schedule_id:
+            continue
+
+        instructor_id = getattr(record, 'instructor_id', None)
+        if instructor_id not in instructors_by_id:
+            continue
+        slot_key = getattr(record, 'slot_key', None)
+        state = getattr(record, 'state', None)
+        cell_key = (instructor_id, slot_key)
+
+        if slot_key not in SCHEDULE_SLOT_KEYS:
+            raise ValidationError({
+                'availability': 'Availability record has an invalid schedule slot.'
+            })
+        if state not in {
+            InstructorScheduleAvailability.AVAILABLE,
+            InstructorScheduleAvailability.UNAVAILABLE,
+        }:
+            raise ValidationError({
+                'availability': 'Availability record has an invalid state.'
+            })
+        if cell_key in seen_cells:
+            raise ValidationError({
+                'availability': 'Duplicate instructor availability record.'
+            })
+        seen_cells.add(cell_key)
+
+        if state == InstructorScheduleAvailability.UNAVAILABLE:
+            unavailable_slot_keys_by_instructor[instructor_id].append(slot_key)
+
+    slot_order = {slot_key: index for index, slot_key in enumerate(SCHEDULE_SLOT_KEYS)}
+    ordered_instructors = sorted(
+        instructors_by_id.values(),
+        key=lambda instructor: (instructor.lname, instructor.fname, instructor.pk),
+    )
+    requirements = []
+    normalized_unavailable = {}
+    for instructor in ordered_instructors:
+        unavailable_slot_keys = tuple(sorted(
+            unavailable_slot_keys_by_instructor[instructor.pk],
+            key=lambda slot_key: slot_order[slot_key],
+        ))
+        normalized_unavailable[instructor.pk] = unavailable_slot_keys
+
+        unavailable_slot_key_set = frozenset(unavailable_slot_keys)
+        for day_key, eligible_slot_keys in DAILY_OFF_ELIGIBLE_SLOT_KEYS_BY_DAY:
+            satisfaction_slot_key = next(
+                (
+                    slot_key
+                    for slot_key in eligible_slot_keys
+                    if slot_key in unavailable_slot_key_set
+                ),
+                None,
+            )
+            requirements.append({
+                'instructor_id': instructor.pk,
+                'day_key': day_key,
+                'status': (
+                    DAILY_OFF_SATISFIED_BY_AVAILABILITY
+                    if satisfaction_slot_key is not None
+                    else DAILY_OFF_RESERVATION_REQUIRED
+                ),
+                'satisfaction_slot_key': satisfaction_slot_key,
+            })
+
+    return {
+        'requirements': tuple(requirements),
+        'unavailable_slot_keys_by_instructor': normalized_unavailable,
+    }
 
 
 def extract_operational_occurrences(schedule):
@@ -39,7 +166,21 @@ def extract_operational_occurrences(schedule):
         )
 
     normalized_occurrences = list(occurrences.values())
+    activity_ids = {
+        occurrence['activity_id']
+        for occurrence in normalized_occurrences
+        if occurrence.get('activity_id') is not None
+    }
+    required_counts_by_activity_id = dict(
+        Course.objects.filter(
+            organization_id=schedule.organization_id,
+            id__in=activity_ids,
+        ).values_list('id', 'required_instructor_count')
+    )
     for occurrence in normalized_occurrences:
+        occurrence['required_instructor_count'] = required_counts_by_activity_id.get(
+            occurrence.get('activity_id')
+        )
         occurrence["slot_footprint"].sort(
             key=lambda slot: (
                 slot_order.get(slot["slot_key"], len(slot_order)),
@@ -188,6 +329,94 @@ def evaluate_instructor_availability(
     }
 
 
+def _participation_failure(code, message):
+    return {
+        "passes": False,
+        "code": code,
+        "message": message,
+        "severity": "blocking",
+        "rule": "explicit_schedule_participation",
+        "details": {"failed_slots": ()},
+    }
+
+
+def evaluate_resolved_instructor_availability(
+    occurrence,
+    candidate_instructor,
+    participation_records,
+    availability_records,
+):
+    """Resolve broad participation plus detailed slot records without queries.
+
+    Precedence is deliberate: participation is opt-out and supplies an available
+    baseline for every canonical slot;
+    explicit slot rows override or confirm that baseline; invalid or ambiguous
+    detailed records remain blocking through the raw availability evaluator.
+    """
+    if not isinstance(participation_records, (list, tuple)):
+        raise TypeError('participation_records must be a preloaded list or tuple.')
+    if not isinstance(availability_records, (list, tuple)):
+        raise TypeError('availability_records must be a preloaded list or tuple.')
+
+    matching_participation = [
+        record
+        for record in participation_records
+        if getattr(record, 'organization_id', None) == occurrence.get('organization_id')
+        and getattr(record, 'schedule_id', None) == occurrence.get('schedule_id')
+        and getattr(record, 'instructor_id', None) == candidate_instructor.pk
+        and getattr(record, 'organization_id', None) == candidate_instructor.organization_id
+    ]
+    if len(matching_participation) > 1:
+        return _participation_failure(
+            'duplicate_participation',
+            'Instructor has duplicate participation decisions for this schedule.',
+        )
+
+    participation_state = (
+        getattr(matching_participation[0], 'state', None)
+        if matching_participation
+        else InstructorScheduleParticipation.PARTICIPATING
+    )
+    if participation_state == InstructorScheduleParticipation.NOT_PARTICIPATING:
+        return _participation_failure(
+            'not_participating',
+            'Instructor is not participating in this schedule.',
+        )
+    if participation_state != InstructorScheduleParticipation.PARTICIPATING:
+        return _participation_failure(
+            'invalid_participation_state',
+            'Instructor has an invalid participation decision for this schedule.',
+        )
+
+    resolved_records = list(availability_records)
+    for slot in occurrence.get('slot_footprint', ()):
+        slot_key = slot.get('slot_key')
+        matching_slot_records = [
+            record
+            for record in availability_records
+            if getattr(record, 'organization_id', None) == occurrence.get('organization_id')
+            and getattr(record, 'schedule_id', None) == occurrence.get('schedule_id')
+            and getattr(record, 'instructor_id', None) == candidate_instructor.pk
+            and getattr(record, 'organization_id', None) == candidate_instructor.organization_id
+            and getattr(record, 'slot_key', None) == slot_key
+        ]
+        if matching_slot_records:
+            continue
+        resolved_records.append(_ResolvedAvailabilityRecord(
+            organization_id=occurrence.get('organization_id'),
+            instructor_id=candidate_instructor.pk,
+            schedule_id=occurrence.get('schedule_id'),
+            slot_key=slot_key,
+            state=InstructorScheduleAvailability.AVAILABLE,
+        ))
+
+    return evaluate_instructor_availability(
+        occurrence,
+        candidate_instructor,
+        resolved_records,
+    )
+
+
 def preload_instructor_availability(
     organization_id,
     schedule_id,
@@ -269,17 +498,26 @@ def evaluate_occurrence_constraints(
     qualified_instructors,
     existing_assignments,
     availability_records,
+    participation_records=None,
 ):
     """Classify qualified instructors using operational assignment constraints."""
     eligible_instructors = []
     rejected_instructors = []
 
     for instructor in qualified_instructors:
-        availability_result = evaluate_instructor_availability(
-            occurrence,
-            instructor,
-            availability_records,
-        )
+        if participation_records is None:
+            availability_result = evaluate_instructor_availability(
+                occurrence,
+                instructor,
+                availability_records,
+            )
+        else:
+            availability_result = evaluate_resolved_instructor_availability(
+                occurrence,
+                instructor,
+                participation_records,
+                availability_records,
+            )
         if not availability_result["passes"]:
             rejected_instructors.append({
                 "instructor": instructor,
@@ -314,6 +552,7 @@ def assign_occurrences_deterministically(
     instructor_certifications,
     course_requirements,
     availability_records,
+    participation_records=None,
 ):
     """Assign the first qualified and eligible instructor to each occurrence."""
     candidates = tuple(candidate_instructors)
@@ -327,12 +566,21 @@ def assign_occurrences_deterministically(
             course_requirements,
         )
         qualified_instructors = qualification_result["qualified_instructors"]
-        constraint_result = evaluate_occurrence_constraints(
-            occurrence,
-            qualified_instructors,
-            assignments,
-            availability_records,
-        )
+        if participation_records is None:
+            constraint_result = evaluate_occurrence_constraints(
+                occurrence,
+                qualified_instructors,
+                assignments,
+                availability_records,
+            )
+        else:
+            constraint_result = evaluate_occurrence_constraints(
+                occurrence,
+                qualified_instructors,
+                assignments,
+                availability_records,
+                participation_records,
+            )
         eligible_instructors = constraint_result["eligible_instructors"]
         assigned_instructor = eligible_instructors[0] if eligible_instructors else None
 
@@ -352,3 +600,414 @@ def assign_occurrences_deterministically(
         })
 
     return assignments
+
+
+def _planner_occurrence_sort_key(occurrence):
+    slot_order = {slot_key: index for index, slot_key in enumerate(SCHEDULE_SLOT_KEYS)}
+    footprint = occurrence.get('slot_footprint') or ()
+    first_slot_index = min(
+        (
+            slot_order.get(slot.get('slot_key'), len(slot_order))
+            for slot in footprint
+        ),
+        default=len(slot_order),
+    )
+    group_index = occurrence.get('group_index')
+    return (
+        group_index if isinstance(group_index, int) else 0,
+        first_slot_index,
+        occurrence.get('occurrence_id') or '',
+        occurrence.get('activity_id') or 0,
+    )
+
+
+def _daily_off_rejection(occurrence, instructor, day_key, before, after):
+    occurrence_slot_keys = tuple(
+        slot.get('slot_key')
+        for slot in occurrence.get('slot_footprint') or ()
+        if slot.get('slot_key') is not None
+    )
+    consumed_candidate_slot_keys = tuple(
+        slot_key for slot_key in occurrence_slot_keys if slot_key in before
+    )
+    return {
+        'passes': False,
+        'code': 'daily_off_requirement',
+        'message': (
+            f'Assignment would consume the instructor\'s final eligible '
+            f'{day_key} OFF slot.'
+        ),
+        'severity': 'blocking',
+        'rule': 'required_daily_off_block',
+        'details': {
+            'instructor_id': instructor.pk,
+            'day_key': day_key,
+            'affected_slot_keys': occurrence_slot_keys,
+            'consumed_off_candidate_slot_keys': consumed_candidate_slot_keys,
+            'remaining_candidate_slot_keys_before': tuple(before),
+            'remaining_candidate_slot_keys_after': tuple(after),
+        },
+    }
+
+
+def plan_instructor_assignments_with_daily_off(
+    occurrences,
+    candidate_instructors,
+    instructor_certifications,
+    course_requirements,
+    availability_records,
+    participation_records,
+    normalized_daily_off_requirements,
+):
+    """Return a maximum-coverage, deterministic, in-memory daily-OFF plan."""
+    for name, value in (
+        ('occurrences', occurrences),
+        ('candidate_instructors', candidate_instructors),
+        ('availability_records', availability_records),
+        ('participation_records', participation_records),
+    ):
+        if not isinstance(value, (list, tuple)):
+            raise TypeError(f'{name} must be a preloaded list or tuple.')
+
+    ordered_occurrences = tuple(sorted(occurrences, key=_planner_occurrence_sort_key))
+    candidates = tuple(sorted(candidate_instructors, key=lambda instructor: instructor.pk))
+    candidate_ids = {instructor.pk for instructor in candidates}
+    eligible_slots_by_day = dict(DAILY_OFF_ELIGIBLE_SLOT_KEYS_BY_DAY)
+    requirements = tuple(normalized_daily_off_requirements.get('requirements') or ())
+    requirements_by_key = {}
+
+    for requirement in requirements:
+        instructor_id = requirement.get('instructor_id')
+        day_key = requirement.get('day_key')
+        key = (instructor_id, day_key)
+        if instructor_id not in candidate_ids or day_key not in eligible_slots_by_day:
+            raise ValidationError({'daily_off': 'Daily OFF requirement is out of scope.'})
+        if key in requirements_by_key:
+            raise ValidationError({'daily_off': 'Duplicate daily OFF requirement.'})
+        status = requirement.get('status')
+        if status not in {
+            DAILY_OFF_SATISFIED_BY_AVAILABILITY,
+            DAILY_OFF_RESERVATION_REQUIRED,
+        }:
+            raise ValidationError({'daily_off': 'Invalid daily OFF requirement status.'})
+        requirements_by_key[key] = requirement
+
+    expected_requirement_keys = {
+        (instructor.pk, day_key)
+        for instructor in candidates
+        for day_key in eligible_slots_by_day
+    }
+    if set(requirements_by_key) != expected_requirement_keys:
+        raise ValidationError({
+            'daily_off': 'Daily OFF requirements must cover every participating instructor.'
+        })
+
+    initial_remaining_off_candidates = {
+        key: tuple(eligible_slots_by_day[key[1]])
+        for key, requirement in requirements_by_key.items()
+        if requirement.get('status') == DAILY_OFF_RESERVATION_REQUIRED
+    }
+    qualification_by_occurrence_id = {}
+    for occurrence in ordered_occurrences:
+        qualification_by_occurrence_id[id(occurrence)] = evaluate_occurrence_qualifications(
+            occurrence,
+            candidates,
+            instructor_certifications,
+            course_requirements,
+        )
+
+    best = {
+        'assigned_count': -1,
+        'assignments': (),
+        'remaining_off_candidates': None,
+        'occupied_slot_keys_by_instructor': None,
+    }
+
+    def search(
+        occurrence_index,
+        assignments,
+        remaining_off_candidates,
+        occupied_slot_keys_by_instructor,
+        assigned_count,
+    ):
+        remaining_occurrence_count = len(ordered_occurrences) - occurrence_index
+        if assigned_count + remaining_occurrence_count <= best['assigned_count']:
+            return
+        if occurrence_index == len(ordered_occurrences):
+            best.update({
+                'assigned_count': assigned_count,
+                'assignments': tuple(assignments),
+                'remaining_off_candidates': dict(remaining_off_candidates),
+                'occupied_slot_keys_by_instructor': {
+                    instructor_id: tuple(sorted(
+                        slot_keys,
+                        key=SCHEDULE_SLOT_KEYS.index,
+                    ))
+                    for instructor_id, slot_keys in occupied_slot_keys_by_instructor.items()
+                },
+            })
+            return
+
+        occurrence = ordered_occurrences[occurrence_index]
+        qualification_result = qualification_by_occurrence_id[id(occurrence)]
+        qualified_instructors = qualification_result['qualified_instructors']
+        constraint_result = evaluate_occurrence_constraints(
+            occurrence,
+            qualified_instructors,
+            assignments,
+            availability_records,
+            participation_records,
+        )
+        eligible_instructors = constraint_result['eligible_instructors']
+        eligible_with_off_capacity = []
+        off_rejections = []
+        footprint_slot_keys = frozenset(
+            slot.get('slot_key')
+            for slot in occurrence.get('slot_footprint') or ()
+            if slot.get('slot_key') is not None
+        )
+
+        for instructor in eligible_instructors:
+            candidate_remaining = dict(remaining_off_candidates)
+            candidate_off_reasons = []
+            for day_key, eligible_slot_keys in DAILY_OFF_ELIGIBLE_SLOT_KEYS_BY_DAY:
+                key = (instructor.pk, day_key)
+                before = candidate_remaining.get(key)
+                if before is None:
+                    continue
+                after = tuple(
+                    slot_key
+                    for slot_key in before
+                    if slot_key not in footprint_slot_keys
+                )
+                if not after:
+                    candidate_off_reasons.append(_daily_off_rejection(
+                        occurrence,
+                        instructor,
+                        day_key,
+                        before,
+                        after,
+                    ))
+                candidate_remaining[key] = after
+
+            if candidate_off_reasons:
+                off_rejections.append({
+                    'instructor': instructor,
+                    'reasons': candidate_off_reasons,
+                })
+                continue
+            eligible_with_off_capacity.append((instructor, candidate_remaining))
+
+        for instructor, candidate_remaining in eligible_with_off_capacity:
+            assignment = {
+                'occurrence': occurrence,
+                'assigned_instructor': instructor,
+                'status': 'assigned',
+                'reason': None,
+                'constraint_rejections': tuple(
+                    constraint_result['rejected_instructors'] + off_rejections
+                ),
+                'planning_diagnostics': (),
+            }
+            candidate_occupied = dict(occupied_slot_keys_by_instructor)
+            candidate_occupied[instructor.pk] = frozenset(
+                candidate_occupied.get(instructor.pk, frozenset())
+                | footprint_slot_keys
+            )
+            search(
+                occurrence_index + 1,
+                assignments + [assignment],
+                candidate_remaining,
+                candidate_occupied,
+                assigned_count + 1,
+            )
+
+        if not qualified_instructors:
+            reason = 'No qualified instructors available.'
+            planning_diagnostics = ()
+        elif not eligible_with_off_capacity:
+            reason = 'No eligible instructors available.'
+            planning_diagnostics = ()
+        else:
+            reason = 'Left unstaffed to preserve maximum feasible hard-constraint coverage.'
+            planning_diagnostics = ({
+                'code': 'global_planning_choice',
+                'message': reason,
+                'severity': 'info',
+                'rule': 'maximum_feasible_coverage',
+                'details': {
+                    'occurrence_id': occurrence.get('occurrence_id'),
+                },
+            },)
+        unstaffed_assignment = {
+            'occurrence': occurrence,
+            'assigned_instructor': None,
+            'status': 'unstaffed',
+            'reason': reason,
+            'constraint_rejections': tuple(
+                constraint_result['rejected_instructors'] + off_rejections
+            ),
+            'planning_diagnostics': planning_diagnostics,
+        }
+        search(
+            occurrence_index + 1,
+            assignments + [unstaffed_assignment],
+            remaining_off_candidates,
+            occupied_slot_keys_by_instructor,
+            assigned_count,
+        )
+
+    search(
+        0,
+        [],
+        initial_remaining_off_candidates,
+        {instructor.pk: frozenset() for instructor in candidates},
+        0,
+    )
+
+    final_requirements = []
+    off_reservations = []
+    availability_satisfied_requirements = []
+    for requirement in requirements:
+        normalized = dict(requirement)
+        key = (requirement['instructor_id'], requirement['day_key'])
+        if requirement['status'] == DAILY_OFF_RESERVATION_REQUIRED:
+            remaining_candidates = best['remaining_off_candidates'][key]
+            selected_slot_key = remaining_candidates[0]
+            normalized['remaining_candidate_slot_keys'] = remaining_candidates
+            normalized['selected_reservation_slot_key'] = selected_slot_key
+            off_reservations.append({
+                'instructor_id': requirement['instructor_id'],
+                'day_key': requirement['day_key'],
+                'slot_key': selected_slot_key,
+            })
+        else:
+            normalized['remaining_candidate_slot_keys'] = ()
+            normalized['selected_reservation_slot_key'] = None
+            availability_satisfied_requirements.append(normalized)
+        final_requirements.append(normalized)
+
+    assignments = best['assignments']
+    unstaffed_occurrences = tuple(
+        assignment for assignment in assignments
+        if assignment['status'] == 'unstaffed'
+    )
+    return {
+        'assignments': assignments,
+        'unstaffed_occurrences': unstaffed_occurrences,
+        'off_requirements': tuple(final_requirements),
+        'off_reservations': tuple(off_reservations),
+        'requirements_satisfied_by_availability': tuple(
+            availability_satisfied_requirements
+        ),
+        'unavailable_slot_keys_by_instructor': dict(
+            normalized_daily_off_requirements.get(
+                'unavailable_slot_keys_by_instructor'
+            ) or {}
+        ),
+        'occupied_slot_keys_by_instructor': best['occupied_slot_keys_by_instructor'],
+        'coverage': {
+            'assigned_occurrence_count': best['assigned_count'],
+            'unstaffed_occurrence_count': len(unstaffed_occurrences),
+            'complete': not unstaffed_occurrences,
+        },
+    }
+
+
+def run_instructor_assignment(schedule):
+    """Run one non-persisted assignment for one schedule and organization."""
+    if schedule.pk is None:
+        raise ValidationError({'schedule': 'Assignment requires a saved schedule.'})
+
+    organization = schedule.organization
+    occurrences = extract_operational_occurrences(schedule)
+    for occurrence in occurrences:
+        if occurrence.get('schedule_id') != schedule.pk:
+            raise ValidationError({
+                'occurrences': 'Assignment occurrences must belong to one schedule.'
+            })
+        if occurrence.get('organization_id') != organization.pk:
+            raise ValidationError({
+                'occurrences': 'Assignment occurrences must belong to one organization.'
+            })
+        if occurrence.get('required_instructor_count') is None:
+            raise ValidationError({
+                'occurrences': (
+                    'An operational occurrence does not resolve to a valid Course '
+                    'in the schedule organization.'
+                )
+            })
+        if occurrence.get('required_instructor_count') != 1:
+            raise ValidationError({
+                'occurrences': (
+                    'Multi-instructor occurrence staffing is not supported in '
+                    'the current release; required instructor count must be 1.'
+                )
+            })
+
+    participation_records = preload_instructor_schedule_participation(
+        organization,
+        schedule,
+    )
+    organization_instructors = tuple(
+        Instructor.objects.filter(organization=organization).order_by(
+            'lname', 'fname', 'pk'
+        )
+    )
+    candidate_instructors = resolve_schedule_participating_instructors(
+        organization.pk,
+        schedule.pk,
+        organization_instructors,
+        participation_records,
+    )
+    availability_records = preload_instructor_availability(
+        organization.pk,
+        schedule.pk,
+        candidate_instructors,
+    )
+
+    instructor_certifications = {}
+    for instructor_id, certification_id in InstructorCertification.objects.filter(
+        instructor_id__in=[instructor.pk for instructor in candidate_instructors],
+        instructor__organization=organization,
+        certification__organization=organization,
+    ).values_list('instructor_id', 'certification_id'):
+        instructor_certifications.setdefault(instructor_id, set()).add(certification_id)
+
+    activity_ids = {
+        occurrence.get('activity_id')
+        for occurrence in occurrences
+        if occurrence.get('activity_id') is not None
+    }
+    course_requirements = {}
+    for course_id, certification_id in ActivityCertificationRequirement.objects.filter(
+        course_id__in=activity_ids,
+        course__organization=organization,
+        certification__organization=organization,
+    ).values_list('course_id', 'certification_id'):
+        course_requirements.setdefault(course_id, set()).add(certification_id)
+
+    normalized_daily_off_requirements = normalize_daily_off_requirements(
+        organization.pk,
+        schedule.pk,
+        candidate_instructors,
+        availability_records,
+    )
+    planning_result = plan_instructor_assignments_with_daily_off(
+        occurrences,
+        candidate_instructors,
+        instructor_certifications,
+        course_requirements,
+        availability_records,
+        participation_records,
+        normalized_daily_off_requirements,
+    )
+    result = {
+        'schedule_id': schedule.pk,
+        'schedule_name': schedule.sched_name,
+        'organization_id': organization.pk,
+        'candidate_instructors': candidate_instructors,
+        'occurrences': occurrences,
+    }
+    result.update(planning_result)
+    return result

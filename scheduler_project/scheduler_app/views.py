@@ -18,13 +18,20 @@ from .forms import (
 from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
 from django.urls import reverse, reverse_lazy
 from django.utils.text import slugify
+from django.views.decorators.http import require_GET
 from django.db.models import Prefetch
 from django.db.models.functions import Lower
 
 from .school_accounting import school_slot_accounting_summary
 from .instructor_availability import (
     apply_instructor_availability_changes,
+    apply_instructor_participation_changes,
     build_instructor_availability_matrix,
+    build_instructor_participation_matrix,
+)
+from .instructor_assignment import run_instructor_assignment
+from .instructor_assignment_presentation import (
+    build_instructor_assignment_presentation,
 )
 from .schedule_blocks import SCHEDULE_LEGEND
 from .schedule_operations import (
@@ -87,6 +94,90 @@ class OrganizationScopedMixin:
         if hasattr(form, 'instance') and hasattr(form.instance, 'organization_id'):
             form.instance.organization = self.get_organization()
         return super().form_valid(form)
+
+
+def _parse_instructor_participation_post(post_data, matrix):
+    expected_fields = {
+        f'participation_{row.instructor.pk}': row.instructor.pk
+        for row in matrix.rows
+    }
+    submitted_fields = {
+        key for key in post_data if key.startswith('participation_')
+    }
+    if submitted_fields != set(expected_fields):
+        raise ValidationError(
+            'The submitted participation form is incomplete or contains invalid instructors.'
+        )
+
+    changes = []
+    for field_name, instructor_id in expected_fields.items():
+        submitted_values = post_data.getlist(field_name)
+        if len(submitted_values) != 1:
+            raise ValidationError(
+                f'Participation for instructor {instructor_id} must have exactly one value.'
+            )
+        changes.append({
+            'instructor_id': instructor_id,
+            'state': submitted_values[0],
+        })
+    return tuple(changes)
+
+
+def instructor_participation_edit(request, pk):
+    organization = get_user_organization(request.user)
+    schedule = get_object_or_404(
+        TheSched,
+        pk=pk,
+        organization=organization,
+    )
+    matrix = build_instructor_participation_matrix(organization, schedule)
+    participation_error = None
+
+    if request.method == 'POST':
+        try:
+            changes = _parse_instructor_participation_post(request.POST, matrix)
+            result = apply_instructor_participation_changes(
+                organization,
+                schedule,
+                changes,
+            )
+        except ValidationError as error:
+            participation_error = str(error)
+            messages.error(
+                request,
+                f'Instructor participation was not saved: {participation_error}',
+            )
+        else:
+            messages.success(
+                request,
+                'Instructor participation saved successfully '
+                f'({result.created} created, {result.updated} updated, '
+                f'{result.deleted} returned to default participation).',
+            )
+            return HttpResponseRedirect(
+                reverse('instructor-participation', args=[schedule.pk])
+            )
+
+    return render(request, 'pay_end/instructor_participation.html', {
+        'schedule': schedule,
+        'participation_matrix': matrix,
+        'participation_error': participation_error,
+    })
+
+
+@require_GET
+def instructor_assignment_schedule(request, pk):
+    organization = get_user_organization(request.user)
+    schedule = get_object_or_404(
+        TheSched,
+        pk=pk,
+        organization=organization,
+    )
+    assignment_result = run_instructor_assignment(schedule)
+    presentation = build_instructor_assignment_presentation(assignment_result)
+    return render(request, 'pay_end/instructor_assignment_schedule.html', {
+        'assignment_schedule': presentation,
+    })
 
 
 def _parse_instructor_availability_post(post_data, matrix):

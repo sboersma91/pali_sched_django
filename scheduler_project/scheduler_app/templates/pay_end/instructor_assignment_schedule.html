@@ -1,0 +1,104 @@
+{% extends 'pay_end/base_pay.html' %}
+{% block title %}Instructor Assignment Schedule — {{ assignment_schedule.schedule_name }}{% endblock title %}
+{% block content %}
+  {% include 'pay_end/_group_accent_palette.html' %}
+  <style>
+    .instructor-assignment-table td.group-accent {
+      background-color: var(--group-soft) !important;
+      box-shadow: inset 0.3rem 0 0 var(--group-accent);
+    }
+  </style>
+  <div class="mt-4 mb-3">
+    <p class="text-uppercase text-muted small mb-1">{{ assignment_schedule.schedule_name }}</p>
+    <h1>Instructor Assignment Schedule</h1>
+    <p class="text-muted mb-1">Assignments are calculated from the current activity schedule, instructor participation, qualifications, and detailed availability exceptions.</p>
+    <p class="alert alert-info py-2">This is a current planning view. Refreshing this page recalculates assignments from current data.</p>
+  </div>
+
+  {% if assignment_schedule.unstaffed_occurrences %}
+    <section class="mb-4" aria-labelledby="unstaffed-heading">
+      <div class="alert alert-warning">
+        <h2 id="unstaffed-heading" class="h4">Unstaffed Occurrences</h2>
+        <p>The following scheduled activities do not currently have an eligible instructor.</p>
+        <div class="vstack gap-3">
+          {% for occurrence in assignment_schedule.unstaffed_occurrences %}
+            <article class="bg-white border rounded p-3">
+              <h3 class="h5 mb-1">{{ occurrence.activity_name }}</h3>
+              {% if occurrence.group_label %}<p class="mb-1"><strong>Group:</strong> {{ occurrence.group_label }}</p>{% endif %}
+              <p class="mb-1"><strong>Slots:</strong> {{ occurrence.occupied_slots|join:", " }}</p>
+              <p class="mb-0"><strong>Reason:</strong> {{ occurrence.reason }}</p>
+              {% if occurrence.rejection_details %}
+                <details class="mt-2">
+                  <summary>Why candidates were rejected</summary>
+                  <ul class="mb-0 mt-2">
+                    {% for rejection in occurrence.rejection_details %}
+                      <li>
+                        <strong>{{ rejection.instructor_name }}:</strong> {{ rejection.reason }}
+                        {% if rejection.affected_slots %} Affected slots: {{ rejection.affected_slots|join:", " }}.{% endif %}
+                        {% if rejection.conflicting_occurrence_id %} Conflicts with occurrence {{ rejection.conflicting_occurrence_id }}.{% endif %}
+                      </li>
+                    {% endfor %}
+                  </ul>
+                </details>
+              {% endif %}
+            </article>
+          {% endfor %}
+        </div>
+      </div>
+    </section>
+  {% endif %}
+
+  <section aria-labelledby="assignment-grid-heading">
+    <h2 id="assignment-grid-heading" class="h3">Assignments by Instructor and Slot</h2>
+    {% if assignment_schedule.instructor_rows %}
+      <div class="table-responsive">
+        <table class="table table-bordered table-sm align-middle instructor-assignment-table">
+          <thead>
+            <tr>
+              <th scope="col" rowspan="2">Instructor</th>
+              {% for day in assignment_schedule.day_headers %}
+                <th scope="colgroup" colspan="{{ day.column_count }}" class="text-center">{{ day.name }}</th>
+              {% endfor %}
+            </tr>
+            <tr>
+              {% for slot in assignment_schedule.slot_headers %}
+                <th scope="col" class="text-center">{{ slot.label }}</th>
+              {% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in assignment_schedule.instructor_rows %}
+              <tr>
+                <th scope="row">{{ row.instructor_name }}</th>
+                {% for cell in row.cells %}
+                  <td class="{% if cell.state == 'assigned' %}group-accent {{ cell.group_accent_class }}{% elif cell.state == 'off' %}bg-secondary text-white fw-bold{% elif cell.state == 'unavailable' %}table-warning text-dark{% else %}bg-light text-secondary{% endif %}" data-slot-key="{{ cell.slot_key }}" data-cell-state="{{ cell.state }}"{% if cell.occurrence_id %} data-occurrence-id="{{ cell.occurrence_id }}"{% endif %}>
+                    {% if cell.state == 'assigned' %}
+                      <strong>{{ cell.activity_name }}</strong>
+                      {% if cell.group_label %}<div class="small text-muted">{{ cell.group_label }}</div>{% endif %}
+                    {% elif cell.state == 'off' %}
+                      <strong>OFF</strong>
+                    {% elif cell.state == 'unavailable' %}
+                      <span>Unavailable</span>
+                    {% else %}
+                      <span>Admin Time</span>
+                    {% endif %}
+                  </td>
+                {% endfor %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="alert alert-info" role="status">
+        No instructors are currently marked as participating in this schedule.
+      </div>
+    {% endif %}
+  </section>
+
+  <div class="d-flex flex-wrap gap-2 mt-3">
+    <a href="{% url 'sched-detail' assignment_schedule.schedule_id %}" class="btn btn-primary">Back to Activity Schedule</a>
+    <a href="{% url 'instructor-participation' assignment_schedule.schedule_id %}" class="btn btn-outline-primary">Manage Instructor Participation</a>
+    <a href="{% url 'instructor-availability' assignment_schedule.schedule_id %}" class="btn btn-outline-secondary">Manage Detailed Availability Exceptions</a>
+  </div>
+{% endblock content %}

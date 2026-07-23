@@ -82,9 +82,19 @@ urlpatterns = [
     path("schedule_list", login_required(SchedList.as_view()), name="sched-list"),
     path("schedule_detail/<int:pk>/", login_required(SchedDetail.as_view()), name="sched-detail"),
     path(
+        "schedule_detail/<int:pk>/instructor-participation/",
+        login_required(views.instructor_participation_edit),
+        name="instructor-participation",
+    ),
+    path(
         "schedule_detail/<int:pk>/instructor-availability/",
         login_required(views.instructor_availability_edit),
         name="instructor-availability",
+    ),
+    path(
+        "schedule_detail/<int:pk>/instructor-assignments/",
+        login_required(views.instructor_assignment_schedule),
+        name="instructor-assignment-schedule",
     ),
     path("schedule_detail/<int:pk>/generate/", login_required(SchedGenerate.as_view()), name="sched-generate"),
     path("schedule_detail/<int:pk>/confirm-move/", login_required(SchedMoveConfirm.as_view()), name="sched-move-confirm"),

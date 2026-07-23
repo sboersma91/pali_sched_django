@@ -82,6 +82,7 @@ The following scheduling models are organization-owned:
 - `Schools`
 - `TheSched`
 - `Instructor`
+- `InstructorScheduleAvailability`
 
 Ownership is stored directly on each model with an `organization` foreign key. The relationship uses protected deletion, so an organization cannot be deleted while owned operational data still depends on it.
 
@@ -113,10 +114,12 @@ This applies to:
 - Activities/Courses
 - Schools
 - Schedules
+- Instructors
 
 ### Object Access Protection
 
-Detail, update, delete, schedule generation, manual editing, repair, and export lookups filter by organization ownership.
+Detail, update, delete, schedule generation, manual editing, repair, export, and
+instructor-availability schedule lookups filter by organization ownership.
 
 Direct URL tampering against another organization's object should fail with a not-found response instead of exposing the object.
 
@@ -147,6 +150,15 @@ Schedule CSV export checks schedule ownership before returning schedule data.
 ### Schedule Generation Protection
 
 Schedule generation operates on the schedule's organization. It does not use globally aggregated activity/location lookup data.
+
+### Instructor Availability Protection
+
+Instructor availability is scoped to an organization, instructor, Schedule,
+and canonical slot. The operator matrix loads its Schedule and instructors from
+the authenticated user's organization, and its application service assigns
+ownership server-side. Foreign Schedule and instructor IDs cannot be used to
+read or change availability. Availability from one Schedule does not affect
+another Schedule.
 
 ## Schedule Generation Isolation
 

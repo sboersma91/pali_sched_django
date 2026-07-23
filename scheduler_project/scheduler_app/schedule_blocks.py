@@ -76,6 +76,16 @@ SCHEDULE_SLOTS = tuple(slot for day in SCHEDULE_DAYS for slot in day["slots"])
 SCHEDULE_SLOT_KEYS = tuple(slot["key"] for slot in SCHEDULE_SLOTS)
 SCHEDULE_SLOT_BLOCKS = tuple((slot["key"], slot["kind"]) for slot in SCHEDULE_SLOTS)
 
+DAILY_OFF_REQUIRED_DAY_KEYS = ("Tue", "Wed", "Thur")
+DAILY_OFF_ELIGIBLE_SLOT_KEYS_BY_DAY = tuple(
+    (
+        day["key"],
+        tuple(slot["key"] for slot in day["slots"]),
+    )
+    for day in SCHEDULE_DAYS
+    if day["key"] in DAILY_OFF_REQUIRED_DAY_KEYS
+)
+
 # These are operational trip-window boundaries, not simple day-start indexes.
 # Their established values intentionally skip some arrival/departure-day blocks.
 # Legacy aliases remain accepted for pre-standardization data compatibility.
