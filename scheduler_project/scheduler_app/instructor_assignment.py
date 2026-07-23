@@ -650,6 +650,94 @@ def _daily_off_rejection(occurrence, instructor, day_key, before, after):
     }
 
 
+def _group_continuity_key(occurrence):
+    return (
+        occurrence.get('schedule_id'),
+        occurrence.get('group_index'),
+    )
+
+
+def _order_candidates_for_group_continuity(
+    occurrence,
+    eligible_candidates,
+    continuity_state_by_group,
+):
+    """Order hard-valid candidates using branch-local group continuity.
+
+    A pending pre-interruption instructor is preferred when valid again. The
+    group's current instructor is next, followed by canonical instructor-PK
+    order. The input candidate order does not affect the result.
+    """
+    state = continuity_state_by_group.get(_group_continuity_key(occurrence), {})
+    last_instructor_id = state.get('last_instructor_id')
+    pending_return_instructor_id = state.get('pending_return_instructor_id')
+
+    def continuity_sort_key(instructor):
+        if instructor.pk == pending_return_instructor_id:
+            category = 0
+        elif instructor.pk == last_instructor_id:
+            category = 1
+        else:
+            category = 2
+        return category, instructor.pk
+
+    return sorted(eligible_candidates, key=continuity_sort_key)
+
+
+def _advance_group_continuity_state(
+    occurrence,
+    selected_instructor,
+    eligible_candidates,
+    continuity_state_by_group,
+):
+    """Return branch-local continuity state after one staffed occurrence.
+
+    ``pending_return_instructor_id`` records only the most recent instructor
+    displaced because that instructor was hard-invalid. It survives additional
+    unavoidable replacements, clears on return, and clears when a valid pending
+    return or valid current instructor is bypassed. Unstaffed occurrences do not
+    call this helper and therefore do not alter continuity state.
+    """
+    group_key = _group_continuity_key(occurrence)
+    current_state = continuity_state_by_group.get(group_key, {})
+    last_instructor_id = current_state.get('last_instructor_id')
+    pending_return_instructor_id = current_state.get(
+        'pending_return_instructor_id'
+    )
+    eligible_instructor_ids = {
+        instructor.pk for instructor in eligible_candidates
+    }
+    selected_instructor_id = selected_instructor.pk
+
+    if last_instructor_id is None:
+        next_pending_return_instructor_id = None
+    elif pending_return_instructor_id is not None:
+        if selected_instructor_id == pending_return_instructor_id:
+            next_pending_return_instructor_id = None
+        elif pending_return_instructor_id in eligible_instructor_ids:
+            next_pending_return_instructor_id = None
+        elif (
+            selected_instructor_id == last_instructor_id
+            or last_instructor_id not in eligible_instructor_ids
+        ):
+            next_pending_return_instructor_id = pending_return_instructor_id
+        else:
+            next_pending_return_instructor_id = None
+    elif selected_instructor_id == last_instructor_id:
+        next_pending_return_instructor_id = None
+    elif last_instructor_id not in eligible_instructor_ids:
+        next_pending_return_instructor_id = last_instructor_id
+    else:
+        next_pending_return_instructor_id = None
+
+    next_state = dict(continuity_state_by_group)
+    next_state[group_key] = {
+        'last_instructor_id': selected_instructor_id,
+        'pending_return_instructor_id': next_pending_return_instructor_id,
+    }
+    return next_state
+
+
 def plan_instructor_assignments_with_daily_off(
     occurrences,
     candidate_instructors,
@@ -658,8 +746,16 @@ def plan_instructor_assignments_with_daily_off(
     availability_records,
     participation_records,
     normalized_daily_off_requirements,
+    _search_stats=None,
 ):
     """Return a maximum-coverage, deterministic, in-memory daily-OFF plan."""
+    if _search_stats is not None:
+        _search_stats.clear()
+        _search_stats.update(
+            explored_node_count=0,
+            completed_plan_count=0,
+        )
+
     for name, value in (
         ('occurrences', occurrences),
         ('candidate_instructors', candidate_instructors),
@@ -729,11 +825,16 @@ def plan_instructor_assignments_with_daily_off(
         remaining_off_candidates,
         occupied_slot_keys_by_instructor,
         assigned_count,
+        continuity_state_by_group,
     ):
+        if _search_stats is not None:
+            _search_stats['explored_node_count'] += 1
         remaining_occurrence_count = len(ordered_occurrences) - occurrence_index
         if assigned_count + remaining_occurrence_count <= best['assigned_count']:
             return
         if occurrence_index == len(ordered_occurrences):
+            if _search_stats is not None:
+                _search_stats['completed_plan_count'] += 1
             best.update({
                 'assigned_count': assigned_count,
                 'assignments': tuple(assignments),
@@ -798,7 +899,17 @@ def plan_instructor_assignments_with_daily_off(
                 continue
             eligible_with_off_capacity.append((instructor, candidate_remaining))
 
-        for instructor, candidate_remaining in eligible_with_off_capacity:
+        remaining_by_instructor_id = {
+            instructor.pk: candidate_remaining
+            for instructor, candidate_remaining in eligible_with_off_capacity
+        }
+        continuity_ordered_instructors = _order_candidates_for_group_continuity(
+            occurrence,
+            [instructor for instructor, _remaining in eligible_with_off_capacity],
+            continuity_state_by_group,
+        )
+        for instructor in continuity_ordered_instructors:
+            candidate_remaining = remaining_by_instructor_id[instructor.pk]
             assignment = {
                 'occurrence': occurrence,
                 'assigned_instructor': instructor,
@@ -820,6 +931,12 @@ def plan_instructor_assignments_with_daily_off(
                 candidate_remaining,
                 candidate_occupied,
                 assigned_count + 1,
+                _advance_group_continuity_state(
+                    occurrence,
+                    instructor,
+                    continuity_ordered_instructors,
+                    continuity_state_by_group,
+                ),
             )
 
         if not qualified_instructors:
@@ -855,6 +972,7 @@ def plan_instructor_assignments_with_daily_off(
             remaining_off_candidates,
             occupied_slot_keys_by_instructor,
             assigned_count,
+            continuity_state_by_group,
         )
 
     search(
@@ -863,8 +981,8 @@ def plan_instructor_assignments_with_daily_off(
         initial_remaining_off_candidates,
         {instructor.pk: frozenset() for instructor in candidates},
         0,
+        {},
     )
-
     final_requirements = []
     off_reservations = []
     availability_satisfied_requirements = []

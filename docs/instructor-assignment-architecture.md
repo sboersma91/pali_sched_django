@@ -7,7 +7,9 @@ and first operator availability workflow are implemented. The application can
 extract operational activity occurrences, build an explicit schedule staffing
 pool, evaluate certification and organization qualification, resolve detailed
 schedule-slot exceptions, reject same-slot assignment overlap, and select
-eligible instructors deterministically.
+eligible instructors with deterministic maximum-coverage planning. Among
+equally staffed valid plans, the planner prefers instructor continuity for each
+operational activity group.
 
 Instructor assignment remains separate from the Activity Scheduling Engine.
 It does not move activities, modify generated schedules, or persist instructor
@@ -42,7 +44,8 @@ Activity Schedule
 → Qualification Evaluation
 → Resolved Availability Constraint Evaluation
 → Same-Slot Assignment Overlap Evaluation
-→ Deterministic Assignment Strategy
+→ Daily OFF Feasibility
+→ Maximum-Coverage and Group-Continuity Planning
 → In-Memory Assignment Results
 ```
 
@@ -119,7 +122,7 @@ candidate. If availability fails, overlap is not evaluated for that candidate.
 If availability passes, overlap may still reject the candidate. The two rules
 retain separate identities and diagnostics.
 
-### Deterministic assignment strategy
+### Deterministic assignment strategies
 
 `assign_occurrences_deterministically(...)` coordinates the layers. For each
 occurrence it evaluates qualification, passes qualified instructors into the
@@ -129,6 +132,42 @@ Qualification sorts candidates by instructor primary key. Constraint
 evaluation preserves that order, so selection remains deterministic regardless
 of candidate input order. Availability policy and overlap logic are not
 embedded in candidate selection.
+
+Production orchestration uses
+`plan_instructor_assignments_with_daily_off(...)`, a deterministic backtracking
+planner. Qualification, participation, resolved availability, same-slot
+overlap, organization scope, and Tuesday-through-Thursday OFF capacity remain
+hard feasibility rules. The planner first maximizes the number of staffed
+operational occurrences. It never trades staffing coverage for continuity.
+
+Continuity is a deterministic candidate branch-ordering preference, not a
+global optimization across every maximum-coverage plan. For each
+`(schedule_id, group_index)`, branch-local state records the last staffed
+instructor and a possible pre-interruption instructor to return to. A valid
+pending return is tried first, followed by the current instructor and then
+other valid candidates in instructor-primary-key order.
+
+The pending return is retained only while that instructor is hard-invalid for
+intervening staffed occurrences. Qualification, resolved availability, OFF
+protection, or overlap with another partial-plan assignment may make the
+instructor invalid; the state does not assign a unique reason. It clears when
+the instructor returns or when a valid pending or current instructor is
+bypassed. Unstaffed occurrences do not alter the state. Continuity spans day
+boundaries, while multi-slot activities remain one occurrence with one
+instructor across their unchanged complete footprint.
+
+The search still backtracks to find exact maximum coverage, but it retains the
+first plan at a given coverage and prunes branches whose optimistic coverage
+cannot exceed that result. It therefore does not promise the mathematically
+minimum possible handoff or interruption tuple. This bounded behavior prevents
+combinatorial enumeration of equal-coverage plans when many instructors are
+interchangeable. The preference does not create a primary instructor or persist
+an instructor/group relationship.
+
+Callers performing bounded diagnostics may supply a private per-call statistics
+mapping for explored-node and completed-plan counts. These statistics are
+optional diagnostic state only: they are not part of assignment results,
+persistence, templates, views, or APIs.
 
 ### Assignment results
 
@@ -387,7 +426,8 @@ operator-facing assignment display. It:
   without exposing raw model objects or internal diagnostic dictionaries.
 
 This is a current planning view, not a historical staffing snapshot. Manual
-assignment editing, saved snapshots, and optimization remain deferred.
+assignment editing and saved snapshots remain deferred. Maximum-coverage and
+group-continuity planning are recomputed whenever the page is loaded.
 
 ## Supporting Instructor Management
 
@@ -415,8 +455,9 @@ The implemented layers remain separate:
 - Resolved availability applies the participation baseline and detailed slot
   exceptions.
 - Overlap checks earlier in-memory assignments in the same schedule.
-- Deterministic selection chooses from candidates who passed every blocking
-  layer.
+- Daily OFF capacity remains a hard feasibility rule.
+- Deterministic backtracking finds exact maximum staffed-occurrence coverage,
+  with group continuity and stable primary-key ordering guiding branch order.
 - Assignment results remain in memory.
 
 The Activity Scheduling Engine does not query instructor availability and does
@@ -445,8 +486,6 @@ The system does not currently support:
 - Shared leads or shared staff across simultaneous occurrences
 - Staffing ratios or pooled staffing by location
 - Setup staffing and role-specific staffing positions
-- Optimization or backtracking
-- Instructor continuity optimization
 - Payroll or timekeeping
 - Availability history or audit trail
 - Historical instructor-assignment snapshots
@@ -489,6 +528,13 @@ Focused tests in `scheduler_app/tests.py` protect:
 - Operator availability access and organization isolation
 - Name-only instructor CRUD, navigation, and deletion cascades
 - In-memory-only assignment behavior
+
+Focused tests in `scheduler_app/test_instructor_off_planning.py` additionally
+protect maximum coverage, daily OFF feasibility, continuity across unavoidable
+qualification, availability, OFF, and overlap interruptions, unstaffed-gap and
+multi-slot semantics, duplicate-label isolation through `group_index`, stable
+tie resolution, read-only recomputation, and bounded private search
+instrumentation.
 
 Django's test runner creates and destroys a separate test database. Results do
 not depend on the contents or migration state of a developer's ignored
