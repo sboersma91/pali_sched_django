@@ -55,6 +55,22 @@
           text-align: left;
           white-space: normal;
         }
+        .schedule-sticky-group-column {
+          box-sizing: border-box;
+          left: 0;
+          position: sticky;
+          width: 10rem;
+          z-index: 2;
+        }
+        .schedule-group-column-header {
+          background: #f8f9fa;
+          box-shadow: 0.2rem 0 0.3rem -0.25rem rgba(0, 0, 0, 0.45);
+          min-width: 10rem;
+          z-index: 3;
+        }
+        .schedule-row-header.schedule-sticky-group-column {
+          box-shadow: 0.2rem 0 0.3rem -0.25rem rgba(0, 0, 0, 0.45);
+        }
         .schedule-group-badge {
           background: var(--group-accent);
           border-radius: 999px;
@@ -347,7 +363,7 @@
       <table class="table table-bordered table-sm align-middle text-center schedule-table">
         <thead class="table-light">
           <tr>
-            <th rowspan="2" scope="col" class="align-middle">Activity Group</th>
+            <th rowspan="2" scope="col" class="align-middle schedule-sticky-group-column schedule-group-column-header">Activity Group</th>
             {% for day in schedule_days %}
               <th colspan="{{ day.slots|length }}" scope="colgroup">{{ day.name }}</th>
             {% endfor %}
@@ -363,7 +379,7 @@
         <tbody>
           {% for row in schedule_rows %}
             <tr class="group-accent {{ row.group_accent_class }}">
-              <th scope="row" class="schedule-row-header">
+              <th scope="row" class="schedule-row-header schedule-sticky-group-column">
                 <span class="schedule-group-badge">Group {{ row.group_index|add:"1" }}</span>
                 <span class="schedule-group-name">{{ row.ag }}</span>
               </th>

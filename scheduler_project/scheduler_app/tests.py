@@ -5553,7 +5553,11 @@ class ScheduleWorkflowTests(TestCase):
             'class="group-accent schedule-row-accent-1"',
             html=False,
         )
-        self.assertContains(response, 'class="schedule-row-header"', html=False)
+        self.assertContains(
+            response,
+            'class="schedule-row-header schedule-sticky-group-column"',
+            html=False,
+        )
         self.assertContains(response, "Group 1")
         self.assertContains(response, "Archery")
         self.assertContains(
@@ -5583,6 +5587,35 @@ class ScheduleWorkflowTests(TestCase):
         self.assertContains(response, "Viewing this page does not generate output.")
         self.assertEqual(self.schedule.sched_data, {})
         self.assertEqual(create_sched.call_count, 0)
+
+    def test_schedule_detail_freezes_activity_group_column_in_existing_scroll_container(self):
+        generated_schedule = {
+            "ags": ["Sticky Group School"],
+            "mon_pm1": ["Archery"],
+            "mon_pm2": ["empty"],
+        }
+        self.store_generated_schedule(generated_schedule)
+
+        response = self.client.get(reverse("sched-detail", args=[self.schedule.id]))
+
+        self.assertContains(
+            response,
+            'class="align-middle schedule-sticky-group-column schedule-group-column-header">Activity Group</th>',
+            html=False,
+        )
+        self.assertContains(
+            response,
+            'class="schedule-row-header schedule-sticky-group-column"',
+            html=False,
+        )
+        self.assertContains(response, '<span class="schedule-group-name">Sticky Group School</span>', html=False)
+        self.assertContains(response, "position: sticky", html=False)
+        self.assertContains(response, "left: 0", html=False)
+        self.assertContains(response, "background: #f8f9fa", html=False)
+        self.assertContains(response, "background: var(--group-soft)", html=False)
+        self.assertContains(response, 'class="table-responsive mb-3"', count=1, html=False)
+        self.assertContains(response, 'data-drop-target="true"', html=False)
+        self.assertContains(response, 'class="schedule-activity-card"', html=False)
 
     def test_generate_schedule_post_runs_scheduler_and_stores_output(self):
         generated_schedule = {
