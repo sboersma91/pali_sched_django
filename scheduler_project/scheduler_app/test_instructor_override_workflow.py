@@ -19,8 +19,10 @@ from .models import (
     Course,
     Instructor,
     InstructorCertification,
+    InstructorLeadershipRole,
     InstructorScheduleAvailability,
     InstructorScheduleParticipation,
+    LeadershipRole,
     TheSched,
 )
 
@@ -624,6 +626,228 @@ class InstructorOverrideWorkflowTests(TestCase):
         self.assertEqual(
             [record['status'] for record in records],
             ['superseded', 'active', 'active'],
+        )
+
+    def test_deleting_overridden_instructor_preserves_resettable_history(self):
+        self.login()
+        other_course = Course.objects.create(
+            organization=self.organization,
+            course_name='Climbing',
+            abriviation='CLMB',
+            course_len=1,
+        )
+        data = deepcopy(self.schedule.sched_data)
+        data['generated_schedule']['mon_pm2'] = [other_course.course_name]
+        data['manual_moves'] = [{'existing': 'activity move'}]
+        self.schedule.sched_data = data
+        self.schedule.save(update_fields=['sched_data'])
+
+        stale_identity = self.identity(index=0)
+        unrelated_identity = self.identity(index=1)
+        for revision, identity, instructor in (
+            (0, stale_identity, self.second),
+            (1, unrelated_identity, self.first),
+        ):
+            response = self.client.post(
+                self.set_url,
+                {
+                    'action': 'set',
+                    'schedule_id': self.schedule.pk,
+                    'expected_revision': revision,
+                    'instructor_id': instructor.pk,
+                    'occurrence_id': identity['occurrence_id'],
+                    'group_index': identity['group_index'],
+                    'activity_id': identity['activity_id'],
+                    'slot_footprint': identity['slot_footprint'],
+                },
+                content_type='application/json',
+                HTTP_ACCEPT='application/json',
+            )
+            self.assertEqual(response.status_code, 200)
+
+        certification = Certification.objects.create(
+            organization=self.organization,
+            name='Delete Workflow Certification',
+        )
+        leadership_role = LeadershipRole.objects.create(
+            organization=self.organization,
+            name='Delete Workflow Leader',
+        )
+        InstructorCertification.objects.create(
+            instructor=self.second,
+            certification=certification,
+        )
+        InstructorLeadershipRole.objects.create(
+            instructor=self.second,
+            leadership_role=leadership_role,
+        )
+        participation = InstructorScheduleParticipation.objects.create(
+            organization=self.organization,
+            instructor=self.second,
+            schedule=self.schedule,
+            state=InstructorScheduleParticipation.PARTICIPATING,
+        )
+        availability = InstructorScheduleAvailability.objects.create(
+            organization=self.organization,
+            instructor=self.second,
+            schedule=self.schedule,
+            slot_key='tue_am1',
+            state=InstructorScheduleAvailability.AVAILABLE,
+        )
+        foreign_instructor = self.create_instructor(
+            'Foreign',
+            'Unchanged',
+            organization=self.other_organization,
+        )
+        deleted_instructor_id = self.second.pk
+        deleted_instructor_name = str(self.second)
+        self.schedule.refresh_from_db()
+        generated_before = deepcopy(
+            self.schedule.sched_data['generated_schedule']
+        )
+        manual_moves_before = deepcopy(
+            self.schedule.sched_data['manual_moves']
+        )
+
+        deleted = self.client.post(
+            reverse('instructor-delete', args=[deleted_instructor_id]),
+            {'organization': self.other_organization.pk},
+            follow=True,
+        )
+
+        self.assertRedirects(deleted, reverse('instructor-list'))
+        self.assertContains(
+            deleted,
+            f'{deleted_instructor_name} was deleted successfully.',
+        )
+        self.assertFalse(
+            Instructor.objects.filter(pk=deleted_instructor_id).exists()
+        )
+        self.assertFalse(
+            InstructorScheduleParticipation.objects.filter(
+                pk=participation.pk
+            ).exists()
+        )
+        self.assertFalse(
+            InstructorScheduleAvailability.objects.filter(
+                pk=availability.pk
+            ).exists()
+        )
+        self.assertFalse(
+            InstructorCertification.objects.filter(
+                instructor_id=deleted_instructor_id
+            ).exists()
+        )
+        self.assertFalse(
+            InstructorLeadershipRole.objects.filter(
+                instructor_id=deleted_instructor_id
+            ).exists()
+        )
+        self.assertTrue(
+            Certification.objects.filter(pk=certification.pk).exists()
+        )
+        self.assertTrue(
+            LeadershipRole.objects.filter(pk=leadership_role.pk).exists()
+        )
+        self.assertTrue(
+            Instructor.objects.filter(pk=foreign_instructor.pk).exists()
+        )
+
+        self.schedule.refresh_from_db()
+        set_records = [
+            record
+            for record in self.schedule.sched_data[
+                'manual_instructor_overrides'
+            ]
+            if record['action'] == 'set'
+        ]
+        self.assertEqual(
+            [record['instructor_id'] for record in set_records],
+            [deleted_instructor_id, self.first.pk],
+        )
+
+        affected_page = self.client.get(self.page_url)
+
+        self.assertEqual(affected_page.status_code, 200)
+        self.assertContains(affected_page, 'missing_instructor')
+        self.assertContains(
+            affected_page,
+            'the automatic plan is shown',
+        )
+        self.assertContains(
+            affected_page,
+            'Return to automatic assignment',
+        )
+        self.assertNotContains(affected_page, deleted_instructor_name)
+        assignment_schedule = affected_page.context['assignment_schedule']
+        stale_automatic_cells = [
+            cell
+            for row in assignment_schedule.instructor_rows
+            for cell in row.cells
+            if (
+                cell.occurrence_id == stale_identity['occurrence_id']
+                and not cell.is_fixed
+            )
+        ]
+        stale_unstaffed = [
+            occurrence
+            for occurrence in assignment_schedule.unstaffed_occurrences
+            if occurrence.occurrence_id == stale_identity['occurrence_id']
+        ]
+        self.assertTrue(
+            stale_automatic_cells or stale_unstaffed
+        )
+        applied_before_reset = affected_page.context[
+            'instructor_override_reset_targets'
+        ]
+        stale_target = next(
+            target
+            for target in applied_before_reset
+            if target['occurrence']['occurrence_id']
+            == stale_identity['occurrence_id']
+        )
+        unrelated_target = next(
+            target
+            for target in applied_before_reset
+            if target['occurrence']['occurrence_id']
+            == unrelated_identity['occurrence_id']
+        )
+        self.assertFalse(stale_target['is_applied'])
+        self.assertTrue(unrelated_target['is_applied'])
+
+        reset = self.client.post(
+            self.reset_url,
+            {
+                'schedule_id': self.schedule.pk,
+                'expected_revision': 2,
+                'occurrence_token': stale_target['token'],
+            },
+            follow=True,
+        )
+
+        self.assertRedirects(reset, self.page_url)
+        self.assertContains(
+            reset,
+            'The manual instructor assignment was returned to automatic.',
+        )
+        self.assertNotContains(reset, 'missing_instructor')
+        remaining_targets = reset.context[
+            'instructor_override_reset_targets'
+        ]
+        self.assertEqual(len(remaining_targets), 1)
+        self.assertEqual(
+            remaining_targets[0]['occurrence']['occurrence_id'],
+            unrelated_identity['occurrence_id'],
+        )
+        self.assertTrue(remaining_targets[0]['is_applied'])
+        self.schedule.refresh_from_db()
+        self.assertEqual(
+            self.schedule.sched_data['generated_schedule'],
+            generated_before,
+        )
+        self.assertEqual(
+            self.schedule.sched_data['manual_moves'],
+            manual_moves_before,
         )
 
     def test_stale_warning_keyboard_controls_and_no_drag_hooks(self):

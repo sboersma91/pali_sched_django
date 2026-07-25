@@ -7,8 +7,10 @@
     </div>
     <div class="card-body">
       <p>Are you sure you want to permanently delete <strong>{{ instructor }}</strong>?</p>
-      <p class="text-danger fw-bold">This also removes the instructor’s schedule-specific availability and their certification and leadership-role relationship rows.</p>
+      <p class="text-danger fw-bold">This also removes the instructor’s schedule participation, schedule-specific availability, certification relationships, and leadership-role relationships.</p>
       <p>Certification and leadership-role definitions will not be deleted.</p>
+      <p>Saved manual instructor-assignment history will remain. Any saved assignment for this instructor will no longer be applied because the instructor will no longer exist.</p>
+      <p>The affected schedule will return that occurrence to automatic assignment. If no eligible replacement is available, the occurrence may be left unstaffed.</p>
       <p class="mb-4">This action cannot be undone.</p>
       <form method="post" class="d-flex flex-wrap gap-2">
         {% csrf_token %}
