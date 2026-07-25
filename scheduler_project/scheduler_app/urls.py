@@ -96,6 +96,21 @@ urlpatterns = [
         login_required(views.instructor_assignment_schedule),
         name="instructor-assignment-schedule",
     ),
+    path(
+        "schedule_detail/<int:pk>/instructor-assignments/set/",
+        login_required(views.instructor_override_set),
+        name="instructor-override-set",
+    ),
+    path(
+        "schedule_detail/<int:pk>/instructor-assignments/reset/",
+        login_required(views.instructor_override_reset),
+        name="instructor-override-reset",
+    ),
+    path(
+        "schedule_detail/<int:pk>/instructor-assignments/reset-all/",
+        login_required(views.instructor_override_reset_all),
+        name="instructor-override-reset-all",
+    ),
     path("schedule_detail/<int:pk>/generate/", login_required(SchedGenerate.as_view()), name="sched-generate"),
     path("schedule_detail/<int:pk>/confirm-move/", login_required(SchedMoveConfirm.as_view()), name="sched-move-confirm"),
     path("schedule_detail/<int:pk>/save-move/", login_required(SchedMoveSave.as_view()), name="sched-move-save"),

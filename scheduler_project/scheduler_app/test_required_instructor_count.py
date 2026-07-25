@@ -200,6 +200,42 @@ class RequiredInstructorCountFoundationTests(TestCase):
         self.assertEqual(result['assignments'][0]['assigned_instructor'], instructor)
         self.assertEqual(result['assignments'][0]['status'], 'assigned')
 
+    def test_production_orchestration_accepts_one_equivalent_fixed_occurrence(self):
+        course = self.create_course()
+        schedule = self.create_schedule(course)
+        automatic = Instructor.objects.create(
+            organization=self.organization,
+            fname='Automatic',
+            lname='Instructor',
+        )
+        selected = Instructor.objects.create(
+            organization=self.organization,
+            fname='Selected',
+            lname='Instructor',
+        )
+        submitted_occurrence = extract_operational_occurrences(schedule)[0]
+
+        result = run_instructor_assignment(
+            schedule,
+            fixed_assignments=({
+                'occurrence': submitted_occurrence,
+                'instructor': selected,
+            },),
+        )
+
+        self.assertEqual(result['assignments'][0]['assigned_instructor'], selected)
+        self.assertEqual(
+            result['assignments'][0]['assignment_source'],
+            'fixed',
+        )
+        self.assertTrue(
+            result['fixed_assignment_diagnostics'][0]['accepted'],
+        )
+        self.assertIn(
+            automatic,
+            result['candidate_instructors'],
+        )
+
     def test_unsupported_count_fails_without_altering_schedule_or_writing_assignments(self):
         course = self.create_course(required_instructor_count=2)
         schedule = self.create_schedule(course)

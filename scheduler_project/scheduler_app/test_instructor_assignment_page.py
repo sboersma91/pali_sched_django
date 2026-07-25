@@ -636,7 +636,7 @@ class InstructorAssignmentScheduleViewTests(AssignmentPageTestMixin, TestCase):
             availability_before,
         )
 
-    def test_assignment_grid_and_navigation_render_without_edit_controls(self):
+    def test_assignment_grid_navigation_and_accessible_edit_controls_render(self):
         InstructorScheduleAvailability.objects.create(
             organization=self.organization,
             instructor=self.instructor,
@@ -675,9 +675,30 @@ class InstructorAssignmentScheduleViewTests(AssignmentPageTestMixin, TestCase):
         self.assertContains(response, reverse(
             'instructor-availability', args=[self.schedule.pk]
         ))
-        self.assertNotContains(response, '<select', html=False)
-        self.assertNotContains(response, 'Save Instructor Assignment')
-        self.assertNotContains(response, 'draggable="true"', html=False)
+        self.assertContains(response, 'Set a Manual Instructor Assignment')
+        self.assertContains(
+            response,
+            'for="instructor-override-occurrence"',
+            html=False,
+        )
+        self.assertContains(
+            response,
+            'for="instructor-override-instructor"',
+            html=False,
+        )
+        self.assertContains(response, '<select', count=2, html=False)
+        self.assertContains(response, 'name="expected_revision"', html=False)
+        self.assertContains(
+            response,
+            reverse('instructor-override-set', args=[self.schedule.pk]),
+        )
+        self.assertContains(response, '>Automatic<', html=False)
+        self.assertContains(
+            response,
+            'data-instructor-drag-source="true"',
+            html=False,
+        )
+        self.assertNotContains(response, 'data-draggable-activity', html=False)
 
     def test_unstaffed_section_and_expandable_diagnostics_render(self):
         second_course = Course.objects.create(

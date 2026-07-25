@@ -1,5 +1,11 @@
 # Instructor Assignment Architecture
 
+> **Documentation scope:** This document describes the original automatic
+> assignment, participation, availability, OFF, and continuity foundation.
+> Manual operational editing was implemented later. For the current production
+> workflow and persistence contract, see
+> `docs/instructor-assignment-operational-editing-closeout.md`.
+
 ## Status
 
 The Instructor Availability foundation, schedule-participation foundation,

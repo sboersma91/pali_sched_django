@@ -498,6 +498,8 @@ class TheSched(models.Model):
         self.sched_data = {
             "version": 1,
             "manual_moves": [],
+            "manual_instructor_overrides": [],
+            "instructor_override_revision": 0,
             "generated_schedule": deepcopy(generated_schedule),
             "generation_diagnostics": deepcopy(getattr(self, "generation_diagnostics", [])),
             "generation_runtime_diagnostics": deepcopy(

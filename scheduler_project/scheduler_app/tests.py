@@ -5075,13 +5075,23 @@ class ManualMovePersistenceTests(TestCase):
     def test_normalizes_none_sched_data(self):
         self.assertEqual(
             normalize_sched_data_structure(None),
-            {"version": 1, "manual_moves": []},
+            {
+                "version": 1,
+                "manual_moves": [],
+                "manual_instructor_overrides": [],
+                "instructor_override_revision": 0,
+            },
         )
 
     def test_normalizes_empty_sched_data(self):
         self.assertEqual(
             normalize_sched_data_structure({}),
-            {"version": 1, "manual_moves": []},
+            {
+                "version": 1,
+                "manual_moves": [],
+                "manual_instructor_overrides": [],
+                "instructor_override_revision": 0,
+            },
         )
 
     def test_normalizes_missing_manual_moves_and_preserves_unrelated_keys(self):
@@ -5094,6 +5104,8 @@ class ManualMovePersistenceTests(TestCase):
             "source": "existing",
             "nested": {"keep": True},
             "manual_moves": [],
+            "manual_instructor_overrides": [],
+            "instructor_override_revision": 0,
         })
         self.assertEqual(source, {"version": 7, "source": "existing", "nested": {"keep": True}})
 
@@ -5134,7 +5146,12 @@ class ManualMovePersistenceTests(TestCase):
         repaired = repair_sched_data_structure(self.schedule)
 
         self.schedule.refresh_from_db()
-        self.assertEqual(repaired, {"version": 1, "manual_moves": []})
+        self.assertEqual(repaired, {
+            "version": 1,
+            "manual_moves": [],
+            "manual_instructor_overrides": [],
+            "instructor_override_revision": 0,
+        })
         self.assertEqual(self.schedule.sched_data, repaired)
 
     def test_admin_safe_repair_rejects_malformed_sched_data(self):
@@ -5159,7 +5176,12 @@ class ManualMovePersistenceTests(TestCase):
                 repaired = repair_malformed_sched_data(self.schedule)
 
                 self.schedule.refresh_from_db()
-                self.assertEqual(repaired, {"version": 1, "manual_moves": []})
+                self.assertEqual(repaired, {
+                    "version": 1,
+                    "manual_moves": [],
+                    "manual_instructor_overrides": [],
+                    "instructor_override_revision": 0,
+                })
                 self.assertEqual(self.schedule.sched_data, repaired)
 
     def test_explicit_malformed_repair_rejects_populated_invalid_values(self):
@@ -5187,6 +5209,8 @@ class ManualMovePersistenceTests(TestCase):
         self.assertEqual(self.schedule.sched_data, {
             "version": 1,
             "manual_moves": [move_record],
+            "manual_instructor_overrides": [],
+            "instructor_override_revision": 0,
         })
 
     def test_missing_manual_moves_initializes_during_persistence(self):
@@ -6670,7 +6694,12 @@ class ScheduleWorkflowTests(TestCase):
             response.redirect_chain,
             [(reverse("sched-detail", args=[self.schedule.id]), 302)],
         )
-        self.assertEqual(self.schedule.sched_data, {"version": 1, "manual_moves": []})
+        self.assertEqual(self.schedule.sched_data, {
+            "version": 1,
+            "manual_moves": [],
+            "manual_instructor_overrides": [],
+            "instructor_override_revision": 0,
+        })
         self.assertContains(response, "Legacy operational data was repaired.")
         self.assertNotContains(response, "Repair Legacy Operational Data")
 

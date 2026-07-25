@@ -1,9 +1,11 @@
 import csv
 import json
 from collections import Counter
+from copy import deepcopy
 from urllib.parse import urlencode
 
 from django.contrib import messages
+from django.core import signing
 from django.core.exceptions import ValidationError
 from django.shortcuts import get_object_or_404, render
 from members.models import get_user_organization
@@ -18,7 +20,7 @@ from .forms import (
 from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
 from django.urls import reverse, reverse_lazy
 from django.utils.text import slugify
-from django.views.decorators.http import require_GET
+from django.views.decorators.http import require_GET, require_POST
 from django.db.models import Prefetch
 from django.db.models.functions import Lower
 
@@ -30,6 +32,12 @@ from .instructor_availability import (
     build_instructor_participation_matrix,
 )
 from .instructor_assignment import run_instructor_assignment
+from .instructor_overrides import (
+    build_occurrence_identity,
+    persist_manual_instructor_override,
+    reset_all_manual_instructor_overrides,
+    reset_manual_instructor_override,
+)
 from .instructor_assignment_presentation import (
     build_instructor_assignment_presentation,
 )
@@ -52,6 +60,7 @@ from .schedule_operations import (
     iter_schedule_blocks,
     persist_manual_move,
     repair_malformed_sched_data,
+    normalize_sched_data_structure,
     validate_schedule_blocks,
 )
 
@@ -165,6 +174,141 @@ def instructor_participation_edit(request, pk):
     })
 
 
+INSTRUCTOR_OVERRIDE_SIGNING_SALT = 'scheduler_app.instructor_override_occurrence'
+
+INSTRUCTOR_OVERRIDE_MESSAGES = {
+    'persisted': 'Manual instructor assignment saved.',
+    'coverage_confirmation_required': (
+        'This assignment reduces staffed coverage and requires confirmation.'
+    ),
+    'revision_conflict': (
+        'The instructor assignment plan changed. Refresh and try again.'
+    ),
+    'missing_occurrence': 'The selected occurrence no longer exists.',
+    'stale_occurrence_identity': (
+        'The selected occurrence changed. Refresh and review the current schedule.'
+    ),
+    'missing_instructor': 'The selected instructor no longer exists.',
+    'organization_mismatch': 'The selected schedule data is outside your organization.',
+    'hard_constraint_rejection': (
+        'The selected instructor does not satisfy the current assignment constraints.'
+    ),
+    'unsupported_multiple_active_overrides': (
+        'Only one active manual instructor assignment is currently supported.'
+    ),
+    'ambiguous_active_override': (
+        'Conflicting active instructor assignments exist for this occurrence.'
+    ),
+    'ambiguous_override_history': (
+        'The saved instructor assignment history cannot be targeted safely.'
+    ),
+    'no_matching_active_override': (
+        'That saved manual instructor assignment is no longer active.'
+    ),
+    'reset': 'The manual instructor assignment was returned to automatic.',
+    'reset_all': 'All instructor assignments were returned to automatic.',
+    'no_active_overrides': 'There are no active manual instructor assignments.',
+    'reset_confirmation_required': (
+        'Confirm that all instructor assignments should return to automatic.'
+    ),
+    'malformed_record': 'The instructor assignment request is malformed.',
+}
+
+
+def _instructor_override_revision(schedule):
+    try:
+        return normalize_sched_data_structure(
+            schedule.sched_data
+        )['instructor_override_revision']
+    except MalformedSchedDataError:
+        return 0
+
+
+def _assignment_page_context(
+    schedule,
+    assignment_result,
+    *,
+    selected_occurrence_token='',
+    selected_instructor_id=None,
+    confirmation=None,
+    form_error=None,
+):
+    occurrence_choices = []
+    occurrence_tokens_by_id = {}
+    for assignment in assignment_result.get('assignments') or ():
+        occurrence = assignment.get('occurrence') or {}
+        identity = build_occurrence_identity(schedule, occurrence)
+        token = signing.dumps(
+            identity,
+            salt=INSTRUCTOR_OVERRIDE_SIGNING_SALT,
+            compress=True,
+        )
+        occurrence_tokens_by_id[occurrence.get('occurrence_id')] = token
+        slot_labels = [
+            slot.get('slot_label') or slot.get('slot_key')
+            for slot in occurrence.get('slot_footprint') or ()
+        ]
+        assigned = assignment.get('assigned_instructor')
+        occurrence_choices.append({
+            'token': token,
+            'occurrence_id': occurrence.get('occurrence_id'),
+            'label': (
+                f'{occurrence.get("group_label") or "Unlabeled group"} — '
+                f'{occurrence.get("activity_display_name") or "Unnamed activity"} — '
+                f'{", ".join(slot_labels)} — '
+                f'{"Currently " + str(assigned) if assigned else "Unstaffed"}'
+                f'{" — multi-slot" if len(slot_labels) > 1 else ""}'
+            ),
+        })
+    presentation = build_instructor_assignment_presentation(
+        assignment_result,
+        occurrence_tokens_by_id=occurrence_tokens_by_id,
+    )
+    reset_targets = []
+    for record in (
+        assignment_result.get('active_instructor_override_intents') or ()
+    ):
+        identity = record.get('occurrence')
+        if not isinstance(identity, dict):
+            continue
+        reset_targets.append({
+            'override_id': record.get('override_id'),
+            'occurrence': identity,
+            'token': signing.dumps(
+                identity,
+                salt=INSTRUCTOR_OVERRIDE_SIGNING_SALT,
+                compress=True,
+            ),
+            'is_applied': any(
+                applied.get('override_id') == record.get('override_id')
+                for applied in (
+                    assignment_result.get('applied_instructor_overrides') or ()
+                )
+            ),
+        })
+    return {
+        'assignment_schedule': presentation,
+        'instructor_override_revision': _instructor_override_revision(schedule),
+        'instructor_override_occurrences': occurrence_choices,
+        'instructor_override_candidates': assignment_result.get(
+            'candidate_instructors'
+        ) or (),
+        'instructor_override_diagnostics': assignment_result.get(
+            'instructor_override_diagnostics'
+        ) or (),
+        'selected_occurrence_token': selected_occurrence_token,
+        'selected_instructor_id': selected_instructor_id,
+        'instructor_override_confirmation': confirmation,
+        'instructor_override_form_error': form_error,
+        'instructor_override_reset_targets': reset_targets,
+        'has_active_instructor_overrides': bool(reset_targets) or bool(
+            assignment_result.get(
+                'has_resettable_instructor_override_intent'
+            )
+        ),
+    }
+
+
 @require_GET
 def instructor_assignment_schedule(request, pk):
     organization = get_user_organization(request.user)
@@ -174,10 +318,459 @@ def instructor_assignment_schedule(request, pk):
         organization=organization,
     )
     assignment_result = run_instructor_assignment(schedule)
-    presentation = build_instructor_assignment_presentation(assignment_result)
-    return render(request, 'pay_end/instructor_assignment_schedule.html', {
-        'assignment_schedule': presentation,
-    })
+    return render(
+        request,
+        'pay_end/instructor_assignment_schedule.html',
+        _assignment_page_context(schedule, assignment_result),
+    )
+
+
+def _wants_json(request):
+    return (
+        request.content_type == 'application/json'
+        or 'application/json' in request.headers.get('Accept', '')
+    )
+
+
+def _parse_int_field(payload, field):
+    value = payload.get(field)
+    if isinstance(value, bool):
+        raise ValueError(field)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValueError(field)
+
+
+def _parse_instructor_override_request(request, schedule):
+    is_json = _wants_json(request)
+    if request.content_type == 'application/json':
+        try:
+            payload = json.loads(request.body.decode('utf-8') or '{}')
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise ValueError('json')
+        if not isinstance(payload, dict):
+            raise ValueError('json')
+    else:
+        payload = request.POST
+
+    if payload.get('action', 'set') != 'set':
+        raise ValueError('action')
+    schedule_id = _parse_int_field(payload, 'schedule_id')
+    if schedule_id != schedule.pk:
+        raise ValueError('schedule_id')
+    expected_revision = _parse_int_field(payload, 'expected_revision')
+    instructor_id = _parse_int_field(payload, 'instructor_id')
+
+    occurrence_token = payload.get('occurrence_token', '')
+    if is_json and not occurrence_token:
+        footprint = payload.get('slot_footprint')
+        if isinstance(footprint, str):
+            try:
+                footprint = json.loads(footprint)
+            except json.JSONDecodeError:
+                raise ValueError('slot_footprint')
+        if not isinstance(footprint, list):
+            raise ValueError('slot_footprint')
+        for slot in footprint:
+            if (
+                not isinstance(slot, dict)
+                or not isinstance(slot.get('block_id'), str)
+                or not isinstance(slot.get('slot_key'), str)
+                or not isinstance(slot.get('position'), int)
+                or isinstance(slot.get('position'), bool)
+            ):
+                raise ValueError('slot_footprint')
+        occurrence_identity = {
+            'schedule_id': schedule.pk,
+            'organization_id': schedule.organization_id,
+            'occurrence_id': payload.get('occurrence_id'),
+            'group_index': _parse_int_field(payload, 'group_index'),
+            'activity_id': _parse_int_field(payload, 'activity_id'),
+            'slot_footprint': footprint,
+        }
+    else:
+        if not occurrence_token:
+            raise ValueError('occurrence_token')
+        try:
+            occurrence_identity = signing.loads(
+                occurrence_token,
+                salt=INSTRUCTOR_OVERRIDE_SIGNING_SALT,
+            )
+        except signing.BadSignature:
+            raise ValueError('occurrence_token')
+        if not isinstance(occurrence_identity, dict):
+            raise ValueError('occurrence_token')
+
+    confirmation_value = payload.get('confirm_coverage_reduction', False)
+    confirm_coverage_reduction = confirmation_value in (
+        True,
+        1,
+        '1',
+        'true',
+        'on',
+        'yes',
+    )
+    return {
+        'occurrence_identity': occurrence_identity,
+        'occurrence_token': occurrence_token,
+        'instructor_id': instructor_id,
+        'expected_revision': expected_revision,
+        'confirm_coverage_reduction': confirm_coverage_reduction,
+    }
+
+
+def _instructor_override_status(code):
+    if code in {
+        'revision_conflict',
+        'stale_occurrence_identity',
+        'unsupported_multiple_active_overrides',
+        'ambiguous_active_override',
+        'ambiguous_override_history',
+        'no_matching_active_override',
+        'coverage_confirmation_required',
+    }:
+        return 409
+    if code == 'hard_constraint_rejection':
+        return 422
+    return 400
+
+
+def _request_payload(request):
+    if request.content_type != 'application/json':
+        return request.POST
+    try:
+        payload = json.loads(request.body.decode('utf-8') or '{}')
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError('json')
+    if not isinstance(payload, dict):
+        raise ValueError('json')
+    return payload
+
+
+def _json_instructor_reset_response(result, status):
+    planner_result = result.get('planner_result') or {}
+    return JsonResponse({
+        'ok': result.get('ok', False),
+        'code': result.get('code'),
+        'message': INSTRUCTOR_OVERRIDE_MESSAGES.get(
+            result.get('code'),
+            'The instructor reset request could not be completed.',
+        ),
+        'old_revision': result.get(
+            'old_revision',
+            result.get('expected_revision'),
+        ),
+        'new_revision': result.get(
+            'new_revision',
+            result.get('current_revision'),
+        ),
+        'reset_action': result.get('reset_action'),
+        'affected_occurrence': result.get('affected_occurrence'),
+        'active_override_count_before': result.get(
+            'active_override_count_before'
+        ),
+        'active_override_count_after': result.get(
+            'active_override_count_after'
+        ),
+        'coverage': deepcopy(planner_result.get('coverage')),
+        'conflict': {
+            key: result[key]
+            for key in (
+                'expected_revision',
+                'current_revision',
+                'diagnostics',
+            )
+            if key in result
+        } or None,
+    }, status=status)
+
+
+def _json_instructor_override_response(result, status):
+    diagnostic = result.get('planner_summary') or {}
+    override = result.get('override') or {}
+    occurrence = override.get('occurrence') or (
+        diagnostic.get('occurrence') or {}
+    )
+    response = {
+        'ok': result.get('ok', False),
+        'code': result.get('code'),
+        'message': INSTRUCTOR_OVERRIDE_MESSAGES.get(
+            result.get('code'),
+            'The instructor assignment request could not be completed.',
+        ),
+        'new_revision': result.get('new_revision'),
+        'coverage_before': override.get(
+            'coverage_before',
+            diagnostic.get('coverage_before'),
+        ),
+        'coverage_after': override.get(
+            'coverage_after',
+            diagnostic.get('coverage_after'),
+        ),
+        'coverage_delta': override.get(
+            'coverage_delta',
+            diagnostic.get('coverage_delta'),
+        ),
+        'requires_confirmation': (
+            result.get('code') == 'coverage_confirmation_required'
+        ),
+        'affected_occurrence': (
+            occurrence if isinstance(occurrence, dict) else None
+        ),
+        'conflict': {
+            key: result[key]
+            for key in (
+                'expected_revision',
+                'current_revision',
+                'rejection_code',
+                'affected_slot_keys',
+                'mismatched_fields',
+            )
+            if key in result
+        } or None,
+        'unstaffed_occurrences': [
+            {
+                'occurrence_id': (
+                    assignment.get('occurrence') or {}
+                ).get('occurrence_id'),
+                'activity_name': (
+                    assignment.get('occurrence') or {}
+                ).get('activity_display_name'),
+                'group_label': (
+                    assignment.get('occurrence') or {}
+                ).get('group_label'),
+                'slot_keys': [
+                    slot.get('slot_key')
+                    for slot in (
+                        assignment.get('occurrence') or {}
+                    ).get('slot_footprint') or ()
+                ],
+            }
+            for assignment in (
+                result.get('planner_result', {}).get('assignments') or ()
+            )
+            if assignment.get('status') == 'unstaffed'
+        ],
+    }
+    if result.get('ok'):
+        response['override'] = {
+            key: override.get(key)
+            for key in (
+                'action',
+                'status',
+                'schedule_id',
+                'occurrence',
+                'instructor_id',
+                'coverage_before',
+                'coverage_after',
+                'coverage_delta',
+                'confirmed_coverage_reduction',
+            )
+        }
+    return JsonResponse(response, status=status)
+
+
+@require_POST
+def instructor_override_set(request, pk):
+    organization = get_user_organization(request.user)
+    schedule = get_object_or_404(
+        TheSched,
+        pk=pk,
+        organization=organization,
+    )
+    wants_json = _wants_json(request)
+    try:
+        parsed = _parse_instructor_override_request(request, schedule)
+    except ValueError as error:
+        result = {
+            'ok': False,
+            'code': 'malformed_record',
+            'field': str(error),
+        }
+        if wants_json:
+            return _json_instructor_override_response(result, 400)
+        messages.error(request, INSTRUCTOR_OVERRIDE_MESSAGES['malformed_record'])
+        return HttpResponseRedirect(
+            reverse('instructor-assignment-schedule', args=[schedule.pk])
+        )
+
+    result = persist_manual_instructor_override(
+        schedule=schedule,
+        occurrence_identity=parsed['occurrence_identity'],
+        instructor_id=parsed['instructor_id'],
+        expected_revision=parsed['expected_revision'],
+        confirm_coverage_reduction=parsed['confirm_coverage_reduction'],
+    )
+    status = 200 if result.get('ok') else _instructor_override_status(
+        result.get('code')
+    )
+    if wants_json:
+        return _json_instructor_override_response(result, status)
+    if result.get('ok'):
+        messages.success(request, INSTRUCTOR_OVERRIDE_MESSAGES['persisted'])
+        return HttpResponseRedirect(
+            reverse('instructor-assignment-schedule', args=[schedule.pk])
+        )
+    if result.get('code') == 'coverage_confirmation_required':
+        confirmation = deepcopy(result['planner_summary'])
+        confirmation['expected_revision'] = result['current_revision']
+        confirmation['occurrence_token'] = parsed['occurrence_token']
+        confirmation['instructor_id'] = parsed['instructor_id']
+        context = _assignment_page_context(
+            schedule,
+            result['planner_result'],
+            selected_occurrence_token=parsed['occurrence_token'],
+            selected_instructor_id=parsed['instructor_id'],
+            confirmation=confirmation,
+        )
+        return render(
+            request,
+            'pay_end/instructor_assignment_schedule.html',
+            context,
+            status=409,
+        )
+
+    messages.error(
+        request,
+        INSTRUCTOR_OVERRIDE_MESSAGES.get(
+            result.get('code'),
+            'The manual instructor assignment was rejected.',
+        ),
+    )
+    return HttpResponseRedirect(
+        reverse('instructor-assignment-schedule', args=[schedule.pk])
+    )
+
+
+@require_POST
+def instructor_override_reset(request, pk):
+    organization = get_user_organization(request.user)
+    schedule = get_object_or_404(
+        TheSched,
+        pk=pk,
+        organization=organization,
+    )
+    wants_json = _wants_json(request)
+    try:
+        payload = _request_payload(request)
+        if _parse_int_field(payload, 'schedule_id') != schedule.pk:
+            raise ValueError('schedule_id')
+        expected_revision = _parse_int_field(payload, 'expected_revision')
+        token = payload.get('occurrence_token')
+        if not token:
+            raise ValueError('occurrence_token')
+        occurrence_identity = signing.loads(
+            token,
+            salt=INSTRUCTOR_OVERRIDE_SIGNING_SALT,
+        )
+        if not isinstance(occurrence_identity, dict):
+            raise ValueError('occurrence_token')
+    except (ValueError, signing.BadSignature) as error:
+        result = {
+            'ok': False,
+            'code': 'malformed_record',
+            'field': str(error),
+        }
+        if wants_json:
+            return _json_instructor_reset_response(result, 400)
+        messages.error(request, INSTRUCTOR_OVERRIDE_MESSAGES['malformed_record'])
+        return HttpResponseRedirect(
+            reverse('instructor-assignment-schedule', args=[schedule.pk])
+        )
+
+    result = reset_manual_instructor_override(
+        schedule=schedule,
+        occurrence_identity=occurrence_identity,
+        expected_revision=expected_revision,
+    )
+    status = 200 if result.get('ok') else _instructor_override_status(
+        result.get('code')
+    )
+    if wants_json:
+        return _json_instructor_reset_response(result, status)
+    messages.success(
+        request,
+        INSTRUCTOR_OVERRIDE_MESSAGES[result['code']],
+    ) if result.get('ok') else messages.error(
+        request,
+        INSTRUCTOR_OVERRIDE_MESSAGES.get(
+            result.get('code'),
+            'The manual instructor assignment was not reset.',
+        ),
+    )
+    return HttpResponseRedirect(
+        reverse('instructor-assignment-schedule', args=[schedule.pk])
+    )
+
+
+@require_POST
+def instructor_override_reset_all(request, pk):
+    organization = get_user_organization(request.user)
+    schedule = get_object_or_404(
+        TheSched,
+        pk=pk,
+        organization=organization,
+    )
+    wants_json = _wants_json(request)
+    try:
+        payload = _request_payload(request)
+        if _parse_int_field(payload, 'schedule_id') != schedule.pk:
+            raise ValueError('schedule_id')
+        expected_revision = _parse_int_field(payload, 'expected_revision')
+    except ValueError as error:
+        result = {
+            'ok': False,
+            'code': 'malformed_record',
+            'field': str(error),
+        }
+        if wants_json:
+            return _json_instructor_reset_response(result, 400)
+        messages.error(request, INSTRUCTOR_OVERRIDE_MESSAGES['malformed_record'])
+        return HttpResponseRedirect(
+            reverse('instructor-assignment-schedule', args=[schedule.pk])
+        )
+    if payload.get('confirm_reset_all') not in (
+        True,
+        1,
+        '1',
+        'true',
+        'on',
+        'yes',
+    ):
+        result = {'ok': False, 'code': 'reset_confirmation_required'}
+        if wants_json:
+            return _json_instructor_reset_response(result, 400)
+        messages.error(
+            request,
+            INSTRUCTOR_OVERRIDE_MESSAGES['reset_confirmation_required'],
+        )
+        return HttpResponseRedirect(
+            reverse('instructor-assignment-schedule', args=[schedule.pk])
+        )
+
+    result = reset_all_manual_instructor_overrides(
+        schedule=schedule,
+        expected_revision=expected_revision,
+    )
+    status = 200 if result.get('ok') else _instructor_override_status(
+        result.get('code')
+    )
+    if wants_json:
+        return _json_instructor_reset_response(result, status)
+    messages.success(
+        request,
+        INSTRUCTOR_OVERRIDE_MESSAGES[result['code']],
+    ) if result.get('ok') else messages.error(
+        request,
+        INSTRUCTOR_OVERRIDE_MESSAGES.get(
+            result.get('code'),
+            'Instructor assignments were not reset.',
+        ),
+    )
+    return HttpResponseRedirect(
+        reverse('instructor-assignment-schedule', args=[schedule.pk])
+    )
 
 
 def _parse_instructor_availability_post(post_data, matrix):

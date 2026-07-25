@@ -1242,6 +1242,27 @@ def normalize_sched_data_structure(sched_data):
 
     normalized.setdefault('version', 1)
     normalized['manual_moves'] = deepcopy(manual_moves)
+    instructor_overrides = normalized.get('manual_instructor_overrides')
+    if instructor_overrides is None:
+        instructor_overrides = []
+    elif not isinstance(instructor_overrides, list):
+        raise MalformedSchedDataError(
+            'Expected sched_data.manual_instructor_overrides to be a list; '
+            f'found {type(instructor_overrides).__name__}. Existing schedule '
+            'data was left unchanged.'
+        )
+    instructor_revision = normalized.get('instructor_override_revision', 0)
+    if (
+        not isinstance(instructor_revision, int)
+        or isinstance(instructor_revision, bool)
+        or instructor_revision < 0
+    ):
+        raise MalformedSchedDataError(
+            'Expected sched_data.instructor_override_revision to be a '
+            'non-negative integer. Existing schedule data was left unchanged.'
+        )
+    normalized['manual_instructor_overrides'] = deepcopy(instructor_overrides)
+    normalized['instructor_override_revision'] = instructor_revision
     return normalized
 
 
@@ -1321,7 +1342,12 @@ def repair_malformed_sched_data(schedule_obj):
         locked_schedule = type(schedule_obj).objects.select_for_update().get(pk=schedule_obj.pk)
         sched_data = locked_schedule.sched_data
         if sched_data is None or (isinstance(sched_data, str) and not sched_data.strip()):
-            repaired = {'version': 1, 'manual_moves': []}
+            repaired = {
+                'version': 1,
+                'manual_moves': [],
+                'manual_instructor_overrides': [],
+                'instructor_override_revision': 0,
+            }
         else:
             diagnosis = diagnose_sched_data_structure(sched_data)
             raise MalformedSchedDataError(

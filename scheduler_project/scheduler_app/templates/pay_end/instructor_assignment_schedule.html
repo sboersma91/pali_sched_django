@@ -7,13 +7,146 @@
       background-color: var(--group-soft) !important;
       box-shadow: inset 0.3rem 0 0 var(--group-accent);
     }
+    .instructor-drag-handle {
+      cursor: grab;
+      touch-action: none;
+    }
+    .instructor-drag-handle.instructor-dragging {
+      cursor: grabbing;
+      opacity: 0.6;
+    }
+    [data-instructor-occurrence-target="true"].instructor-drop-eligible {
+      outline: 2px dashed #0d6efd;
+      outline-offset: -2px;
+    }
+    [data-instructor-occurrence-target="true"].instructor-drop-active {
+      outline: 3px solid #0d6efd;
+      outline-offset: -3px;
+    }
+    #instructor-override-feedback[data-state="error"] {
+      color: #842029;
+    }
+    #instructor-override-feedback[data-state="success"] {
+      color: #0f5132;
+    }
   </style>
+  <div
+    id="instructor-assignment-workspace"
+    data-instructor-override-url="{% url 'instructor-override-set' assignment_schedule.schedule_id %}"
+    data-schedule-id="{{ assignment_schedule.schedule_id }}"
+    data-override-revision="{{ instructor_override_revision }}"
+  >
   <div class="mt-4 mb-3">
     <p class="text-uppercase text-muted small mb-1">{{ assignment_schedule.schedule_name }}</p>
     <h1>Instructor Assignment Schedule</h1>
     <p class="text-muted mb-1">Assignments are calculated from the current activity schedule, instructor participation, qualifications, and detailed availability exceptions.</p>
     <p class="alert alert-info py-2">This is a current planning view. Refreshing this page recalculates assignments from current data.</p>
   </div>
+
+  {% for diagnostic in instructor_override_diagnostics %}
+    {% if diagnostic.code != 'no_active_override' and diagnostic.code != 'active_and_applied' %}
+      <div class="alert alert-warning" role="alert">
+        <strong>Manual assignment not applied.</strong>
+        The saved instruction is stale or invalid ({{ diagnostic.code }}); the automatic plan is shown.
+      </div>
+    {% elif diagnostic.code == 'active_and_applied' %}
+      <div class="alert alert-success" role="status">
+        A saved manual instructor assignment is active and included in this plan.
+      </div>
+    {% endif %}
+  {% endfor %}
+
+  {% if instructor_override_confirmation %}
+    <section class="alert alert-warning" aria-labelledby="coverage-confirmation-heading">
+      <h2 id="coverage-confirmation-heading" class="h4">Confirm reduced staffing coverage</h2>
+      <p>This hard-valid selection changes staffed occurrence coverage from
+        <strong>{{ instructor_override_confirmation.coverage_before }}</strong> to
+        <strong>{{ instructor_override_confirmation.coverage_after }}</strong>
+        ({{ instructor_override_confirmation.coverage_delta }}).
+      </p>
+      <p>No assignment has been saved yet. Confirm only after reviewing the recalculated plan below.</p>
+      <form method="post" action="{% url 'instructor-override-set' assignment_schedule.schedule_id %}">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="set">
+        <input type="hidden" name="schedule_id" value="{{ assignment_schedule.schedule_id }}">
+        <input type="hidden" name="expected_revision" value="{{ instructor_override_confirmation.expected_revision }}">
+        <input type="hidden" name="occurrence_token" value="{{ instructor_override_confirmation.occurrence_token }}">
+        <input type="hidden" name="instructor_id" value="{{ instructor_override_confirmation.instructor_id }}">
+        <input type="hidden" name="confirm_coverage_reduction" value="1">
+        <button type="submit" class="btn btn-warning">Confirm and save manual assignment</button>
+      </form>
+    </section>
+  {% endif %}
+
+  {% if has_active_instructor_overrides %}
+    <section class="card mb-4" aria-labelledby="reset-instructor-assignments-heading">
+      <div class="card-body">
+        <h2 id="reset-instructor-assignments-heading" class="h3">Saved Manual Instructor Assignments</h2>
+        <p class="text-muted">Return an occurrence to automatic planning without changing the activity schedule.</p>
+        <div class="vstack gap-2 mb-3">
+          {% for target in instructor_override_reset_targets %}
+            <form method="post" action="{% url 'instructor-override-reset' assignment_schedule.schedule_id %}" class="border rounded p-2">
+              {% csrf_token %}
+              <input type="hidden" name="schedule_id" value="{{ assignment_schedule.schedule_id }}">
+              <input type="hidden" name="expected_revision" value="{{ instructor_override_revision }}">
+              <input type="hidden" name="occurrence_token" value="{{ target.token }}">
+              <p class="mb-2">
+                {% if target.is_applied %}
+                  Manual occurrence {{ target.occurrence.occurrence_id }}
+                {% else %}
+                  Saved manual assignment {{ target.occurrence.occurrence_id }} is not currently applicable.
+                {% endif %}
+              </p>
+              <button type="submit" class="btn btn-sm btn-outline-secondary">Return to automatic assignment</button>
+            </form>
+          {% endfor %}
+        </div>
+        <details>
+          <summary>Reset all instructor assignments</summary>
+          <p class="mt-2 mb-2">All instructor assignments will be recalculated automatically. The generated activity schedule and activity manual moves will not change.</p>
+          <form method="post" action="{% url 'instructor-override-reset-all' assignment_schedule.schedule_id %}">
+            {% csrf_token %}
+            <input type="hidden" name="schedule_id" value="{{ assignment_schedule.schedule_id }}">
+            <input type="hidden" name="expected_revision" value="{{ instructor_override_revision }}">
+            <input type="hidden" name="confirm_reset_all" value="1">
+            <button type="submit" class="btn btn-warning">Confirm reset all instructor assignments</button>
+          </form>
+        </details>
+      </div>
+    </section>
+  {% endif %}
+
+  <section class="card mb-4" aria-labelledby="manual-assignment-heading">
+    <div class="card-body">
+      <h2 id="manual-assignment-heading" class="h3">Set a Manual Instructor Assignment</h2>
+      <p class="text-muted">Select one current activity occurrence and one participating instructor. The complete plan and OFF reservations will be recalculated before anything is saved.</p>
+      <form method="post" action="{% url 'instructor-override-set' assignment_schedule.schedule_id %}">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="set">
+        <input type="hidden" name="schedule_id" value="{{ assignment_schedule.schedule_id }}">
+        <input type="hidden" name="expected_revision" value="{{ instructor_override_revision }}">
+        <div class="mb-3">
+          <label for="instructor-override-occurrence" class="form-label">Activity occurrence</label>
+          <select id="instructor-override-occurrence" name="occurrence_token" class="form-select" required>
+            <option value="">Select an occurrence</option>
+            {% for occurrence in instructor_override_occurrences %}
+              <option value="{{ occurrence.token }}"{% if occurrence.token == selected_occurrence_token %} selected{% endif %}>{{ occurrence.label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="mb-3">
+          <label for="instructor-override-instructor" class="form-label">Instructor</label>
+          <select id="instructor-override-instructor" name="instructor_id" class="form-select" required>
+            <option value="">Select an instructor</option>
+            {% for instructor in instructor_override_candidates %}
+              <option value="{{ instructor.pk }}"{% if instructor.pk == selected_instructor_id %} selected{% endif %}>{{ instructor }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <button type="submit" class="btn btn-primary">Recalculate and save assignment</button>
+      </form>
+    </div>
+  </section>
 
   {% if assignment_schedule.unstaffed_occurrences %}
     <section class="mb-4" aria-labelledby="unstaffed-heading">
@@ -22,7 +155,15 @@
         <p>The following scheduled activities do not currently have an eligible instructor.</p>
         <div class="vstack gap-3">
           {% for occurrence in assignment_schedule.unstaffed_occurrences %}
-            <article class="bg-white border rounded p-3">
+            <article
+              class="bg-white border rounded p-3"
+              data-instructor-occurrence-target="true"
+              data-occurrence-id="{{ occurrence.occurrence_id }}"
+              data-occurrence-token="{{ occurrence.occurrence_token }}"
+              data-occurrence-label="{{ occurrence.group_label }} — {{ occurrence.activity_name }} — {{ occurrence.occupied_slots|join:', ' }}"
+              tabindex="0"
+              aria-label="Set an instructor for unstaffed occurrence {{ occurrence.activity_name }}, {{ occurrence.group_label }}, {{ occurrence.occupied_slots|join:', ' }}"
+            >
               <h3 class="h5 mb-1">{{ occurrence.activity_name }}</h3>
               {% if occurrence.group_label %}<p class="mb-1"><strong>Group:</strong> {{ occurrence.group_label }}</p>{% endif %}
               <p class="mb-1"><strong>Slots:</strong> {{ occurrence.occupied_slots|join:", " }}</p>
@@ -48,6 +189,40 @@
     </section>
   {% endif %}
 
+  <div
+    id="instructor-override-feedback"
+    class="alert alert-light"
+    role="status"
+    aria-live="polite"
+    aria-atomic="true"
+    tabindex="-1"
+  >
+    Drag an instructor handle onto an activity occurrence, or use the form below.
+  </div>
+
+  <section
+    id="instructor-drag-confirmation"
+    class="alert alert-warning"
+    role="dialog"
+    aria-modal="false"
+    aria-labelledby="instructor-drag-confirmation-heading"
+    tabindex="-1"
+    hidden
+  >
+    <h2 id="instructor-drag-confirmation-heading" class="h4">Confirm reduced staffing coverage</h2>
+    <p id="instructor-drag-confirmation-selection"></p>
+    <p>
+      Coverage changes from <strong id="instructor-drag-coverage-before"></strong>
+      to <strong id="instructor-drag-coverage-after"></strong>
+      (<span id="instructor-drag-coverage-delta"></span>).
+    </p>
+    <div id="instructor-drag-unstaffed"></div>
+    <div class="d-flex gap-2">
+      <button type="button" id="instructor-drag-confirm" class="btn btn-warning">Confirm and save</button>
+      <button type="button" id="instructor-drag-cancel" class="btn btn-outline-secondary">Cancel</button>
+    </div>
+  </section>
+
   <section aria-labelledby="assignment-grid-heading">
     <h2 id="assignment-grid-heading" class="h3">Assignments by Instructor and Slot</h2>
     {% if assignment_schedule.instructor_rows %}
@@ -69,12 +244,24 @@
           <tbody>
             {% for row in assignment_schedule.instructor_rows %}
               <tr>
-                <th scope="row">{{ row.instructor_name }}</th>
+                <th scope="row">
+                  <span>{{ row.instructor_name }}</span>
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-outline-secondary instructor-drag-handle"
+                    draggable="true"
+                    data-instructor-drag-source="true"
+                    data-instructor-id="{{ row.instructor_id }}"
+                    data-instructor-name="{{ row.instructor_name }}"
+                    aria-label="Drag {{ row.instructor_name }} to set a manual activity assignment"
+                  >Drag instructor</button>
+                </th>
                 {% for cell in row.cells %}
-                  <td class="{% if cell.state == 'assigned' %}group-accent {{ cell.group_accent_class }}{% elif cell.state == 'off' %}bg-secondary text-white fw-bold{% elif cell.state == 'unavailable' %}table-warning text-dark{% else %}bg-light text-secondary{% endif %}" data-slot-key="{{ cell.slot_key }}" data-cell-state="{{ cell.state }}"{% if cell.occurrence_id %} data-occurrence-id="{{ cell.occurrence_id }}"{% endif %}>
+                  <td class="{% if cell.state == 'assigned' %}group-accent {{ cell.group_accent_class }}{% elif cell.state == 'off' %}bg-secondary text-white fw-bold{% elif cell.state == 'unavailable' %}table-warning text-dark{% else %}bg-light text-secondary{% endif %}" data-slot-key="{{ cell.slot_key }}" data-cell-state="{{ cell.state }}"{% if cell.occurrence_id %} data-instructor-occurrence-target="true" data-occurrence-id="{{ cell.occurrence_id }}" data-occurrence-token="{{ cell.occurrence_token }}" data-occurrence-label="{{ cell.group_label }} — {{ cell.activity_name }}" tabindex="0" aria-label="Set an instructor for {{ cell.activity_name }}, {{ cell.group_label }}, {{ cell.slot_label }}"{% endif %}>
                     {% if cell.state == 'assigned' %}
                       <strong>{{ cell.activity_name }}</strong>
                       {% if cell.group_label %}<div class="small text-muted">{{ cell.group_label }}</div>{% endif %}
+                      {% if cell.is_fixed %}<span class="badge bg-primary">Manual</span>{% else %}<span class="badge bg-light text-dark">Automatic</span>{% endif %}
                     {% elif cell.state == 'off' %}
                       <strong>OFF</strong>
                     {% elif cell.state == 'unavailable' %}
@@ -101,4 +288,271 @@
     <a href="{% url 'instructor-participation' assignment_schedule.schedule_id %}" class="btn btn-outline-primary">Manage Instructor Participation</a>
     <a href="{% url 'instructor-availability' assignment_schedule.schedule_id %}" class="btn btn-outline-secondary">Manage Detailed Availability Exceptions</a>
   </div>
+  </div>
+
+  <script>
+    (function () {
+      const workspace = document.getElementById('instructor-assignment-workspace');
+      if (!workspace) {
+        return;
+      }
+
+      const endpointUrl = workspace.dataset.instructorOverrideUrl;
+      const scheduleId = Number(workspace.dataset.scheduleId);
+      const expectedRevision = Number(workspace.dataset.overrideRevision);
+      const feedback = document.getElementById('instructor-override-feedback');
+      const confirmation = document.getElementById('instructor-drag-confirmation');
+      const confirmButton = document.getElementById('instructor-drag-confirm');
+      const cancelButton = document.getElementById('instructor-drag-cancel');
+      let dragState = null;
+      let pendingConfirmation = null;
+      let requestInFlight = false;
+
+      function getCookie(name) {
+        const cookies = document.cookie ? document.cookie.split(';') : [];
+        for (const cookie of cookies) {
+          const trimmed = cookie.trim();
+          if (trimmed.startsWith(name + '=')) {
+            return decodeURIComponent(trimmed.slice(name.length + 1));
+          }
+        }
+        return '';
+      }
+
+      function targetsForOccurrence(occurrenceId) {
+        return Array.from(
+          workspace.querySelectorAll('[data-instructor-occurrence-target="true"]')
+        ).filter((target) => target.dataset.occurrenceId === occurrenceId);
+      }
+
+      function clearTargetStates() {
+        workspace.querySelectorAll('.instructor-drop-eligible, .instructor-drop-active')
+          .forEach((target) => {
+            target.classList.remove('instructor-drop-eligible', 'instructor-drop-active');
+          });
+      }
+
+      function setOccurrenceState(target, className) {
+        if (!target || !target.dataset.occurrenceId) {
+          return;
+        }
+        targetsForOccurrence(target.dataset.occurrenceId)
+          .forEach((cell) => cell.classList.add(className));
+      }
+
+      function renderFeedback(message, state, includeReload) {
+        feedback.replaceChildren();
+        const text = document.createElement('span');
+        text.textContent = message;
+        feedback.appendChild(text);
+        if (includeReload) {
+          const reload = document.createElement('a');
+          reload.href = window.location.href;
+          reload.className = 'btn btn-sm btn-outline-primary ms-2';
+          reload.textContent = 'Reload current assignments';
+          feedback.appendChild(reload);
+        }
+        feedback.dataset.state = state;
+        feedback.focus();
+      }
+
+      function hideConfirmation() {
+        pendingConfirmation = null;
+        confirmation.hidden = true;
+        confirmButton.disabled = false;
+        cancelButton.disabled = false;
+        feedback.focus();
+      }
+
+      function renderConfirmation(result, requestPayload, submissionContext) {
+        pendingConfirmation = {
+          payload: {
+            ...requestPayload,
+            expected_revision: (
+              result.conflict && result.conflict.current_revision !== undefined
+                ? result.conflict.current_revision
+                : requestPayload.expected_revision
+            ),
+            confirm_coverage_reduction: true,
+          },
+          context: submissionContext,
+        };
+        document.getElementById('instructor-drag-confirmation-selection').textContent =
+          `Set ${submissionContext.instructorName} for ${submissionContext.occurrenceLabel}.`;
+        document.getElementById('instructor-drag-coverage-before').textContent =
+          result.coverage_before;
+        document.getElementById('instructor-drag-coverage-after').textContent =
+          result.coverage_after;
+        document.getElementById('instructor-drag-coverage-delta').textContent =
+          result.coverage_delta;
+        const unstaffed = document.getElementById('instructor-drag-unstaffed');
+        unstaffed.replaceChildren();
+        if (result.unstaffed_occurrences && result.unstaffed_occurrences.length) {
+          const heading = document.createElement('p');
+          heading.textContent = 'Unstaffed after this selection:';
+          unstaffed.appendChild(heading);
+          const list = document.createElement('ul');
+          result.unstaffed_occurrences.forEach((occurrence) => {
+            const item = document.createElement('li');
+            item.textContent = `${occurrence.group_label} — ${occurrence.activity_name}`;
+            list.appendChild(item);
+          });
+          unstaffed.appendChild(list);
+        }
+        confirmation.hidden = false;
+        confirmation.focus();
+      }
+
+      function messageForResult(result) {
+        if (
+          result.code === 'revision_conflict' ||
+          result.code === 'stale_occurrence_identity'
+        ) {
+          return {
+            message: result.message,
+            reload: true,
+          };
+        }
+        if (result.code === 'unsupported_multiple_active_overrides') {
+          return {
+            message: 'Another manual instructor assignment is already active. No move or swap was performed.',
+            reload: false,
+          };
+        }
+        return {
+          message: result.message || 'The manual instructor assignment was rejected.',
+          reload: false,
+        };
+      }
+
+      async function submitOverride(payload, submissionContext) {
+        if (requestInFlight) {
+          return;
+        }
+        requestInFlight = true;
+        confirmButton.disabled = true;
+        cancelButton.disabled = true;
+        workspace.setAttribute('aria-busy', 'true');
+        renderFeedback('Recalculating instructor assignments…', 'submitting', false);
+        try {
+          const response = await fetch(endpointUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json',
+              'X-CSRFToken': getCookie('csrftoken'),
+            },
+            body: JSON.stringify(payload),
+          });
+          const result = await response.json();
+          if (response.ok && result.ok) {
+            renderFeedback('Manual instructor assignment saved. Reloading…', 'success', false);
+            window.location.reload();
+            return;
+          }
+          if (result.code === 'coverage_confirmation_required') {
+            renderConfirmation(result, payload, submissionContext);
+            return;
+          }
+          hideConfirmation();
+          const error = messageForResult(result);
+          renderFeedback(error.message, 'error', error.reload);
+        } catch (error) {
+          hideConfirmation();
+          renderFeedback(
+            'The server could not complete the instructor assignment. Try again or reload the page.',
+            'error',
+            true
+          );
+        } finally {
+          requestInFlight = false;
+          workspace.removeAttribute('aria-busy');
+          if (confirmation.hidden) {
+            confirmButton.disabled = false;
+            cancelButton.disabled = false;
+          }
+        }
+      }
+
+      workspace.addEventListener('dragstart', function (event) {
+        const source = event.target.closest('[data-instructor-drag-source="true"]');
+        if (!source || requestInFlight) {
+          event.preventDefault();
+          return;
+        }
+        dragState = {
+          source,
+          instructorId: Number(source.dataset.instructorId),
+          instructorName: source.dataset.instructorName,
+          occurrenceLabel: '',
+        };
+        source.classList.add('instructor-dragging');
+        workspace.querySelectorAll('[data-instructor-occurrence-target="true"]')
+          .forEach((target) => target.classList.add('instructor-drop-eligible'));
+        event.dataTransfer.effectAllowed = 'copy';
+        event.dataTransfer.setData('text/plain', String(dragState.instructorId));
+      });
+
+      workspace.addEventListener('dragend', function () {
+        if (dragState) {
+          dragState.source.classList.remove('instructor-dragging');
+        }
+        dragState = null;
+        clearTargetStates();
+      });
+
+      workspace.addEventListener('dragover', function (event) {
+        const target = event.target.closest('[data-instructor-occurrence-target="true"]');
+        if (!dragState || !target || requestInFlight) {
+          return;
+        }
+        event.preventDefault();
+        clearTargetStates();
+        workspace.querySelectorAll('[data-instructor-occurrence-target="true"]')
+          .forEach((item) => item.classList.add('instructor-drop-eligible'));
+        setOccurrenceState(target, 'instructor-drop-active');
+        event.dataTransfer.dropEffect = 'copy';
+      });
+
+      workspace.addEventListener('drop', function (event) {
+        const target = event.target.closest('[data-instructor-occurrence-target="true"]');
+        if (!dragState || !target || requestInFlight) {
+          return;
+        }
+        event.preventDefault();
+        clearTargetStates();
+        dragState.occurrenceLabel = target.dataset.occurrenceLabel;
+        submitOverride(
+          {
+            action: 'set',
+            schedule_id: scheduleId,
+            expected_revision: expectedRevision,
+            instructor_id: dragState.instructorId,
+            occurrence_token: target.dataset.occurrenceToken,
+            confirm_coverage_reduction: false,
+          },
+          {
+            instructorName: dragState.instructorName,
+            occurrenceLabel: dragState.occurrenceLabel,
+          }
+        );
+      });
+
+      confirmButton.addEventListener('click', function () {
+        if (pendingConfirmation) {
+          submitOverride(
+            pendingConfirmation.payload,
+            pendingConfirmation.context
+          );
+        }
+      });
+      cancelButton.addEventListener('click', hideConfirmation);
+      confirmation.addEventListener('keydown', function (event) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          hideConfirmation();
+        }
+      });
+    }());
+  </script>
 {% endblock content %}

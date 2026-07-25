@@ -746,9 +746,15 @@ def plan_instructor_assignments_with_daily_off(
     availability_records,
     participation_records,
     normalized_daily_off_requirements,
+    fixed_assignments=(),
     _search_stats=None,
+    _calculate_fixed_baseline=True,
 ):
-    """Return a maximum-coverage, deterministic, in-memory daily-OFF plan."""
+    """Return a maximum-coverage, deterministic, in-memory daily-OFF plan.
+
+    ``fixed_assignments`` is a pure, transient planning input containing zero
+    or more ``{"occurrence": ..., "instructor": ...}`` mappings.
+    """
     if _search_stats is not None:
         _search_stats.clear()
         _search_stats.update(
@@ -761,6 +767,7 @@ def plan_instructor_assignments_with_daily_off(
         ('candidate_instructors', candidate_instructors),
         ('availability_records', availability_records),
         ('participation_records', participation_records),
+        ('fixed_assignments', fixed_assignments),
     ):
         if not isinstance(value, (list, tuple)):
             raise TypeError(f'{name} must be a preloaded list or tuple.')
@@ -812,6 +819,239 @@ def plan_instructor_assignments_with_daily_off(
             course_requirements,
         )
 
+    fixed_reservations = []
+    fixed_diagnostics = []
+    fixed_by_occurrence_id = {}
+    fixed_slot_keys_by_instructor = {}
+    rejected_fixed_set = False
+    indexed_fixed_assignments = sorted(
+        enumerate(fixed_assignments),
+        key=lambda item: (
+            _planner_occurrence_sort_key(
+                item[1].get('occurrence')
+                if isinstance(item[1], dict)
+                and isinstance(item[1].get('occurrence'), dict)
+                else {}
+            ),
+            getattr(
+                item[1].get('instructor')
+                if isinstance(item[1], dict) else None,
+                'pk',
+                -1,
+            ),
+            item[0],
+        ),
+    )
+    for fixed_index, fixed_assignment in indexed_fixed_assignments:
+        if not isinstance(fixed_assignment, dict):
+            raise TypeError('Each fixed assignment must be a mapping.')
+        submitted_occurrence = fixed_assignment.get('occurrence')
+        submitted_instructor = fixed_assignment.get('instructor')
+        fixed_occurrence = next(
+            (
+                occurrence
+                for occurrence in ordered_occurrences
+                if occurrence is submitted_occurrence
+                or occurrence == submitted_occurrence
+            ),
+            None,
+        )
+        fixed_instructor = submitted_instructor
+        fixed_rejection = None
+        fixed_slot_keys = ()
+        if fixed_occurrence is None:
+            fixed_rejection = {
+                'code': 'occurrence_not_found',
+                'details': {'affected_slot_keys': ()},
+            }
+        elif fixed_occurrence.get('required_instructor_count') not in (None, 1):
+            fixed_rejection = {
+                'code': 'unsupported_instructor_count',
+                'details': {
+                    'affected_slot_keys': tuple(
+                        slot.get('slot_key')
+                        for slot in fixed_occurrence.get('slot_footprint') or ()
+                    ),
+                },
+            }
+        elif (
+            fixed_instructor is None
+            or fixed_instructor.organization_id
+            != fixed_occurrence.get('organization_id')
+        ):
+            fixed_rejection = {
+                'code': 'organization_mismatch',
+                'details': {'affected_slot_keys': ()},
+            }
+        elif fixed_instructor.pk not in candidate_ids:
+            participation_state = next(
+                (
+                    record.state
+                    for record in participation_records
+                    if record.organization_id == fixed_occurrence.get('organization_id')
+                    and record.schedule_id == fixed_occurrence.get('schedule_id')
+                    and record.instructor_id == fixed_instructor.pk
+                ),
+                None,
+            )
+            fixed_rejection = {
+                'code': (
+                    'not_participating'
+                    if participation_state
+                    == InstructorScheduleParticipation.NOT_PARTICIPATING
+                    else 'instructor_not_candidate'
+                ),
+                'details': {'affected_slot_keys': ()},
+            }
+        else:
+            fixed_slot_keys = tuple(
+                slot.get('slot_key')
+                for slot in fixed_occurrence.get('slot_footprint') or ()
+                if slot.get('slot_key') is not None
+            )
+            qualification = qualification_by_occurrence_id[id(fixed_occurrence)]
+            if fixed_instructor not in qualification['qualified_instructors']:
+                fixed_rejection = {
+                    'code': 'qualification_requirements_not_met',
+                    'details': {'affected_slot_keys': fixed_slot_keys},
+                }
+            else:
+                constraint_result = evaluate_occurrence_constraints(
+                    fixed_occurrence,
+                    [fixed_instructor],
+                    [],
+                    availability_records,
+                    participation_records,
+                )
+                if not constraint_result['eligible_instructors']:
+                    fixed_rejection = (
+                        constraint_result['rejected_instructors'][0]['reasons'][0]
+                    )
+        occurrence_key = (
+            fixed_occurrence.get('occurrence_id')
+            if fixed_occurrence is not None
+            else None
+        )
+        if fixed_rejection is None and occurrence_key in fixed_by_occurrence_id:
+            fixed_rejection = {
+                'code': 'duplicate_fixed_occurrence',
+                'details': {'affected_slot_keys': fixed_slot_keys},
+            }
+        prior_slot_keys = fixed_slot_keys_by_instructor.get(
+            getattr(fixed_instructor, 'pk', None),
+            frozenset(),
+        )
+        overlapping_slot_keys = tuple(
+            slot_key for slot_key in fixed_slot_keys
+            if slot_key in prior_slot_keys
+        )
+        if fixed_rejection is None and overlapping_slot_keys:
+            fixed_rejection = {
+                'code': 'instructor_overlap',
+                'details': {'overlapping_slot_keys': overlapping_slot_keys},
+            }
+
+        rejection_details = (
+            (fixed_rejection.get('details') or {})
+            if fixed_rejection else {}
+        )
+        failed_slot_keys = tuple(
+            failure.get('slot_key')
+            for failure in rejection_details.get('failed_slots', ())
+            if failure.get('slot_key') is not None
+        )
+        diagnostic = {
+            'fixed_assignment_index': fixed_index,
+            'occurrence': fixed_occurrence or submitted_occurrence,
+            'instructor': fixed_instructor,
+            'accepted': fixed_rejection is None,
+            'rejection_code': (
+                fixed_rejection.get('code') if fixed_rejection else None
+            ),
+            'affected_slot_keys': tuple(
+                failed_slot_keys
+                or rejection_details.get('overlapping_slot_keys')
+                or rejection_details.get('affected_slot_keys')
+                or fixed_slot_keys
+            ),
+        }
+        fixed_diagnostics.append(diagnostic)
+        if fixed_rejection is not None:
+            rejected_fixed_set = True
+            continue
+        fixed_by_occurrence_id[occurrence_key] = {
+            'occurrence': fixed_occurrence,
+            'instructor': fixed_instructor,
+            'slot_keys': fixed_slot_keys,
+            'diagnostic': diagnostic,
+        }
+        fixed_slot_keys_by_instructor[fixed_instructor.pk] = frozenset(
+            prior_slot_keys | frozenset(fixed_slot_keys)
+        )
+
+    for fixed in fixed_by_occurrence_id.values():
+        instructor = fixed['instructor']
+        for day_key, _eligible_slot_keys in DAILY_OFF_ELIGIBLE_SLOT_KEYS_BY_DAY:
+            key = (instructor.pk, day_key)
+            before = initial_remaining_off_candidates.get(key)
+            if before is None:
+                continue
+            after = tuple(
+                slot_key for slot_key in before
+                if slot_key not in fixed['slot_keys']
+            )
+            if not after:
+                fixed['diagnostic'].update({
+                    'accepted': False,
+                    'rejection_code': 'daily_off_requirement',
+                    'affected_slot_keys': tuple(before),
+                })
+                rejected_fixed_set = True
+                break
+            initial_remaining_off_candidates[key] = after
+
+    baseline_result = None
+    if fixed_assignments and _calculate_fixed_baseline:
+        baseline_result = plan_instructor_assignments_with_daily_off(
+            occurrences,
+            candidate_instructors,
+            instructor_certifications,
+            course_requirements,
+            availability_records,
+            participation_records,
+            normalized_daily_off_requirements,
+            fixed_assignments=(),
+            _calculate_fixed_baseline=False,
+        )
+
+    if rejected_fixed_set:
+        coverage_after = baseline_result['coverage']['assigned_occurrence_count']
+        for diagnostic in fixed_diagnostics:
+            diagnostic.update({
+                'coverage_before': coverage_after,
+                'coverage_after': coverage_after,
+                'coverage_delta': 0,
+                'requires_confirmation': False,
+            })
+        return {
+            **baseline_result,
+            'accepted_fixed_assignments': (),
+            'fixed_assignment_diagnostics': tuple(fixed_diagnostics),
+        }
+
+    fixed_reservations = [
+        {
+            'occurrence': fixed['occurrence'],
+            'assigned_instructor': fixed['instructor'],
+            'status': 'assigned',
+            'reason': None,
+            'constraint_rejections': (),
+            'planning_diagnostics': (),
+            'assignment_source': 'fixed',
+        }
+        for fixed in fixed_by_occurrence_id.values()
+    ]
+
     best = {
         'assigned_count': -1,
         'assignments': (),
@@ -850,12 +1090,17 @@ def plan_instructor_assignments_with_daily_off(
             return
 
         occurrence = ordered_occurrences[occurrence_index]
+        fixed = fixed_by_occurrence_id.get(occurrence.get('occurrence_id'))
         qualification_result = qualification_by_occurrence_id[id(occurrence)]
         qualified_instructors = qualification_result['qualified_instructors']
         constraint_result = evaluate_occurrence_constraints(
             occurrence,
             qualified_instructors,
-            assignments,
+            assignments + [
+                reservation
+                for reservation in fixed_reservations
+                if reservation['occurrence'] is not occurrence
+            ],
             availability_records,
             participation_records,
         )
@@ -868,7 +1113,15 @@ def plan_instructor_assignments_with_daily_off(
             if slot.get('slot_key') is not None
         )
 
-        for instructor in eligible_instructors:
+        instructors_requiring_off_evaluation = (
+            [] if fixed is not None else eligible_instructors
+        )
+        if fixed is not None:
+            eligible_with_off_capacity.append((
+                fixed['instructor'],
+                remaining_off_candidates,
+            ))
+        for instructor in instructors_requiring_off_evaluation:
             candidate_remaining = dict(remaining_off_candidates)
             candidate_off_reasons = []
             for day_key, eligible_slot_keys in DAILY_OFF_ELIGIBLE_SLOT_KEYS_BY_DAY:
@@ -908,8 +1161,14 @@ def plan_instructor_assignments_with_daily_off(
             [instructor for instructor, _remaining in eligible_with_off_capacity],
             continuity_state_by_group,
         )
+        if fixed is not None:
+            continuity_ordered_instructors = [fixed['instructor']]
+
         for instructor in continuity_ordered_instructors:
-            candidate_remaining = remaining_by_instructor_id[instructor.pk]
+            if fixed is not None:
+                candidate_remaining = remaining_off_candidates
+            else:
+                candidate_remaining = remaining_by_instructor_id[instructor.pk]
             assignment = {
                 'occurrence': occurrence,
                 'assigned_instructor': instructor,
@@ -920,6 +1179,8 @@ def plan_instructor_assignments_with_daily_off(
                 ),
                 'planning_diagnostics': (),
             }
+            if fixed is not None:
+                assignment['assignment_source'] = 'fixed'
             candidate_occupied = dict(occupied_slot_keys_by_instructor)
             candidate_occupied[instructor.pk] = frozenset(
                 candidate_occupied.get(instructor.pk, frozenset())
@@ -939,6 +1200,8 @@ def plan_instructor_assignments_with_daily_off(
                 ),
             )
 
+        if fixed is not None:
+            return
         if not qualified_instructors:
             reason = 'No qualified instructors available.'
             planning_diagnostics = ()
@@ -979,7 +1242,13 @@ def plan_instructor_assignments_with_daily_off(
         0,
         [],
         initial_remaining_off_candidates,
-        {instructor.pk: frozenset() for instructor in candidates},
+        {
+            instructor.pk: fixed_slot_keys_by_instructor.get(
+                instructor.pk,
+                frozenset(),
+            )
+            for instructor in candidates
+        },
         0,
         {},
     )
@@ -1010,7 +1279,7 @@ def plan_instructor_assignments_with_daily_off(
         assignment for assignment in assignments
         if assignment['status'] == 'unstaffed'
     )
-    return {
+    result = {
         'assignments': assignments,
         'unstaffed_occurrences': unstaffed_occurrences,
         'off_requirements': tuple(final_requirements),
@@ -1030,9 +1299,24 @@ def plan_instructor_assignments_with_daily_off(
             'complete': not unstaffed_occurrences,
         },
     }
+    if fixed_assignments:
+        coverage_after = result['coverage']['assigned_occurrence_count']
+        coverage_before = baseline_result['coverage']['assigned_occurrence_count']
+        for diagnostic in fixed_diagnostics:
+            diagnostic.update({
+                'coverage_before': coverage_before,
+                'coverage_after': coverage_after,
+                'coverage_delta': coverage_after - coverage_before,
+                'requires_confirmation': coverage_after < coverage_before,
+            })
+        result.update({
+            'accepted_fixed_assignments': tuple(fixed_reservations),
+            'fixed_assignment_diagnostics': tuple(fixed_diagnostics),
+        })
+    return result
 
 
-def run_instructor_assignment(schedule):
+def _run_instructor_assignment_core(schedule, fixed_assignments=()):
     """Run one non-persisted assignment for one schedule and organization."""
     if schedule.pk is None:
         raise ValidationError({'schedule': 'Assignment requires a saved schedule.'})
@@ -1119,6 +1403,7 @@ def run_instructor_assignment(schedule):
         availability_records,
         participation_records,
         normalized_daily_off_requirements,
+        fixed_assignments=fixed_assignments,
     )
     result = {
         'schedule_id': schedule.pk,
@@ -1129,3 +1414,20 @@ def run_instructor_assignment(schedule):
     }
     result.update(planning_result)
     return result
+
+
+def run_instructor_assignment(schedule, fixed_assignments=()):
+    """Run assignment planning, applying persisted intent for normal reads.
+
+    Explicit transient fixed assignments retain the existing pure planning
+    contract and deliberately bypass persisted override loading.
+    """
+    if fixed_assignments:
+        return _run_instructor_assignment_core(
+            schedule,
+            fixed_assignments=fixed_assignments,
+        )
+
+    from .instructor_overrides import load_and_apply_instructor_override
+
+    return load_and_apply_instructor_override(schedule)

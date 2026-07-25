@@ -52,6 +52,8 @@ class InstructorAssignmentCell:
     occurrence_id: str | None
     is_multi_slot: bool
     footprint_position: int | None
+    is_fixed: bool = False
+    occurrence_token: str | None = None
 
     @property
     def is_empty(self):
@@ -82,6 +84,7 @@ class UnstaffedOccurrenceSummary:
     occupied_slots: tuple[str, ...]
     reason: str
     rejection_details: tuple[AssignmentRejectionDetail, ...]
+    occurrence_token: str | None = None
 
 
 @dataclass(frozen=True)
@@ -172,8 +175,12 @@ def _adapt_planning_diagnostic(diagnostic):
     )
 
 
-def build_instructor_assignment_presentation(assignment_result):
+def build_instructor_assignment_presentation(
+    assignment_result,
+    occurrence_tokens_by_id=None,
+):
     """Convert one orchestration result into deterministic template-safe data."""
+    occurrence_tokens_by_id = occurrence_tokens_by_id or {}
     day_headers, slot_headers = _canonical_headers()
     slot_labels = {
         slot.key: f'{day.name} {slot.label}'
@@ -209,6 +216,10 @@ def build_instructor_assignment_presentation(assignment_result):
                 occurrence_id=occurrence.get('occurrence_id'),
                 is_multi_slot=len(footprint) > 1,
                 footprint_position=slot.get('position'),
+                is_fixed=assignment.get('assignment_source') == 'fixed',
+                occurrence_token=occurrence_tokens_by_id.get(
+                    occurrence.get('occurrence_id')
+                ),
             )
 
     candidate_instructor_ids = {
@@ -278,6 +289,8 @@ def build_instructor_assignment_presentation(assignment_result):
             occurrence_id=None,
             is_multi_slot=False,
             footprint_position=None,
+            is_fixed=False,
+            occurrence_token=None,
         )
 
     instructor_rows = tuple(sorted((
@@ -317,6 +330,9 @@ def build_instructor_assignment_presentation(assignment_result):
             ) + tuple(
                 _adapt_planning_diagnostic(diagnostic)
                 for diagnostic in assignment.get('planning_diagnostics') or ()
+            ),
+            occurrence_token=occurrence_tokens_by_id.get(
+                (assignment.get('occurrence') or {}).get('occurrence_id')
             ),
         )
         for assignment in assignments
