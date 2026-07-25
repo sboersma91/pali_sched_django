@@ -54,6 +54,7 @@ class InstructorAssignmentCell:
     footprint_position: int | None
     is_fixed: bool = False
     occurrence_token: str | None = None
+    occurrence_anchor: str | None = None
 
     @property
     def is_empty(self):
@@ -85,6 +86,15 @@ class UnstaffedOccurrenceSummary:
     reason: str
     rejection_details: tuple[AssignmentRejectionDetail, ...]
     occurrence_token: str | None = None
+    occurrence_anchor: str | None = None
+
+
+@dataclass(frozen=True)
+class AssignmentStaffingSummary:
+    total_occurrence_count: int
+    staffed_occurrence_count: int
+    unstaffed_occurrence_count: int
+    manual_occurrence_count: int
 
 
 @dataclass(frozen=True)
@@ -95,6 +105,7 @@ class InstructorAssignmentPresentation:
     slot_headers: tuple[AssignmentSlotHeader, ...]
     instructor_rows: tuple[InstructorAssignmentRow, ...]
     unstaffed_occurrences: tuple[UnstaffedOccurrenceSummary, ...]
+    staffing_summary: AssignmentStaffingSummary
 
 
 def _canonical_headers():
@@ -115,6 +126,90 @@ def _canonical_headers():
 
 def _display_slot(slot_key, slot_labels):
     return slot_labels.get(slot_key, slot_key or 'Unknown slot')
+
+
+def assignment_override_feedback(result, instructor_name=None):
+    """Return operator-facing feedback from existing override diagnostics."""
+    code = result.get('code')
+    slot_labels = {
+        slot.key: f'{day.name} {slot.label}'
+        for day in _canonical_headers()[0]
+        for slot in day.slots
+    }
+    affected_slots = tuple(
+        _display_slot(slot_key, slot_labels)
+        for slot_key in result.get('affected_slot_keys') or ()
+    )
+    subject = instructor_name or 'This instructor'
+    slot_text = (
+        f" during {', '.join(affected_slots)}" if affected_slots else ''
+    )
+    messages = {
+        'explicitly_unavailable': (
+            f'{subject} cannot be assigned because they are unavailable'
+            f'{slot_text}. Choose another instructor or update availability.'
+        ),
+        'availability_requirements_not_met': (
+            f'{subject} does not meet the availability requirements'
+            f'{slot_text}. Choose another instructor or review availability.'
+        ),
+        'missing_availability': (
+            f'Availability for {subject} could not be resolved{slot_text}. '
+            'Review instructor availability before trying again.'
+        ),
+        'qualification_requirements_not_met': (
+            f'{subject} does not meet the qualifications required for this '
+            'activity. Choose a qualified instructor.'
+        ),
+        'not_participating': (
+            f'{subject} is not participating in this schedule. Choose another '
+            'instructor or update participation.'
+        ),
+        'instructor_not_candidate': (
+            f'{subject} is not eligible for this schedule. Choose a participating '
+            'instructor.'
+        ),
+        'instructor_overlap': (
+            f'{subject} already has an assignment{slot_text}. Choose another '
+            'instructor or change the conflicting assignment.'
+        ),
+        'overlapping_assignment': (
+            f'{subject} already has an overlapping assignment{slot_text}. Choose '
+            'another instructor or change the conflicting assignment.'
+        ),
+        'daily_off_requirement': (
+            f'Assigning {subject}{slot_text} would remove required OFF coverage. '
+            'Choose another instructor.'
+        ),
+        'unsupported_instructor_count': (
+            'This occurrence cannot be manually assigned with the current '
+            'single-instructor workflow.'
+        ),
+    }
+    if code == 'hard_constraint_rejection':
+        return messages.get(
+            result.get('rejection_code'),
+            f'{subject} conflicts with the current assignment constraints'
+            f'{slot_text}. Choose another instructor or review the schedule.',
+        )
+    if code in {'stale_occurrence_identity', 'missing_occurrence'}:
+        return (
+            'This occurrence changed after the page was opened. Review the '
+            'current schedule and try again.'
+        )
+    if code == 'revision_conflict':
+        return (
+            'The instructor assignment plan changed after the page was opened. '
+            'Review the current assignments and try again.'
+        )
+    if code == 'missing_instructor':
+        return (
+            'The selected instructor is no longer available. Choose a current '
+            'instructor and try again.'
+        )
+    if code == 'organization_mismatch':
+        return 'The selected schedule or instructor is not available to your organization.'
+    return None
 
 
 def _adapt_rejection(rejection, slot_labels):
@@ -178,9 +273,11 @@ def _adapt_planning_diagnostic(diagnostic):
 def build_instructor_assignment_presentation(
     assignment_result,
     occurrence_tokens_by_id=None,
+    occurrence_anchors_by_id=None,
 ):
     """Convert one orchestration result into deterministic template-safe data."""
     occurrence_tokens_by_id = occurrence_tokens_by_id or {}
+    occurrence_anchors_by_id = occurrence_anchors_by_id or {}
     day_headers, slot_headers = _canonical_headers()
     slot_labels = {
         slot.key: f'{day.name} {slot.label}'
@@ -218,6 +315,9 @@ def build_instructor_assignment_presentation(
                 footprint_position=slot.get('position'),
                 is_fixed=assignment.get('assignment_source') == 'fixed',
                 occurrence_token=occurrence_tokens_by_id.get(
+                    occurrence.get('occurrence_id')
+                ),
+                occurrence_anchor=occurrence_anchors_by_id.get(
                     occurrence.get('occurrence_id')
                 ),
             )
@@ -291,6 +391,7 @@ def build_instructor_assignment_presentation(
             footprint_position=None,
             is_fixed=False,
             occurrence_token=None,
+            occurrence_anchor=None,
         )
 
     instructor_rows = tuple(sorted((
@@ -334,6 +435,9 @@ def build_instructor_assignment_presentation(
             occurrence_token=occurrence_tokens_by_id.get(
                 (assignment.get('occurrence') or {}).get('occurrence_id')
             ),
+            occurrence_anchor=occurrence_anchors_by_id.get(
+                (assignment.get('occurrence') or {}).get('occurrence_id')
+            ),
         )
         for assignment in assignments
         if assignment.get('status') == 'unstaffed'
@@ -346,4 +450,20 @@ def build_instructor_assignment_presentation(
         slot_headers=slot_headers,
         instructor_rows=instructor_rows,
         unstaffed_occurrences=unstaffed_occurrences,
+        staffing_summary=AssignmentStaffingSummary(
+            total_occurrence_count=len(assignments),
+            staffed_occurrence_count=sum(
+                assignment.get('status') == 'assigned'
+                for assignment in assignments
+            ),
+            unstaffed_occurrence_count=sum(
+                assignment.get('status') == 'unstaffed'
+                for assignment in assignments
+            ),
+            manual_occurrence_count=sum(
+                assignment.get('status') == 'assigned'
+                and assignment.get('assignment_source') == 'fixed'
+                for assignment in assignments
+            ),
+        ),
     )

@@ -7,9 +7,26 @@
       background-color: var(--group-soft) !important;
       box-shadow: inset 0.3rem 0 0 var(--group-accent);
     }
+    .instructor-assignment-table .instructor-sticky-column {
+      position: sticky;
+      left: 0;
+      min-width: 11rem;
+      max-width: 14rem;
+      background-color: #fff;
+      box-shadow: 0.2rem 0 0.3rem rgba(0, 0, 0, 0.12);
+    }
+    .instructor-assignment-table thead .instructor-sticky-column {
+      z-index: 3;
+      background-color: #f8f9fa;
+    }
+    .instructor-assignment-table tbody .instructor-sticky-column {
+      z-index: 2;
+    }
     .instructor-drag-handle {
       cursor: grab;
       touch-action: none;
+      white-space: normal;
+      text-align: left;
     }
     .instructor-drag-handle.instructor-dragging {
       cursor: grabbing;
@@ -20,6 +37,10 @@
       outline-offset: -2px;
     }
     [data-instructor-occurrence-target="true"].instructor-drop-active {
+      outline: 3px solid #0d6efd;
+      outline-offset: -3px;
+    }
+    [data-instructor-occurrence-target="true"]:focus-visible {
       outline: 3px solid #0d6efd;
       outline-offset: -3px;
     }
@@ -41,20 +62,34 @@
     <h1>Instructor Assignment Schedule</h1>
     <p class="text-muted mb-1">Assignments are calculated from the current activity schedule, instructor participation, qualifications, and detailed availability exceptions.</p>
     <p class="alert alert-info py-2">This is a current planning view. Refreshing this page recalculates assignments from current data.</p>
+    <div id="staffing-summary" class="card mt-3" tabindex="-1">
+      <div class="card-body py-3">
+        <h2 class="h5 mb-2">Current staffing</h2>
+        <div class="d-flex flex-wrap gap-3" aria-label="Current instructor staffing summary">
+          <span><strong>{{ assignment_schedule.staffing_summary.total_occurrence_count }}</strong> total occurrence{{ assignment_schedule.staffing_summary.total_occurrence_count|pluralize }}</span>
+          <span><strong>{{ assignment_schedule.staffing_summary.staffed_occurrence_count }}</strong> staffed</span>
+          <span><strong>{{ assignment_schedule.staffing_summary.unstaffed_occurrence_count }}</strong> unstaffed</span>
+          <span><strong>{{ assignment_schedule.staffing_summary.manual_occurrence_count }}</strong> manual</span>
+        </div>
+      </div>
+    </div>
   </div>
 
-  {% for diagnostic in instructor_override_diagnostics %}
-    {% if diagnostic.code != 'no_active_override' and diagnostic.code != 'active_and_applied' %}
-      <div class="alert alert-warning" role="alert">
-        <strong>Manual assignment not applied.</strong>
-        The saved instruction is stale or invalid ({{ diagnostic.code }}); the automatic plan is shown.
-      </div>
-    {% elif diagnostic.code == 'active_and_applied' %}
-      <div class="alert alert-success" role="status">
-        A saved manual instructor assignment is active and included in this plan.
-      </div>
-    {% endif %}
+  {% for diagnostic in unpaired_instructor_override_diagnostics %}
+    <div class="alert alert-warning" role="alert">
+      <strong>A saved manual assignment could not be applied.</strong>
+      The automatic assignment is currently shown. Review the saved assignments below and remove obsolete manual instructions.
+      <details class="mt-2">
+        <summary>Support details</summary>
+        <code>{{ diagnostic.code }}</code>
+      </details>
+    </div>
   {% endfor %}
+  {% if has_applied_instructor_overrides %}
+    <div class="alert alert-success" role="status">
+      A saved manual instructor assignment is active and included in this plan.
+    </div>
+  {% endif %}
 
   {% if instructor_override_confirmation %}
     <section class="alert alert-warning" aria-labelledby="coverage-confirmation-heading">
@@ -73,13 +108,14 @@
         <input type="hidden" name="occurrence_token" value="{{ instructor_override_confirmation.occurrence_token }}">
         <input type="hidden" name="instructor_id" value="{{ instructor_override_confirmation.instructor_id }}">
         <input type="hidden" name="confirm_coverage_reduction" value="1">
+        <input type="hidden" name="return_anchor" value="{{ instructor_override_return_anchor }}">
         <button type="submit" class="btn btn-warning">Confirm and save manual assignment</button>
       </form>
     </section>
   {% endif %}
 
   {% if has_active_instructor_overrides %}
-    <section class="card mb-4" aria-labelledby="reset-instructor-assignments-heading">
+    <section id="manual-assignments" class="card mb-4" aria-labelledby="reset-instructor-assignments-heading" tabindex="-1">
       <div class="card-body">
         <h2 id="reset-instructor-assignments-heading" class="h3">Saved Manual Instructor Assignments</h2>
         <p class="text-muted">Return an occurrence to automatic planning without changing the activity schedule.</p>
@@ -90,13 +126,20 @@
               <input type="hidden" name="schedule_id" value="{{ assignment_schedule.schedule_id }}">
               <input type="hidden" name="expected_revision" value="{{ instructor_override_revision }}">
               <input type="hidden" name="occurrence_token" value="{{ target.token }}">
-              <p class="mb-2">
-                {% if target.is_applied %}
-                  Manual occurrence {{ target.occurrence.occurrence_id }}
-                {% else %}
-                  Saved manual assignment {{ target.occurrence.occurrence_id }} is not currently applicable.
-                {% endif %}
-              </p>
+              <input type="hidden" name="return_anchor" value="{{ target.return_anchor }}">
+              {% if target.diagnostic %}
+                <div class="alert alert-warning py-2">
+                  <strong>This saved manual assignment no longer applies.</strong>
+                  The automatic assignment is currently shown. Reset this entry to remove the obsolete manual instruction.
+                  <details class="mt-2">
+                    <summary>Support details</summary>
+                    <code>{{ target.diagnostic.code }}</code>
+                  </details>
+                </div>
+              {% endif %}
+              <p class="mb-1"><strong>{{ target.activity_name }}</strong></p>
+              <p class="mb-1">{{ target.group_label }}{% if target.occupied_slots %} — {{ target.occupied_slots|join:", " }}{% endif %}</p>
+              <p class="mb-2">Manual instructor: <strong>{{ target.instructor_name }}</strong></p>
               <button type="submit" class="btn btn-sm btn-outline-secondary">Return to automatic assignment</button>
             </form>
           {% endfor %}
@@ -109,6 +152,7 @@
             <input type="hidden" name="schedule_id" value="{{ assignment_schedule.schedule_id }}">
             <input type="hidden" name="expected_revision" value="{{ instructor_override_revision }}">
             <input type="hidden" name="confirm_reset_all" value="1">
+            <input type="hidden" name="return_anchor" value="staffing-summary">
             <button type="submit" class="btn btn-warning">Confirm reset all instructor assignments</button>
           </form>
         </details>
@@ -119,7 +163,7 @@
   <section class="card mb-4" aria-labelledby="manual-assignment-heading">
     <div class="card-body">
       <h2 id="manual-assignment-heading" class="h3">Set a Manual Instructor Assignment</h2>
-      <p class="text-muted">Select one current activity occurrence and one participating instructor. The complete plan and OFF reservations will be recalculated before anything is saved.</p>
+      <p class="text-muted">Secondary fallback form: select an occurrence and instructor here if an occurrence-centered control below is not convenient. The complete plan and OFF reservations will be recalculated before anything is saved.</p>
       <form method="post" action="{% url 'instructor-override-set' assignment_schedule.schedule_id %}">
         {% csrf_token %}
         <input type="hidden" name="action" value="set">
@@ -156,15 +200,18 @@
         <div class="vstack gap-3">
           {% for occurrence in assignment_schedule.unstaffed_occurrences %}
             <article
-              class="bg-white border rounded p-3"
+              id="{{ occurrence.occurrence_anchor }}"
+              class="bg-white border rounded p-3 instructor-assignment-target"
               data-instructor-occurrence-target="true"
               data-occurrence-id="{{ occurrence.occurrence_id }}"
               data-occurrence-token="{{ occurrence.occurrence_token }}"
+              data-return-anchor="{{ occurrence.occurrence_anchor }}"
               data-occurrence-label="{{ occurrence.group_label }} — {{ occurrence.activity_name }} — {{ occurrence.occupied_slots|join:', ' }}"
               tabindex="0"
               aria-label="Set an instructor for unstaffed occurrence {{ occurrence.activity_name }}, {{ occurrence.group_label }}, {{ occurrence.occupied_slots|join:', ' }}"
             >
               <h3 class="h5 mb-1">{{ occurrence.activity_name }}</h3>
+              <span class="badge bg-light text-dark border mb-2">Accepts instructor drop</span>
               {% if occurrence.group_label %}<p class="mb-1"><strong>Group:</strong> {{ occurrence.group_label }}</p>{% endif %}
               <p class="mb-1"><strong>Slots:</strong> {{ occurrence.occupied_slots|join:", " }}</p>
               <p class="mb-0"><strong>Reason:</strong> {{ occurrence.reason }}</p>
@@ -182,6 +229,26 @@
                   </ul>
                 </details>
               {% endif %}
+              <form method="post" action="{% url 'instructor-override-set' assignment_schedule.schedule_id %}" class="row g-2 align-items-end mt-3">
+                {% csrf_token %}
+                <input type="hidden" name="action" value="set">
+                <input type="hidden" name="schedule_id" value="{{ assignment_schedule.schedule_id }}">
+                <input type="hidden" name="expected_revision" value="{{ instructor_override_revision }}">
+                <input type="hidden" name="occurrence_token" value="{{ occurrence.occurrence_token }}">
+                <input type="hidden" name="return_anchor" value="{{ occurrence.occurrence_anchor }}">
+                <div class="col-sm-8">
+                  <label for="assign-{{ occurrence.occurrence_anchor }}" class="form-label">Assign instructor</label>
+                  <select id="assign-{{ occurrence.occurrence_anchor }}" name="instructor_id" class="form-select" required>
+                    <option value="">Select an instructor</option>
+                    {% for instructor in instructor_override_candidates %}
+                      <option value="{{ instructor.pk }}">{{ instructor }}</option>
+                    {% endfor %}
+                  </select>
+                </div>
+                <div class="col-sm-4">
+                  <button type="submit" class="btn btn-primary w-100">Assign instructor</button>
+                </div>
+              </form>
             </article>
           {% endfor %}
         </div>
@@ -197,7 +264,7 @@
     aria-atomic="true"
     tabindex="-1"
   >
-    Drag an instructor handle onto an activity occurrence, or use the form below.
+    Drag a named instructor onto an activity occurrence to create or change a manual assignment. The selection is validated before saving; invalid assignments are rejected. After a successful change, the schedule reloads at that occurrence.
   </div>
 
   <section
@@ -230,7 +297,7 @@
         <table class="table table-bordered table-sm align-middle instructor-assignment-table">
           <thead>
             <tr>
-              <th scope="col" rowspan="2">Instructor</th>
+              <th scope="col" rowspan="2" class="instructor-sticky-column">Instructor</th>
               {% for day in assignment_schedule.day_headers %}
                 <th scope="colgroup" colspan="{{ day.column_count }}" class="text-center">{{ day.name }}</th>
               {% endfor %}
@@ -244,8 +311,7 @@
           <tbody>
             {% for row in assignment_schedule.instructor_rows %}
               <tr>
-                <th scope="row">
-                  <span>{{ row.instructor_name }}</span>
+                <th scope="row" class="instructor-sticky-column">
                   <button
                     type="button"
                     class="btn btn-sm btn-outline-secondary instructor-drag-handle"
@@ -254,14 +320,36 @@
                     data-instructor-id="{{ row.instructor_id }}"
                     data-instructor-name="{{ row.instructor_name }}"
                     aria-label="Drag {{ row.instructor_name }} to set a manual activity assignment"
-                  >Drag instructor</button>
+                  ><span aria-hidden="true">⠿</span> {{ row.instructor_name }}</button>
                 </th>
                 {% for cell in row.cells %}
-                  <td class="{% if cell.state == 'assigned' %}group-accent {{ cell.group_accent_class }}{% elif cell.state == 'off' %}bg-secondary text-white fw-bold{% elif cell.state == 'unavailable' %}table-warning text-dark{% else %}bg-light text-secondary{% endif %}" data-slot-key="{{ cell.slot_key }}" data-cell-state="{{ cell.state }}"{% if cell.occurrence_id %} data-instructor-occurrence-target="true" data-occurrence-id="{{ cell.occurrence_id }}" data-occurrence-token="{{ cell.occurrence_token }}" data-occurrence-label="{{ cell.group_label }} — {{ cell.activity_name }}" tabindex="0" aria-label="Set an instructor for {{ cell.activity_name }}, {{ cell.group_label }}, {{ cell.slot_label }}"{% endif %}>
+                  <td{% if cell.state == 'assigned' and cell.footprint_position == 1 %} id="{{ cell.occurrence_anchor }}"{% endif %} class="{% if cell.state == 'assigned' %}group-accent {{ cell.group_accent_class }} instructor-assignment-target{% elif cell.state == 'off' %}bg-secondary text-white fw-bold{% elif cell.state == 'unavailable' %}table-warning text-dark{% else %}bg-light text-secondary{% endif %}" data-slot-key="{{ cell.slot_key }}" data-cell-state="{{ cell.state }}"{% if cell.occurrence_id %} data-instructor-occurrence-target="true" data-occurrence-id="{{ cell.occurrence_id }}" data-occurrence-token="{{ cell.occurrence_token }}" data-return-anchor="{{ cell.occurrence_anchor }}" data-occurrence-label="{{ cell.group_label }} — {{ cell.activity_name }} — {{ cell.slot_label }}" tabindex="0" aria-label="Set an instructor for {{ cell.activity_name }}, {{ cell.group_label }}, {{ cell.slot_label }}"{% endif %}>
                     {% if cell.state == 'assigned' %}
                       <strong>{{ cell.activity_name }}</strong>
                       {% if cell.group_label %}<div class="small text-muted">{{ cell.group_label }}</div>{% endif %}
+                      <span class="badge bg-light text-dark border">Accepts instructor drop</span>
                       {% if cell.is_fixed %}<span class="badge bg-primary">Manual</span>{% else %}<span class="badge bg-light text-dark">Automatic</span>{% endif %}
+                      {% if cell.footprint_position == 1 %}
+                        <details class="mt-2">
+                          <summary>Change instructor</summary>
+                          <form method="post" action="{% url 'instructor-override-set' assignment_schedule.schedule_id %}" class="mt-2">
+                            {% csrf_token %}
+                            <input type="hidden" name="action" value="set">
+                            <input type="hidden" name="schedule_id" value="{{ assignment_schedule.schedule_id }}">
+                            <input type="hidden" name="expected_revision" value="{{ instructor_override_revision }}">
+                            <input type="hidden" name="occurrence_token" value="{{ cell.occurrence_token }}">
+                            <input type="hidden" name="return_anchor" value="{{ cell.occurrence_anchor }}">
+                            <label for="change-{{ cell.occurrence_anchor }}" class="visually-hidden">Change instructor for {{ cell.activity_name }}, {{ cell.group_label }}</label>
+                            <select id="change-{{ cell.occurrence_anchor }}" name="instructor_id" class="form-select form-select-sm mb-2" required>
+                              <option value="">Select an instructor</option>
+                              {% for instructor in instructor_override_candidates %}
+                                <option value="{{ instructor.pk }}">{{ instructor }}</option>
+                              {% endfor %}
+                            </select>
+                            <button type="submit" class="btn btn-sm btn-outline-primary">Change instructor</button>
+                          </form>
+                        </details>
+                      {% endif %}
                     {% elif cell.state == 'off' %}
                       <strong>OFF</strong>
                     {% elif cell.state == 'unavailable' %}
@@ -356,6 +444,14 @@
         feedback.focus();
       }
 
+      function renderDragGuidance() {
+        renderFeedback(
+          'Drag a named instructor onto an activity occurrence. The assignment will be validated before it is saved.',
+          'guidance',
+          false
+        );
+      }
+
       function hideConfirmation() {
         pendingConfirmation = null;
         confirmation.hidden = true;
@@ -447,6 +543,9 @@
           const result = await response.json();
           if (response.ok && result.ok) {
             renderFeedback('Manual instructor assignment saved. Reloading…', 'success', false);
+            if (submissionContext.returnAnchor) {
+              window.location.hash = submissionContext.returnAnchor;
+            }
             window.location.reload();
             return;
           }
@@ -485,6 +584,7 @@
           instructorId: Number(source.dataset.instructorId),
           instructorName: source.dataset.instructorName,
           occurrenceLabel: '',
+          targetOccurrenceId: '',
         };
         source.classList.add('instructor-dragging');
         workspace.querySelectorAll('[data-instructor-occurrence-target="true"]')
@@ -499,6 +599,9 @@
         }
         dragState = null;
         clearTargetStates();
+        if (!requestInFlight) {
+          renderDragGuidance();
+        }
       });
 
       workspace.addEventListener('dragover', function (event) {
@@ -511,6 +614,14 @@
         workspace.querySelectorAll('[data-instructor-occurrence-target="true"]')
           .forEach((item) => item.classList.add('instructor-drop-eligible'));
         setOccurrenceState(target, 'instructor-drop-active');
+        if (dragState.targetOccurrenceId !== target.dataset.occurrenceId) {
+          dragState.targetOccurrenceId = target.dataset.occurrenceId;
+          renderFeedback(
+            `Assign ${dragState.instructorName} to ${target.dataset.occurrenceLabel}. The assignment will be validated before saving.`,
+            'proposal',
+            false
+          );
+        }
         event.dataTransfer.dropEffect = 'copy';
       });
 
@@ -529,11 +640,13 @@
             expected_revision: expectedRevision,
             instructor_id: dragState.instructorId,
             occurrence_token: target.dataset.occurrenceToken,
+            return_anchor: target.dataset.returnAnchor,
             confirm_coverage_reduction: false,
           },
           {
             instructorName: dragState.instructorName,
             occurrenceLabel: dragState.occurrenceLabel,
+            returnAnchor: target.dataset.returnAnchor,
           }
         );
       });

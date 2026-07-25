@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import json
 from collections import Counter
 from copy import deepcopy
@@ -39,6 +40,7 @@ from .instructor_overrides import (
     reset_manual_instructor_override,
 )
 from .instructor_assignment_presentation import (
+    assignment_override_feedback,
     build_instructor_assignment_presentation,
 )
 from .schedule_blocks import SCHEDULE_LEGEND
@@ -224,6 +226,13 @@ def _instructor_override_revision(schedule):
         return 0
 
 
+def _occurrence_return_anchor(identity):
+    anchor_digest = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(',', ':')).encode()
+    ).hexdigest()[:16]
+    return f'instructor-occurrence-{anchor_digest}'
+
+
 def _assignment_page_context(
     schedule,
     assignment_result,
@@ -232,18 +241,25 @@ def _assignment_page_context(
     selected_instructor_id=None,
     confirmation=None,
     form_error=None,
+    return_anchor='',
 ):
     occurrence_choices = []
     occurrence_tokens_by_id = {}
+    occurrence_anchors_by_id = {}
+    assignments_by_occurrence_id = {}
     for assignment in assignment_result.get('assignments') or ():
         occurrence = assignment.get('occurrence') or {}
         identity = build_occurrence_identity(schedule, occurrence)
+        occurrence_id = occurrence.get('occurrence_id')
+        occurrence_anchor = _occurrence_return_anchor(identity)
         token = signing.dumps(
             identity,
             salt=INSTRUCTOR_OVERRIDE_SIGNING_SALT,
             compress=True,
         )
-        occurrence_tokens_by_id[occurrence.get('occurrence_id')] = token
+        occurrence_tokens_by_id[occurrence_id] = token
+        occurrence_anchors_by_id[occurrence_id] = occurrence_anchor
+        assignments_by_occurrence_id[occurrence_id] = assignment
         slot_labels = [
             slot.get('slot_label') or slot.get('slot_key')
             for slot in occurrence.get('slot_footprint') or ()
@@ -251,7 +267,8 @@ def _assignment_page_context(
         assigned = assignment.get('assigned_instructor')
         occurrence_choices.append({
             'token': token,
-            'occurrence_id': occurrence.get('occurrence_id'),
+            'occurrence_id': occurrence_id,
+            'anchor': occurrence_anchor,
             'label': (
                 f'{occurrence.get("group_label") or "Unlabeled group"} — '
                 f'{occurrence.get("activity_display_name") or "Unnamed activity"} — '
@@ -263,17 +280,75 @@ def _assignment_page_context(
     presentation = build_instructor_assignment_presentation(
         assignment_result,
         occurrence_tokens_by_id=occurrence_tokens_by_id,
+        occurrence_anchors_by_id=occurrence_anchors_by_id,
+    )
+    active_records = tuple(
+        assignment_result.get('active_instructor_override_intents') or ()
+    )
+    instructor_ids = {
+        record.get('instructor_id')
+        for record in active_records
+        if isinstance(record.get('instructor_id'), int)
+    }
+    instructors_by_id = Instructor.objects.filter(
+        organization=schedule.organization,
+        pk__in=instructor_ids,
+    ).in_bulk()
+    diagnostics_by_override_id = {
+        diagnostic.get('override_id'): diagnostic
+        for diagnostic in (
+            assignment_result.get('instructor_override_diagnostics') or ()
+        )
+        if diagnostic.get('override_id')
+        and diagnostic.get('code') != 'active_and_applied'
+    }
+    unpaired_diagnostics = tuple(
+        diagnostic
+        for diagnostic in (
+            assignment_result.get('instructor_override_diagnostics') or ()
+        )
+        if diagnostic.get('code') not in {
+            'no_active_override',
+            'active_and_applied',
+        }
+        and not diagnostic.get('override_id')
     )
     reset_targets = []
-    for record in (
-        assignment_result.get('active_instructor_override_intents') or ()
-    ):
+    for record in active_records:
         identity = record.get('occurrence')
         if not isinstance(identity, dict):
             continue
+        occurrence_id = identity.get('occurrence_id')
+        current_assignment = assignments_by_occurrence_id.get(occurrence_id) or {}
+        current_occurrence = current_assignment.get('occurrence') or {}
+        slots = tuple(
+            slot.get('slot_label') or slot.get('slot_key')
+            for slot in current_occurrence.get('slot_footprint') or ()
+            if slot.get('slot_label') or slot.get('slot_key')
+        )
+        instructor = instructors_by_id.get(record.get('instructor_id'))
+        diagnostic = diagnostics_by_override_id.get(record.get('override_id'))
         reset_targets.append({
             'override_id': record.get('override_id'),
             'occurrence': identity,
+            'occurrence_anchor': occurrence_anchors_by_id.get(occurrence_id),
+            'return_anchor': (
+                occurrence_anchors_by_id.get(occurrence_id) or 'staffing-summary'
+            ),
+            'activity_name': (
+                current_occurrence.get('activity_display_name')
+                or 'Previously saved activity'
+            ),
+            'group_label': (
+                current_occurrence.get('group_label')
+                or 'Previously saved group'
+            ),
+            'occupied_slots': slots,
+            'instructor_name': (
+                str(instructor) if instructor is not None
+                else 'Instructor no longer available'
+            ),
+            'diagnostic': diagnostic,
             'token': signing.dumps(
                 identity,
                 salt=INSTRUCTOR_OVERRIDE_SIGNING_SALT,
@@ -296,17 +371,50 @@ def _assignment_page_context(
         'instructor_override_diagnostics': assignment_result.get(
             'instructor_override_diagnostics'
         ) or (),
+        'unpaired_instructor_override_diagnostics': unpaired_diagnostics,
         'selected_occurrence_token': selected_occurrence_token,
         'selected_instructor_id': selected_instructor_id,
         'instructor_override_confirmation': confirmation,
         'instructor_override_form_error': form_error,
+        'instructor_override_return_anchor': (
+            return_anchor
+            if return_anchor in {
+                'staffing-summary',
+                'manual-assignments',
+                *occurrence_anchors_by_id.values(),
+            }
+            else ''
+        ),
         'instructor_override_reset_targets': reset_targets,
         'has_active_instructor_overrides': bool(reset_targets) or bool(
             assignment_result.get(
                 'has_resettable_instructor_override_intent'
             )
         ),
+        'has_applied_instructor_overrides': bool(
+            assignment_result.get('applied_instructor_overrides')
+        ),
+        'assignment_return_anchors': frozenset({
+            'staffing-summary',
+            'manual-assignments',
+            *occurrence_anchors_by_id.values(),
+        }),
     }
+
+
+def _safe_assignment_anchor(schedule, requested_anchor, assignment_result=None):
+    if not isinstance(requested_anchor, str) or not requested_anchor:
+        return ''
+    result = assignment_result or run_instructor_assignment(schedule)
+    context = _assignment_page_context(schedule, result)
+    if requested_anchor in context['assignment_return_anchors']:
+        return requested_anchor
+    return ''
+
+
+def _assignment_page_url(schedule, return_anchor=''):
+    page_url = reverse('instructor-assignment-schedule', args=[schedule.pk])
+    return f'{page_url}#{return_anchor}' if return_anchor else page_url
 
 
 @require_GET
@@ -417,6 +525,11 @@ def _parse_instructor_override_request(request, schedule):
         'instructor_id': instructor_id,
         'expected_revision': expected_revision,
         'confirm_coverage_reduction': confirm_coverage_reduction,
+        'return_anchor': (
+            payload.get('return_anchor')
+            if isinstance(payload.get('return_anchor'), str)
+            else ''
+        ),
     }
 
 
@@ -486,7 +599,7 @@ def _json_instructor_reset_response(result, status):
     }, status=status)
 
 
-def _json_instructor_override_response(result, status):
+def _json_instructor_override_response(result, status, instructor_name=None):
     diagnostic = result.get('planner_summary') or {}
     override = result.get('override') or {}
     occurrence = override.get('occurrence') or (
@@ -495,9 +608,12 @@ def _json_instructor_override_response(result, status):
     response = {
         'ok': result.get('ok', False),
         'code': result.get('code'),
-        'message': INSTRUCTOR_OVERRIDE_MESSAGES.get(
-            result.get('code'),
-            'The instructor assignment request could not be completed.',
+        'message': (
+            assignment_override_feedback(result, instructor_name)
+            or INSTRUCTOR_OVERRIDE_MESSAGES.get(
+                result.get('code'),
+                'The instructor assignment request could not be completed.',
+            )
         ),
         'new_revision': result.get('new_revision'),
         'coverage_before': override.get(
@@ -605,12 +721,39 @@ def instructor_override_set(request, pk):
     status = 200 if result.get('ok') else _instructor_override_status(
         result.get('code')
     )
+    instructor_name = None
+    if not result.get('ok'):
+        instructor = Instructor.objects.filter(
+            organization=organization,
+            pk=parsed['instructor_id'],
+        ).first()
+        instructor_name = str(instructor) if instructor is not None else None
+    requested_return_anchor = (
+        parsed['return_anchor']
+        or (
+            _occurrence_return_anchor(parsed['occurrence_identity'])
+            if not wants_json else ''
+        )
+    )
+    if isinstance(result.get('current_identity'), dict):
+        requested_return_anchor = _occurrence_return_anchor(
+            result['current_identity']
+        )
+    return_anchor = _safe_assignment_anchor(
+        schedule,
+        requested_return_anchor,
+        result.get('planner_result'),
+    )
     if wants_json:
-        return _json_instructor_override_response(result, status)
+        return _json_instructor_override_response(
+            result,
+            status,
+            instructor_name=instructor_name,
+        )
     if result.get('ok'):
         messages.success(request, INSTRUCTOR_OVERRIDE_MESSAGES['persisted'])
         return HttpResponseRedirect(
-            reverse('instructor-assignment-schedule', args=[schedule.pk])
+            _assignment_page_url(schedule, return_anchor)
         )
     if result.get('code') == 'coverage_confirmation_required':
         confirmation = deepcopy(result['planner_summary'])
@@ -623,6 +766,7 @@ def instructor_override_set(request, pk):
             selected_occurrence_token=parsed['occurrence_token'],
             selected_instructor_id=parsed['instructor_id'],
             confirmation=confirmation,
+            return_anchor=return_anchor,
         )
         return render(
             request,
@@ -631,15 +775,15 @@ def instructor_override_set(request, pk):
             status=409,
         )
 
-    messages.error(
-        request,
-        INSTRUCTOR_OVERRIDE_MESSAGES.get(
+    messages.error(request, (
+        assignment_override_feedback(result, instructor_name)
+        or INSTRUCTOR_OVERRIDE_MESSAGES.get(
             result.get('code'),
             'The manual instructor assignment was rejected.',
-        ),
-    )
+        )
+    ))
     return HttpResponseRedirect(
-        reverse('instructor-assignment-schedule', args=[schedule.pk])
+        _assignment_page_url(schedule, return_anchor)
     )
 
 
@@ -657,6 +801,11 @@ def instructor_override_reset(request, pk):
         if _parse_int_field(payload, 'schedule_id') != schedule.pk:
             raise ValueError('schedule_id')
         expected_revision = _parse_int_field(payload, 'expected_revision')
+        requested_anchor = (
+            payload.get('return_anchor')
+            if isinstance(payload.get('return_anchor'), str)
+            else ''
+        )
         token = payload.get('occurrence_token')
         if not token:
             raise ValueError('occurrence_token')
@@ -689,6 +838,11 @@ def instructor_override_reset(request, pk):
     )
     if wants_json:
         return _json_instructor_reset_response(result, status)
+    return_anchor = _safe_assignment_anchor(
+        schedule,
+        requested_anchor,
+        result.get('planner_result'),
+    )
     messages.success(
         request,
         INSTRUCTOR_OVERRIDE_MESSAGES[result['code']],
@@ -700,7 +854,7 @@ def instructor_override_reset(request, pk):
         ),
     )
     return HttpResponseRedirect(
-        reverse('instructor-assignment-schedule', args=[schedule.pk])
+        _assignment_page_url(schedule, return_anchor)
     )
 
 
@@ -718,6 +872,11 @@ def instructor_override_reset_all(request, pk):
         if _parse_int_field(payload, 'schedule_id') != schedule.pk:
             raise ValueError('schedule_id')
         expected_revision = _parse_int_field(payload, 'expected_revision')
+        requested_anchor = (
+            payload.get('return_anchor')
+            if isinstance(payload.get('return_anchor'), str)
+            else ''
+        )
     except ValueError as error:
         result = {
             'ok': False,
@@ -745,8 +904,12 @@ def instructor_override_reset_all(request, pk):
             request,
             INSTRUCTOR_OVERRIDE_MESSAGES['reset_confirmation_required'],
         )
+        return_anchor = _safe_assignment_anchor(
+            schedule,
+            requested_anchor,
+        )
         return HttpResponseRedirect(
-            reverse('instructor-assignment-schedule', args=[schedule.pk])
+            _assignment_page_url(schedule, return_anchor)
         )
 
     result = reset_all_manual_instructor_overrides(
@@ -758,6 +921,11 @@ def instructor_override_reset_all(request, pk):
     )
     if wants_json:
         return _json_instructor_reset_response(result, status)
+    return_anchor = _safe_assignment_anchor(
+        schedule,
+        requested_anchor,
+        result.get('planner_result'),
+    )
     messages.success(
         request,
         INSTRUCTOR_OVERRIDE_MESSAGES[result['code']],
@@ -769,7 +937,7 @@ def instructor_override_reset_all(request, pk):
         ),
     )
     return HttpResponseRedirect(
-        reverse('instructor-assignment-schedule', args=[schedule.pk])
+        _assignment_page_url(schedule, return_anchor)
     )
 
 

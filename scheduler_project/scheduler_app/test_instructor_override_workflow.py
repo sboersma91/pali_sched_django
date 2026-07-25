@@ -205,7 +205,9 @@ class InstructorOverrideWorkflowTests(TestCase):
 
         response = self.client.post(self.set_url, payload)
 
-        self.assertRedirects(response, self.page_url)
+        self.assertTrue(response['Location'].startswith(
+            f'{self.page_url}#instructor-occurrence-'
+        ))
         self.schedule.refresh_from_db()
         self.assertEqual(
             self.schedule.sched_data['generated_schedule'],
@@ -552,13 +554,15 @@ class InstructorOverrideWorkflowTests(TestCase):
             schedule.sched_data,
         )
 
+        return_anchor = warning.context['instructor_override_return_anchor']
         confirmed = self.client.post(set_url, {
             **payload,
             'expected_revision': confirmation['expected_revision'],
             'confirm_coverage_reduction': '1',
+            'return_anchor': return_anchor,
         })
 
-        self.assertRedirects(confirmed, page_url)
+        self.assertRedirects(confirmed, f'{page_url}#{return_anchor}')
         schedule.refresh_from_db()
         self.assertTrue(
             schedule.sched_data['manual_instructor_overrides'][0][
@@ -772,7 +776,7 @@ class InstructorOverrideWorkflowTests(TestCase):
         self.assertContains(affected_page, 'missing_instructor')
         self.assertContains(
             affected_page,
-            'the automatic plan is shown',
+            'The automatic assignment is currently shown',
         )
         self.assertContains(
             affected_page,
@@ -869,7 +873,10 @@ class InstructorOverrideWorkflowTests(TestCase):
 
         orchestration.assert_called_once()
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'Manual assignment not applied')
+        self.assertContains(
+            response,
+            'This saved manual assignment no longer applies',
+        )
         self.assertContains(
             response,
             'for="instructor-override-occurrence"',
@@ -900,6 +907,7 @@ class InstructorOverrideWorkflowTests(TestCase):
                 'code': 'persisted',
                 'new_revision': 1,
                 'override': {},
+                'planner_result': run_instructor_assignment(self.schedule),
             },
         ) as persistence, patch(
             'scheduler_app.views.run_instructor_assignment',
@@ -936,6 +944,23 @@ class InstructorOverrideWorkflowTests(TestCase):
         self.assertContains(
             response,
             f'aria-label="Drag {self.first} to set a manual activity assignment"',
+            html=False,
+        )
+        self.assertContains(
+            response,
+            f'>⠿</span> {self.first}</button>',
+            html=False,
+        )
+        self.assertContains(
+            response,
+            f'>⠿</span> {self.second}</button>',
+            html=False,
+        )
+        self.assertNotContains(response, '>Drag instructor</button>', html=False)
+        self.assertContains(
+            response,
+            '<th scope="row" class="instructor-sticky-column">',
+            count=2,
             html=False,
         )
         self.assertNotContains(response, 'data-draggable-activity', html=False)
@@ -1110,6 +1135,11 @@ class InstructorOverrideWorkflowTests(TestCase):
             html=False,
         )
         self.assertContains(response, 'window.location.reload()', html=False)
+        self.assertContains(
+            response,
+            'window.location.hash = submissionContext.returnAnchor',
+            html=False,
+        )
         self.assertNotContains(response, 'innerHTML', html=False)
 
     def test_drag_feedback_confirmation_and_submission_guards_are_accessible(self):
@@ -1118,6 +1148,27 @@ class InstructorOverrideWorkflowTests(TestCase):
         response = self.client.get(self.page_url)
 
         self.assertContains(response, 'aria-live="polite"', html=False)
+        self.assertContains(
+            response,
+            'create or change a manual assignment',
+        )
+        self.assertContains(
+            response,
+            'invalid assignments are rejected',
+        )
+        self.assertContains(
+            response,
+            'schedule reloads at that occurrence',
+        )
+        self.assertContains(
+            response,
+            '`Assign ${dragState.instructorName} to ${target.dataset.occurrenceLabel}.',
+            html=False,
+        )
+        self.assertContains(
+            response,
+            'The assignment will be validated before saving.',
+        )
         self.assertContains(
             response,
             'id="instructor-drag-confirm"',
@@ -1258,3 +1309,114 @@ class InstructorOverrideWorkflowTests(TestCase):
             ).status_code,
             404,
         )
+
+    def test_invalid_return_anchor_falls_back_without_open_redirect(self):
+        self.login()
+        payload = self.html_payload()
+        payload['return_anchor'] = 'https://example.invalid/escape'
+
+        response = self.client.post(self.set_url, payload)
+
+        self.assertRedirects(response, self.page_url)
+        self.assertNotIn('example.invalid', response['Location'])
+
+    def test_rejected_assignment_returns_to_occurrence_with_actionable_message(self):
+        InstructorScheduleAvailability.objects.create(
+            organization=self.organization,
+            instructor=self.second,
+            schedule=self.schedule,
+            slot_key='mon_pm1',
+            state=InstructorScheduleAvailability.UNAVAILABLE,
+        )
+        self.login()
+        page = self.client.get(self.page_url)
+        occurrence = page.context['instructor_override_occurrences'][0]
+
+        response = self.client.post(self.set_url, {
+            'action': 'set',
+            'schedule_id': self.schedule.pk,
+            'expected_revision': 0,
+            'occurrence_token': occurrence['token'],
+            'instructor_id': self.second.pk,
+            'return_anchor': occurrence['anchor'],
+        })
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response['Location'],
+            f'{self.page_url}#{occurrence["anchor"]}',
+        )
+        followed = self.client.get(response['Location'])
+        self.assertContains(followed, 'unavailable during Monday PM1')
+        self.assertContains(followed, 'Choose another instructor')
+
+    def test_reset_redirects_use_occurrence_and_summary_targets(self):
+        self.login()
+        set_response = self.client.post(self.set_url, self.html_payload())
+        self.assertEqual(set_response.status_code, 302)
+        page = self.client.get(self.page_url)
+        target = page.context['instructor_override_reset_targets'][0]
+
+        reset = self.client.post(self.reset_url, {
+            'schedule_id': self.schedule.pk,
+            'expected_revision': 1,
+            'occurrence_token': target['token'],
+            'return_anchor': target['return_anchor'],
+        })
+        self.assertRedirects(
+            reset,
+            f'{self.page_url}#{target["return_anchor"]}',
+        )
+
+        self.client.post(self.set_url, self.html_payload())
+        reset_all = self.client.post(self.reset_all_url, {
+            'schedule_id': self.schedule.pk,
+            'expected_revision': 3,
+            'confirm_reset_all': '1',
+            'return_anchor': 'staffing-summary',
+        })
+        self.assertRedirects(
+            reset_all,
+            f'{self.page_url}#staffing-summary',
+        )
+
+    def test_repeated_html_corrections_keep_each_occurrence_target(self):
+        other = Course.objects.create(
+            organization=self.organization,
+            course_name='Climbing',
+            abriviation='CLMB',
+            course_len=1,
+        )
+        data = deepcopy(self.schedule.sched_data)
+        data['generated_schedule']['mon_pm2'] = [other.course_name]
+        self.schedule.sched_data = data
+        self.schedule.save(update_fields=['sched_data'])
+        self.login()
+
+        for expected_revision, choice_index, instructor in (
+            (0, 0, self.second),
+            (1, 1, self.first),
+            (2, 0, self.first),
+        ):
+            page = self.client.get(self.page_url)
+            choice = page.context['instructor_override_occurrences'][choice_index]
+            response = self.client.post(self.set_url, {
+                'action': 'set',
+                'schedule_id': self.schedule.pk,
+                'expected_revision': expected_revision,
+                'occurrence_token': choice['token'],
+                'instructor_id': instructor.pk,
+                'return_anchor': choice['anchor'],
+            })
+            self.assertRedirects(
+                response,
+                f'{self.page_url}#{choice["anchor"]}',
+            )
+
+        self.schedule.refresh_from_db()
+        active = [
+            record
+            for record in self.schedule.sched_data['manual_instructor_overrides']
+            if record.get('status') == 'active'
+        ]
+        self.assertEqual(len(active), 2)

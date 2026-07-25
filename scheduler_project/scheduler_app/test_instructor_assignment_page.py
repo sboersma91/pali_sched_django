@@ -649,6 +649,23 @@ class InstructorAssignmentScheduleViewTests(AssignmentPageTestMixin, TestCase):
 
         self.assertContains(response, 'Instructor Assignment Schedule')
         self.assertContains(response, self.schedule.sched_name)
+        self.assertContains(
+            response,
+            '<th scope="col" rowspan="2" class="instructor-sticky-column">Instructor</th>',
+            html=False,
+        )
+        self.assertContains(
+            response,
+            '<th scope="row" class="instructor-sticky-column">',
+            html=False,
+        )
+        self.assertContains(
+            response,
+            '.instructor-assignment-table .instructor-sticky-column',
+            html=False,
+        )
+        self.assertContains(response, 'position: sticky', html=False)
+        self.assertContains(response, 'left: 0', html=False)
         self.assertContains(response, 'Refreshing this page recalculates assignments')
         self.assertContains(response, str(self.instructor))
         self.assertContains(response, 'Monday')
@@ -664,7 +681,7 @@ class InstructorAssignmentScheduleViewTests(AssignmentPageTestMixin, TestCase):
         self.assertContains(response, 'data-cell-state="unavailable"', html=False)
         self.assertContains(
             response,
-            'class="group-accent schedule-row-accent-1"',
+            'class="group-accent schedule-row-accent-1 instructor-assignment-target"',
             html=False,
         )
         self.assertContains(response, '--group-accent: #0d6efd', html=False)
@@ -676,6 +693,12 @@ class InstructorAssignmentScheduleViewTests(AssignmentPageTestMixin, TestCase):
             'instructor-availability', args=[self.schedule.pk]
         ))
         self.assertContains(response, 'Set a Manual Instructor Assignment')
+        self.assertContains(response, 'Current staffing')
+        summary = response.context['assignment_schedule'].staffing_summary
+        self.assertEqual(summary.total_occurrence_count, 1)
+        self.assertEqual(summary.staffed_occurrence_count, 1)
+        self.assertEqual(summary.unstaffed_occurrence_count, 0)
+        self.assertEqual(summary.manual_occurrence_count, 0)
         self.assertContains(
             response,
             'for="instructor-override-occurrence"',
@@ -686,7 +709,7 @@ class InstructorAssignmentScheduleViewTests(AssignmentPageTestMixin, TestCase):
             'for="instructor-override-instructor"',
             html=False,
         )
-        self.assertContains(response, '<select', count=2, html=False)
+        self.assertContains(response, '<select', count=3, html=False)
         self.assertContains(response, 'name="expected_revision"', html=False)
         self.assertContains(
             response,
@@ -696,6 +719,18 @@ class InstructorAssignmentScheduleViewTests(AssignmentPageTestMixin, TestCase):
         self.assertContains(
             response,
             'data-instructor-drag-source="true"',
+            html=False,
+        )
+        occurrence = response.context['instructor_override_occurrences'][0]
+        self.assertContains(
+            response,
+            f'id="{occurrence["anchor"]}"',
+            html=False,
+        )
+        self.assertContains(response, 'Change instructor')
+        self.assertContains(
+            response,
+            f'name="occurrence_token" value="{occurrence["token"]}"',
             html=False,
         )
         self.assertNotContains(response, 'data-draggable-activity', html=False)
@@ -722,6 +757,20 @@ class InstructorAssignmentScheduleViewTests(AssignmentPageTestMixin, TestCase):
         self.assertContains(response, 'No eligible instructors available.')
         self.assertContains(response, '<details', html=False)
         self.assertContains(response, 'Already assigned during an overlapping schedule slot')
+        unstaffed = response.context[
+            'assignment_schedule'
+        ].unstaffed_occurrences[0]
+        self.assertContains(
+            response,
+            f'id="{unstaffed.occurrence_anchor}"',
+            html=False,
+        )
+        self.assertContains(
+            response,
+            f'name="occurrence_token" value="{unstaffed.occurrence_token}"',
+            html=False,
+        )
+        self.assertContains(response, 'Assign instructor')
 
     def test_empty_schedule_and_explicit_zero_participants_are_safe(self):
         empty_schedule = self.create_schedule(name='Empty Assignment Week')
