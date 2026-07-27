@@ -12,6 +12,7 @@ from .settings_validation import (
     environment_boolean,
     validate_allowed_hosts,
     validate_csrf_origins,
+    parse_postgresql_database_url,
     validate_secret,
 )
 
@@ -23,14 +24,8 @@ HOSTED_VARIABLES = {
     'DJANGO_TRUST_PROXY_SSL_HEADER',
     'DJANGO_SECURE_HSTS_SECONDS',
     'DJANGO_DATA_UPLOAD_MAX_MEMORY_SIZE',
-    'DJANGO_DATABASE_ENGINE',
+    'DATABASE_URL',
     'DEMO_ENTRY_ENABLED',
-    'POSTGRES_DB',
-    'POSTGRES_HOST',
-    'POSTGRES_USER',
-    'POSTGRES_PASSWORD',
-    'POSTGRES_PORT',
-    'POSTGRES_SSLMODE',
     'DEMO_MAX_ACTIVE_SESSIONS',
     'DEMO_MAX_ACTIVE_PREPARED_SESSIONS',
     'DEMO_MAX_ACTIVE_CLEAN_SESSIONS',
@@ -53,10 +48,10 @@ VALID_HOSTED_ENVIRONMENT = {
     'DJANGO_SECRET_KEY': 'hosted-secret-' + ('x' * 60),
     'DJANGO_ALLOWED_HOSTS': 'demo.example.com',
     'DJANGO_CSRF_TRUSTED_ORIGINS': 'https://demo.example.com',
-    'POSTGRES_DB': 'flowline',
-    'POSTGRES_HOST': 'db.internal',
-    'POSTGRES_USER': 'flowline',
-    'POSTGRES_PASSWORD': 'database-password-value',
+    'DATABASE_URL': (
+        'postgresql://flowline:database-password-value'
+        '@db.example.com:5432/flowline?sslmode=require'
+    ),
 }
 
 
@@ -79,6 +74,9 @@ print(json.dumps({
     'origins': hosted.CSRF_TRUSTED_ORIGINS,
     'engine': hosted.DATABASES['default']['ENGINE'],
     'database': hosted.DATABASES['default']['NAME'],
+    'database_host': hosted.DATABASES['default']['HOST'],
+    'database_port': hosted.DATABASES['default']['PORT'],
+    'database_sslmode': hosted.DATABASES['default']['OPTIONS']['sslmode'],
     'secure_session': hosted.SESSION_COOKIE_SECURE,
     'httponly': hosted.SESSION_COOKIE_HTTPONLY,
     'samesite': hosted.SESSION_COOKIE_SAMESITE,
@@ -146,6 +144,9 @@ class HostedSettingsImportTests(SimpleTestCase):
         self.assertFalse(values['debug'])
         self.assertEqual(values['engine'], 'django.db.backends.postgresql')
         self.assertEqual(values['database'], 'flowline')
+        self.assertEqual(values['database_host'], 'db.example.com')
+        self.assertEqual(values['database_port'], 5432)
+        self.assertEqual(values['database_sslmode'], 'require')
         self.assertEqual(values['hosts'], ['demo.example.com'])
         self.assertEqual(values['origins'], ['https://demo.example.com'])
         self.assertTrue(values['secure_session'])
@@ -264,26 +265,27 @@ class HostedSettingsImportTests(SimpleTestCase):
         self.assertNotEqual(short_retention.returncode, 0)
         self.assertIn('DEMO_ATTEMPT_RETENTION_DAYS', short_retention.stderr)
 
-    def test_missing_database_fields_fail_without_leaking_password(self):
-        secret_password = VALID_HOSTED_ENVIRONMENT['POSTGRES_PASSWORD']
-        for name in (
-            'POSTGRES_DB',
-            'POSTGRES_HOST',
-            'POSTGRES_USER',
-            'POSTGRES_PASSWORD',
-        ):
-            with self.subTest(name=name):
-                result = hosted_import(remove=(name,))
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn(name, result.stderr)
-                self.assertNotIn(secret_password, result.stderr)
+    def test_missing_malformed_and_non_postgresql_urls_fail_without_secrets(self):
+        secret_password = 'do-not-leak-this-password'
+        missing = hosted_import(remove=('DATABASE_URL',))
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn('DATABASE_URL', missing.stderr)
 
-    def test_sqlite_and_unsupported_database_engines_fail(self):
-        for engine in ('django.db.backends.sqlite3', 'mysql'):
-            with self.subTest(engine=engine):
-                result = hosted_import({'DJANGO_DATABASE_ENGINE': engine})
+        invalid_urls = (
+            'not-a-url',
+            'sqlite:///tmp/db.sqlite3',
+            'mysql://user:password@db.example.com:3306/app',
+            f'postgresql://user:{secret_password}@/app',
+            f'postgresql://user:{secret_password}@db.example.com:5432/',
+            f'postgresql://user:{secret_password}@db.example.com:notaport/app',
+            f'postgresql://user:{secret_password}@db.example.com:5432/app?sslmode=disable',
+        )
+        for value in invalid_urls:
+            with self.subTest(value=value.split(':', 1)[0]):
+                result = hosted_import({'DATABASE_URL': value})
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn('DJANGO_DATABASE_ENGINE', result.stderr)
+                self.assertIn('DATABASE_URL', result.stderr)
+                self.assertNotIn(secret_password, result.stderr)
 
     def test_invalid_request_size_and_hsts_fail(self):
         for name, value in (
@@ -298,6 +300,26 @@ class HostedSettingsImportTests(SimpleTestCase):
 
 
 class HostedValidationHelperTests(SimpleTestCase):
+    def test_database_url_parser_requires_postgresql_and_forces_ssl(self):
+        parsed = parse_postgresql_database_url(
+            'postgres://demo:p%40ss@db.example.com:5432/pali_sched'
+        )
+        self.assertEqual(parsed['ENGINE'], 'django.db.backends.postgresql')
+        self.assertEqual(parsed['NAME'], 'pali_sched')
+        self.assertEqual(parsed['HOST'], 'db.example.com')
+        self.assertEqual(parsed['PASSWORD'], 'p@ss')
+        self.assertEqual(parsed['OPTIONS'], {'sslmode': 'require'})
+
+        for value in (
+            'sqlite:///tmp/local.sqlite3',
+            'postgresql://demo:secret@db.example.com:5432/app?sslmode=prefer',
+            'postgresql://demo@db.example.com:5432/app',
+        ):
+            with self.subTest(scheme=value.split(':', 1)[0]):
+                with self.assertRaises(ImproperlyConfigured) as raised:
+                    parse_postgresql_database_url(value)
+                self.assertNotIn('secret', str(raised.exception))
+
     def test_secret_validation_rejects_missing_development_prefixed_and_short(self):
         development = local_settings.SECRET_KEY
         for value in (

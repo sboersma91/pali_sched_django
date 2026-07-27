@@ -875,6 +875,19 @@ The named target remains development-only extraction input. The committed
 `working-v1` artifact is the hosted provisioning and reset source.
 ## Repository-owned prepared scenarios
 
+## Initial free validation hosting
+
+The initial tester deployment uses one Render Free web service connected by a
+manually supplied `DATABASE_URL` to External free PostgreSQL. It declares no
+Render database and no cron resource. Automatic maintenance is not running;
+operators must initially run `run_demo_maintenance --confirm` manually.
+Automated scheduling can be added after validation or revenue, and this
+temporary limitation is accepted for the small private tester cohort.
+
+Render Free sleeps when idle. Testers should expect sleep and cold-start delays.
+This is a zero-cost validation deployment, not the final production
+infrastructure.
+
 The demo entry page offers three isolated temporary paths:
 
 - `canonical-v1` is the smaller guided example.

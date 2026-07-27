@@ -16,6 +16,7 @@ from .settings_validation import (
     validate_csrf_origins,
     validate_demo_capacity_settings,
     validate_demo_maintenance_settings,
+    parse_postgresql_database_url,
     validate_secret,
 )
 
@@ -33,36 +34,10 @@ CSRF_TRUSTED_ORIGINS = validate_csrf_origins(
     ALLOWED_HOSTS,
 )
 
-database_engine = os.environ.get(
-    'DJANGO_DATABASE_ENGINE',
-    'django.db.backends.postgresql',
-).strip()
-if database_engine not in {
-    'postgresql',
-    'django.db.backends.postgresql',
-}:
-    raise ImproperlyConfigured(
-        'DJANGO_DATABASE_ENGINE must select the PostgreSQL backend.'
-    )
-
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': required_value(os.environ, 'POSTGRES_DB'),
-        'HOST': required_value(os.environ, 'POSTGRES_HOST'),
-        'USER': required_value(os.environ, 'POSTGRES_USER'),
-        'PASSWORD': required_value(os.environ, 'POSTGRES_PASSWORD'),
-        'PORT': environment_integer(
-            os.environ,
-            'POSTGRES_PORT',
-            default=5432,
-        ),
-        'CONN_MAX_AGE': 60,
-        'OPTIONS': {
-            'sslmode': os.environ.get('POSTGRES_SSLMODE', 'require').strip()
-            or 'require',
-        },
-    },
+    'default': parse_postgresql_database_url(
+        required_value(os.environ, 'DATABASE_URL')
+    ),
 }
 
 SESSION_COOKIE_SECURE = True

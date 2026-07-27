@@ -2,7 +2,7 @@
 
 from ipaddress import IPv6Address
 import re
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from django.core.exceptions import ImproperlyConfigured
 
@@ -127,6 +127,46 @@ def validate_csrf_origins(values, allowed_hosts):
                 'matching DJANGO_ALLOWED_HOSTS.'
             )
     return values
+
+
+def parse_postgresql_database_url(value):
+    """Return Django PostgreSQL settings without echoing URL credentials."""
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port or 5432
+        query = parse_qs(parsed.query, keep_blank_values=True)
+    except (AttributeError, TypeError, ValueError) as error:
+        raise ImproperlyConfigured(
+            'DATABASE_URL must be a valid PostgreSQL connection URL.'
+        ) from error
+    database_name = unquote(parsed.path[1:]) if parsed.path.startswith('/') else ''
+    if (
+        parsed.scheme not in {'postgres', 'postgresql'}
+        or not parsed.hostname
+        or parsed.username is None
+        or parsed.password is None
+        or not database_name
+        or parsed.fragment
+        or not 1 <= port <= 65535
+    ):
+        raise ImproperlyConfigured(
+            'DATABASE_URL must be a complete PostgreSQL connection URL.'
+        )
+    sslmodes = query.get('sslmode', ())
+    if len(sslmodes) > 1 or (sslmodes and sslmodes[0] != 'require'):
+        raise ImproperlyConfigured(
+            'DATABASE_URL must use PostgreSQL with SSL mode require.'
+        )
+    return {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': database_name,
+        'HOST': parsed.hostname,
+        'USER': unquote(parsed.username),
+        'PASSWORD': unquote(parsed.password),
+        'PORT': port,
+        'CONN_MAX_AGE': 60,
+        'OPTIONS': {'sslmode': 'require'},
+    }
 
 
 def validate_demo_capacity_settings(values):

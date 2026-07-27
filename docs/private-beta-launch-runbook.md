@@ -1,5 +1,33 @@
 # Private Beta Launch Runbook: Render and Cloudflare
 
+## Initial zero-cost validation deployment
+
+This temporary validation deployment supersedes the paid Render resource
+instructions elsewhere in this runbook:
+
+- One Render Free web service is declared by `render.yaml`.
+- External free PostgreSQL supplies `<external-database-url>` through the
+  manually entered secret `DATABASE_URL`; no credentials are committed.
+- No Render PostgreSQL, cron, worker, or other paid resource is created.
+- Render Free does not provide pre-deploy commands, so the web start command is:
+
+  ```bash
+  python scheduler_project/manage.py migrate --noinput && python scheduler_project/manage.py check_hosted_release && exec gunicorn --chdir scheduler_project scheduler_project.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --worker-class sync --timeout 120 --graceful-timeout 30 --access-logfile - --error-logfile -
+  ```
+
+  The `&&` chain prevents Gunicorn from starting if migrations or release
+  validation fail.
+- Automatic maintenance is not running in this free deployment. Initially run
+  `python scheduler_project/manage.py run_demo_maintenance --confirm` manually.
+  Automated scheduling can be added after validation or revenue. This accepted
+  limitation is appropriate only for the small initial private tester cohort.
+- Free services sleep when idle, so testers should expect sleep-related
+  cold-start delays that can approach a minute.
+
+This is validation infrastructure, not the final production architecture.
+Paid-plan, Render-database, and cron instructions below are retained only as a
+future reference and must not be applied during zero-cost validation.
+
 ## Purpose and safety boundary
 
 This is the operator procedure for the first private hosted Pali Scheduler beta:
@@ -708,7 +736,7 @@ backup feature is enabled.
 1. Confirm the paid PostgreSQL plan's automatic backups and record retention.
 2. Create or identify a pre-admission recovery point according to Render's
    supported backup procedure.
-3. Restore that point into a **separate** Render PostgreSQL database. Do not
+3. Restore that point into a **separate** PostgreSQL database. Do not
    replace the active database binding.
 4. Attach only an isolated verification environment or secure operator
    connection to the restored database.

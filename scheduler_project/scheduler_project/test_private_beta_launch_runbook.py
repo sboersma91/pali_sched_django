@@ -23,10 +23,6 @@ class PrivateBetaLaunchRunbookTests(SimpleTestCase):
             service for service in cls.blueprint['services']
             if service['type'] == 'web'
         )
-        cls.cron = next(
-            service for service in cls.blueprint['services']
-            if service['type'] == 'cron'
-        )
 
     def test_runbook_exists_is_linked_and_contains_every_phase(self):
         self.assertTrue(RUNBOOK_PATH.is_file())
@@ -88,7 +84,6 @@ class PrivateBetaLaunchRunbookTests(SimpleTestCase):
     def test_manifest_commands_and_order_match_runbook(self):
         for command in (
             self.web['buildCommand'],
-            self.web['preDeployCommand'],
             self.web['startCommand'],
         ):
             normalized = ' '.join(command.split())
@@ -97,36 +92,23 @@ class PrivateBetaLaunchRunbookTests(SimpleTestCase):
             )
             self.assertIn(normalized, normalized_runbook)
 
-        pre_deploy = self.web['preDeployCommand']
+        start = self.web['startCommand']
         self.assertLess(
-            pre_deploy.index('migrate --noinput'),
-            pre_deploy.index('check_hosted_release'),
-        )
-        phase_four = self.text.split(
-            '## Phase 4',
-            1,
-        )[1].split('## Phase 5', 1)[0]
-        self.assertLess(
-            phase_four.index('migrate --noinput'),
-            phase_four.index('check_hosted_release'),
+            start.index('migrate --noinput'),
+            start.index('check_hosted_release'),
         )
 
-    def test_cron_and_entry_gate_match_blueprint(self):
-        self.assertEqual(self.cron['schedule'], '*/15 * * * *')
-        cron_command = ' '.join(self.cron['startCommand'].split())
-        normalized_runbook = ' '.join(self.text.split())
-        self.assertIn(cron_command, normalized_runbook)
-        self.assertIn(self.cron['schedule'], self.text)
-
-        for service in (self.web, self.cron):
-            environment = {
-                item['key']: item for item in service['envVars']
-                if 'key' in item
-            }
-            self.assertEqual(
-                environment['DEMO_ENTRY_ENABLED']['value'],
-                'false',
-            )
+    def test_free_web_manual_maintenance_and_entry_gate_are_documented(self):
+        self.assertEqual(len(self.blueprint['services']), 1)
+        environment = {
+            item['key']: item for item in self.web['envVars']
+            if 'key' in item
+        }
+        self.assertEqual(environment['DEMO_ENTRY_ENABLED']['value'], 'false')
+        self.assertIn('Render Free web service', self.text)
+        self.assertIn('External free PostgreSQL', self.text)
+        self.assertIn('Automatic maintenance is not running', self.text)
+        self.assertIn('cold-start', self.text)
 
         enablement = self.text.split(
             '## Phase 14',
@@ -173,7 +155,7 @@ class PrivateBetaLaunchRunbookTests(SimpleTestCase):
         for placeholder in (
             '<beta-hostname>',
             '<canonical-organization-name>',
-            '<render-internal-postgres-host>',
+            '<external-database-url>',
             '<approved-tester-email>',
         ):
             self.assertIn(placeholder, self.text)
@@ -202,7 +184,7 @@ class PrivateBetaLaunchRunbookTests(SimpleTestCase):
         )
         self.assertNotIn('privacy notice absent', self.text.lower())
         self.assertIn(
-            'Restore that point into a **separate** Render PostgreSQL database',
+            'Restore that point into a **separate** PostgreSQL database',
             self.text,
         )
         final_gate = self.text.split('## Phase 19', 1)[1]
