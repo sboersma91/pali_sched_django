@@ -141,6 +141,11 @@ See [Instructor Assignment Architecture](docs/instructor-assignment-architecture
 for the current pipeline, availability model and evaluator, operator workflow,
 overlap constraint, limitations, and extension guidance.
 
+## Canonical demo environment
+
+- [Demo environment operator runbook](docs/demo-environment-runbook.md)
+- [Presenter walkthrough](docs/demo-presenter-walkthrough.md)
+
 ## Compatibility and known limitations
 
 - Both legacy function-based CRUD routes and newer class-based operational routes remain in use.

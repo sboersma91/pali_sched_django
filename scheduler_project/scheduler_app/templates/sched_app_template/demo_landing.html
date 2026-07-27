@@ -1,0 +1,101 @@
+{% extends 'sched_app_template/base.html' %}
+{% block title %}Start a Temporary Demo{% endblock title %}
+{% block content %}
+  <section class="py-5">
+    <div class="row justify-content-center">
+      <div class="col-lg-8">
+        <h1 class="display-6 fw-bold mb-3">Start a temporary isolated demo</h1>
+        <p class="lead">Choose a ready-to-explore example or build from an empty workspace.</p>
+        <p>Both modes are temporary, isolated, and may expire.</p>
+        {% if account_is_temporary_demo %}
+          <p class="alert alert-secondary">
+            Selecting another demo option replaces the contents of your current
+            temporary demo while keeping the same temporary account.
+          </p>
+        {% endif %}
+        <aside class="alert alert-info" aria-labelledby="demo-data-notice-heading">
+          <h2 id="demo-data-notice-heading" class="h5 alert-heading">
+            Temporary demo data
+          </h2>
+          <p class="mb-0">
+            This is a temporary demo workspace for testing and evaluation. Do
+            not enter real names, contact details, confidential school
+            information, participant data, or other sensitive information.
+            Demo data expires and is removed through scheduled maintenance.
+          </p>
+        </aside>
+        {% if expired %}
+          <div class="alert alert-info" role="alert">
+            Your temporary demo session expired. Start a new demo to continue.
+          </div>
+        {% elif unavailable %}
+          <div class="alert alert-warning" role="alert">
+            This temporary demo session is no longer available.
+          </div>
+        {% endif %}
+        {% if entry_error %}
+          <div class="alert alert-warning" role="alert">{{ entry_error }}</div>
+        {% endif %}
+        {% if not demo_entry_enabled %}
+          <div class="alert alert-warning" role="status">
+            New demo sessions are temporarily unavailable. Existing active
+            sessions may continue.
+          </div>
+        {% else %}
+          <div class="row g-4 mt-2">
+          <div class="col-md-4">
+            <h2 class="h4">Guided prepared demo</h2>
+            <p>
+              Start with locations, activities, cohorts, instructors,
+              qualifications, a generated schedule, and automatic instructor
+              assignments ready to explore.
+            </p>
+            <form method="post" action="{% url 'demo-start-prepared' %}">
+              {% csrf_token %}
+              <input type="hidden" name="scenario_version" value="canonical-v1">
+              <button type="submit" class="btn btn-primary">Start guided demo</button>
+            </form>
+          </div>
+          <div class="col-md-4">
+            <h2 class="h4">Realistic working demo</h2>
+            <p>
+              Explore a larger working dataset with seven schedules. Some
+              intentionally demonstrate controlled infeasibility diagnostics.
+            </p>
+            <form method="post" action="{% url 'demo-start-prepared' %}">
+              {% csrf_token %}
+              <input type="hidden" name="scenario_version" value="working-v1">
+              <button type="submit" class="btn btn-primary">Start working demo</button>
+            </form>
+          </div>
+          <div class="col-md-4">
+            <h2 class="h4">Build from a clean workspace</h2>
+            <p>
+              Clean mode starts empty, with no locations, activities, cohorts,
+              instructors, or schedules. Build through the normal workflows.
+            </p>
+            <form method="post" action="{% url 'demo-start-clean' %}">
+              {% csrf_token %}
+              <button type="submit" class="btn btn-outline-primary">Start clean demo</button>
+            </form>
+          </div>
+          </div>
+        {% endif %}
+      </div>
+    </div>
+  </section>
+  <script>
+    (() => {
+      const isBackForwardNavigation = () => {
+        const entries = performance.getEntriesByType?.('navigation') || [];
+        return entries.length > 0 && entries[0].type === 'back_forward';
+      };
+
+      window.addEventListener('pageshow', (event) => {
+        if (event.persisted || isBackForwardNavigation()) {
+          window.location.reload();
+        }
+      });
+    })();
+  </script>
+{% endblock %}

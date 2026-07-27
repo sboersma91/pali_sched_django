@@ -242,7 +242,9 @@ class InstructorOverrideWorkflowTests(TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertLessEqual(len(queries), 25)
+        # Request-time temporary-session enforcement adds one joined ownership
+        # query for authenticated users before the view executes.
+        self.assertLessEqual(len(queries), 26)
         body = response.json()
         self.assertTrue(body['ok'])
         self.assertEqual(body['code'], 'persisted')

@@ -35,6 +35,27 @@ from .views import (
 )
 
 urlpatterns = [
+    path("demo/", views.demo_landing, name="demo-landing"),
+    path(
+        "demo/start/clean/",
+        views.start_clean_demo,
+        name="demo-start-clean",
+    ),
+    path(
+        "demo/start/prepared/",
+        views.start_prepared_demo,
+        name="demo-start-prepared",
+    ),
+    path(
+        "demo/reset/prepared/",
+        login_required(views.reset_prepared_demo),
+        name="demo-reset-prepared",
+    ),
+    path(
+        "demo/exit/",
+        login_required(views.exit_demo),
+        name="demo-exit",
+    ),
     path("", views.home, name="home"),
     path("add_course", login_required(views.add_course), name="add-course"),
     path("add_school", login_required(views.add_school), name="add-school"),

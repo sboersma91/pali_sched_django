@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/3.2/ref/settings/
 """
 
+import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -47,6 +48,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'scheduler_app.middleware.TemporaryDemoSessionMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -64,6 +66,7 @@ TEMPLATES = [
                 'django.template.context_processors.request',
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
+                'members.context_processors.account_indicator',
             ],
         },
     },
@@ -132,3 +135,36 @@ MEDIA_ROOT = BASE_DIR / 'media_root'
 LOGIN_URL = 'login'
 LOGIN_REDIRECT_URL = 'home-paid'
 LOGOUT_REDIRECT_URL = 'login'
+
+# Local development permits anonymous demo entry. Hosted settings override this
+# with a fail-closed environment-controlled value.
+DEMO_ENTRY_ENABLED = True
+DEMO_MAX_ACTIVE_SESSIONS = 1000
+DEMO_MAX_ACTIVE_PREPARED_SESSIONS = 500
+DEMO_MAX_ACTIVE_CLEAN_SESSIONS = 500
+DEMO_GLOBAL_START_LIMIT = 10000
+DEMO_GLOBAL_START_WINDOW_SECONDS = 3600
+DEMO_CLIENT_START_LIMIT = 10000
+DEMO_CLIENT_START_WINDOW_SECONDS = 900
+DEMO_MAX_CONCURRENT_PREPARED_OPERATIONS = 1
+DEMO_PREPARED_RESET_LIMIT = 10000
+DEMO_PREPARED_RESET_WINDOW_SECONDS = 3600
+DEMO_CAPACITY_RESERVATION_SECONDS = 600
+DEMO_PREPARED_OPERATION_LEASE_SECONDS = 600
+DEMO_ATTEMPT_RETENTION_DAYS = 7
+DEMO_MAINTENANCE_LEASE_SECONDS = 900
+DEMO_MAINTENANCE_CLEANUP_LIMIT = 25
+DEMO_MAINTENANCE_ATTEMPT_LIMIT = 500
+DEMO_MAINTENANCE_AUXILIARY_LIMIT = 100
+
+# Demo scaffolding is deliberately disabled unless both settings are supplied.
+# The setting-based ownership check is only a temporary safety boundary for the
+# read-only inspection command; it is not sufficient authorization for writes.
+DEMO_SCAFFOLDING_ENABLED = (
+    os.environ.get('DEMO_SCAFFOLDING_ENABLED', '').strip().lower()
+    in {'1', 'true', 'yes', 'on'}
+)
+DEMO_ORGANIZATION_IDENTIFIER = os.environ.get(
+    'DEMO_ORGANIZATION_IDENTIFIER',
+    '',
+).strip()

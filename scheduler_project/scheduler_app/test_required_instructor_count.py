@@ -35,14 +35,20 @@ def stored_schedule(activity_name, *, two_slots=False):
 
 
 class RequiredInstructorCountMigrationTests(TransactionTestCase):
-    migrate_from = ('scheduler_app', '0033_instructorscheduleparticipation')
-    migrate_to = ('scheduler_app', '0034_course_required_instructor_count')
+    migrate_from = [
+        ('members', '0002_organization_purpose_demosession'),
+        ('scheduler_app', '0033_instructorscheduleparticipation'),
+    ]
+    migrate_to = [
+        ('members', '0002_organization_purpose_demosession'),
+        ('scheduler_app', '0034_course_required_instructor_count'),
+    ]
 
     def setUp(self):
         super().setUp()
         executor = MigrationExecutor(connection)
-        executor.migrate([self.migrate_from])
-        old_apps = executor.loader.project_state([self.migrate_from]).apps
+        executor.migrate(self.migrate_from)
+        old_apps = executor.loader.project_state(self.migrate_from).apps
         OrganizationModel = old_apps.get_model('members', 'Organization')
         CourseModel = old_apps.get_model('scheduler_app', 'Course')
         organization = OrganizationModel.objects.create(name='Migration Organization')
@@ -54,8 +60,8 @@ class RequiredInstructorCountMigrationTests(TransactionTestCase):
         ).pk
 
         executor = MigrationExecutor(connection)
-        executor.migrate([self.migrate_to])
-        self.apps = executor.loader.project_state([self.migrate_to]).apps
+        executor.migrate(self.migrate_to)
+        self.apps = executor.loader.project_state(self.migrate_to).apps
 
     def tearDown(self):
         executor = MigrationExecutor(connection)

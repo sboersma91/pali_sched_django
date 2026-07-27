@@ -1,0 +1,43 @@
+<li class="nav-item dropdown">
+  <button
+    class="nav-link btn btn-link dropdown-toggle text-start"
+    id="accountMenu"
+    type="button"
+    data-bs-toggle="dropdown"
+    aria-expanded="false"
+  >
+    Account
+  </button>
+  <div class="dropdown-menu dropdown-menu-end p-3" aria-labelledby="accountMenu" style="min-width: 18rem;">
+    {% if user.is_authenticated %}
+      <p class="mb-1"><strong>Account:</strong> {{ user.get_username }}</p>
+      {% if account_organization %}
+        <p class="mb-1"><strong>Organization:</strong> {{ account_organization.name }}</p>
+        <p class="small text-muted mb-3">{{ account_organization_context }}</p>
+      {% else %}
+        <p class="mb-3 text-muted">No active organization</p>
+      {% endif %}
+
+      {% if account_is_temporary_demo %}
+        <form action="{% url 'demo-exit' %}" method="post">
+          {% csrf_token %}
+          <div class="form-check mb-2">
+            <input class="form-check-input" type="checkbox" name="confirm_exit" value="yes" id="account-confirm-demo-exit" required>
+            <label class="form-check-label small" for="account-confirm-demo-exit">
+              I’m ready to end this temporary demo.
+            </label>
+          </div>
+          <button type="submit" class="btn btn-outline-danger btn-sm">Exit demo</button>
+        </form>
+      {% else %}
+        <form action="{% url 'logout' %}" method="post">
+          {% csrf_token %}
+          <button type="submit" class="btn btn-outline-secondary btn-sm">Logout</button>
+        </form>
+      {% endif %}
+    {% else %}
+      <p class="mb-2 text-muted">Not signed in</p>
+      <a class="btn btn-outline-primary btn-sm" href="{% url 'login' %}">Login</a>
+    {% endif %}
+  </div>
+</li>

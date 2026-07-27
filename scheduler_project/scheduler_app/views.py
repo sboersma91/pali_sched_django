@@ -6,10 +6,11 @@ from copy import deepcopy
 from urllib.parse import urlencode
 
 from django.contrib import messages
+from django.contrib.auth import get_user_model, logout
 from django.core import signing
 from django.core.exceptions import ValidationError
 from django.shortcuts import get_object_or_404, render
-from members.models import get_user_organization
+from members.models import DemoSession, OrganizationMembership, get_user_organization
 from .models import Instructor, Locations, Course, Schools, TheSched
 from .forms import (
     CourseForm,
@@ -18,7 +19,13 @@ from .forms import (
     SchedForm,
     SchoolsForm,
 )
-from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
+from django.http import (
+    HttpResponse,
+    HttpResponseBadRequest,
+    HttpResponseForbidden,
+    HttpResponseRedirect,
+    JsonResponse,
+)
 from django.urls import reverse, reverse_lazy
 from django.utils.text import slugify
 from django.views.decorators.http import require_GET, require_POST
@@ -65,9 +72,171 @@ from .schedule_operations import (
     normalize_sched_data_structure,
     validate_schedule_blocks,
 )
+from .demo_entry import demo_landing, start_clean_demo, start_prepared_demo
+from .demo_scaffolding import DEMO_SCENARIO, PREPARED_DEMO_SCENARIO_VERSION
+from .prepared_scenarios import get_prepared_scenario
+from .demo_session_access import (
+    ACCESS_NOT_TEMPORARY,
+    ACCESS_VALID,
+    validate_temporary_demo_access,
+)
+from .demo_session_exit import (
+    TemporaryDemoExitUnavailable,
+    exit_temporary_demo_session,
+)
+from .prepared_demo_reset import (
+    PreparedDemoResetError,
+    reset_prepared_demo_session,
+)
+from .demo_capacity import (
+    DemoAdmissionError,
+    acquire_prepared_reset_operation,
+    release_prepared_operation,
+)
 
 def home(request):
     return render(request, 'sched_app_template/home.html', {})
+
+
+def _prepared_reset_access(user):
+    if user is None or not getattr(user, 'is_authenticated', False):
+        return None
+    access = validate_temporary_demo_access(user)
+    if access.category == ACCESS_VALID:
+        try:
+            scenario = get_prepared_scenario(access.demo_session.scenario_version)
+        except ValidationError:
+            return None
+        schedule_name = (
+            scenario['schedule']['name']
+            if access.demo_session.scenario_version == PREPARED_DEMO_SCENARIO_VERSION
+            else scenario['schedules'][0][0]
+        )
+    else:
+        schedule_name = None
+    if (
+        access.category != ACCESS_VALID
+        or access.demo_session.mode != access.demo_session.Mode.PREPARED
+        or OrganizationMembership.objects.filter(user=user).count() != 1
+        or access.organization.memberships.count() != 1
+        or DemoSession.objects.filter(user=user).count() != 1
+        or DemoSession.objects.filter(organization=access.organization).count() != 1
+        or TheSched.objects.filter(
+            organization=access.organization,
+            sched_name=schedule_name,
+        ).count() != 1
+    ):
+        return None
+    return access
+
+
+@require_POST
+def reset_prepared_demo(request):
+    """Reset only the authenticated visitor's verified prepared workspace."""
+    access = _prepared_reset_access(request.user)
+    if access is None:
+        return HttpResponseForbidden('Prepared demo reset is not available.')
+    if request.POST.get('confirm_reset') != 'yes':
+        return HttpResponseBadRequest(
+            'Confirm that you want to remove your demo changes before resetting.'
+        )
+
+    try:
+        operation = acquire_prepared_reset_operation(access.demo_session)
+    except DemoAdmissionError as error:
+        response = HttpResponse(error.visitor_message, status=error.status_code)
+        if error.retry_after:
+            response['Retry-After'] = str(error.retry_after)
+        return response
+
+    try:
+        try:
+            result = reset_prepared_demo_session(
+                demo_session=access.demo_session,
+            )
+        finally:
+            release_prepared_operation(operation.lease_token)
+    except PreparedDemoResetError:
+        persisted_access = validate_temporary_demo_access(request.user)
+        if persisted_access.category != ACCESS_VALID:
+            logout(request)
+        return HttpResponse(
+            'The prepared demo could not be reset safely. Please try again.',
+            status=503,
+        )
+
+    scenario = get_prepared_scenario(result.demo_session.scenario_version)
+    expected_schedule_name = (
+        scenario['schedule']['name']
+        if result.demo_session.scenario_version == PREPARED_DEMO_SCENARIO_VERSION
+        else scenario['schedules'][0][0]
+    )
+    returned_ownership_matches = (
+        result.user.pk == request.user.pk
+        and result.demo_session.pk == access.demo_session.pk
+        and result.organization.pk == access.organization.pk
+        and result.membership.pk == access.membership.pk
+        and result.schedule.organization_id == access.organization.pk
+        and result.schedule.sched_name == expected_schedule_name
+    )
+    final_access = validate_temporary_demo_access(request.user)
+    persisted_ownership_matches = (
+        final_access.category == ACCESS_VALID
+        and final_access.demo_session.pk == result.demo_session.pk
+        and final_access.membership.pk == result.membership.pk
+        and final_access.organization.pk == result.organization.pk
+    )
+    if not returned_ownership_matches or not persisted_ownership_matches:
+        if final_access.category != ACCESS_VALID:
+            logout(request)
+        return HttpResponse(
+            'The prepared demo reset could not be verified safely.',
+            status=503,
+        )
+
+    messages.success(
+        request,
+        (
+            'Your prepared demo was already at its starting state.'
+            if result.already_canonical
+            else 'Your prepared demo has been restored to its starting state.'
+        ),
+    )
+    return HttpResponseRedirect(reverse('sched-detail', args=[result.schedule.pk]))
+
+
+@require_POST
+def exit_demo(request):
+    """End only the authenticated browser's persisted temporary demo."""
+    if request.POST.get('confirm_exit') != 'yes':
+        return HttpResponseBadRequest(
+            'Confirm that you are ready to end this temporary demo.'
+        )
+
+    if not get_user_model().objects.filter(pk=request.user.pk).exists():
+        logout(request)
+        messages.success(
+            request,
+            'Your temporary demo has ended. Its data will be removed shortly.',
+        )
+        return HttpResponseRedirect(reverse('demo-landing'))
+
+    access = validate_temporary_demo_access(request.user)
+    if access.category == ACCESS_NOT_TEMPORARY:
+        return HttpResponseForbidden('Demo exit is not available for this account.')
+
+    if access.demo_session is not None:
+        try:
+            exit_temporary_demo_session(demo_session=access.demo_session)
+        except TemporaryDemoExitUnavailable:
+            pass
+
+    logout(request)
+    messages.success(
+        request,
+        'Your temporary demo has ended. Its data will be removed shortly.',
+    )
+    return HttpResponseRedirect(reverse('demo-landing'))
 '''
 Since there is a unique field, there will need to be some sort of validation function made that says w/e place exists -- as of now it returns ValueError.
 '''
@@ -1431,6 +1600,25 @@ class SchedDetail(OrganizationScopedMixin, DetailView):
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
+        temporary_access = _prepared_reset_access(
+            getattr(self.request, 'user', None)
+        )
+        expected_schedule_name = None
+        if temporary_access is not None:
+            scenario = get_prepared_scenario(
+                temporary_access.demo_session.scenario_version
+            )
+            expected_schedule_name = (
+                scenario['schedule']['name']
+                if temporary_access.demo_session.scenario_version
+                == PREPARED_DEMO_SCENARIO_VERSION
+                else scenario['schedules'][0][0]
+            )
+        context['show_prepared_demo_reset'] = (
+            temporary_access is not None
+            and temporary_access.organization.pk == self.object.organization_id
+            and self.object.sched_name == expected_schedule_name
+        )
         stored_generation = self.object.get_stored_generation_result()
         generation_diagnostics = stored_generation['generation_diagnostics']
         generation_runtime_diagnostics = stored_generation['generation_runtime_diagnostics']

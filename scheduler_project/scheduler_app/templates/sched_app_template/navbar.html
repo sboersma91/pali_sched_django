@@ -10,17 +10,8 @@
           <li class="nav-item">
             <a class="nav-link" href="{% url 'home-paid' %}">Open Dashboard</a>
           </li>
-          <li class="nav-item">
-            <form action="{% url 'logout' %}" method="post">
-              {% csrf_token %}
-              <button type="submit" class="nav-link btn btn-link">Log Out</button>
-            </form>
-          </li>
-        {% else %}
-          <li class="nav-item">
-            <a class="nav-link" href="{% url 'login' %}">Log In</a>
-          </li>
         {% endif %}
+        {% include 'sched_app_template/_account_indicator.html' %}
       </ul>
     </div>
   </div>

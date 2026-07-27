@@ -2919,7 +2919,8 @@ class PublicShellPresentationTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, f'<a class="navbar-brand" href="{reverse("home")}">FlowLine</a>', html=True)
-        self.assertContains(response, f'<a class="nav-link" href="{reverse("login")}">Log In</a>', html=True)
+        self.assertContains(response, "Not signed in")
+        self.assertContains(response, f'href="{reverse("login")}"', html=False)
         self.assertNotContains(response, "Create Account")
         for removed_content in ("Plans", "Contact", "Payed", "Search Venues"):
             with self.subTest(content=removed_content):
@@ -2935,8 +2936,9 @@ class PublicShellPresentationTests(TestCase):
 
         self.assertContains(response, f'<a class="nav-link" href="{reverse("home-paid")}">Open Dashboard</a>', html=True)
         self.assertContains(response, f'<form action="{reverse("logout")}" method="post">', html=False)
-        self.assertContains(response, 'type="submit" class="nav-link btn btn-link">Log Out</button>', html=False)
-        self.assertNotContains(response, f'<a class="nav-link" href="{reverse("login")}">Log In</a>', html=True)
+        self.assertContains(response, '<strong>Account:</strong> operator', html=False)
+        self.assertContains(response, '>Logout</button>', html=False)
+        self.assertNotContains(response, "Not signed in")
         self.assertNotContains(response, "Create Account")
 
     def test_public_base_renders_default_and_page_specific_titles(self):
@@ -3433,8 +3435,9 @@ class OperationalNavigationTests(TestCase):
         response = self.client.get(reverse("home-paid"))
 
         self.assertContains(response, f'<form action="{reverse("logout")}" method="post">', html=False)
-        self.assertContains(response, 'type="submit" class="nav-link btn btn-link">Log Out</button>', html=False)
-        self.assertNotContains(response, "Log In")
+        self.assertContains(response, '<strong>Account:</strong> operator', html=False)
+        self.assertContains(response, '>Logout</button>', html=False)
+        self.assertNotContains(response, "Not signed in")
 
 
 @override_settings(ALLOWED_HOSTS=["localhost", "testserver"])

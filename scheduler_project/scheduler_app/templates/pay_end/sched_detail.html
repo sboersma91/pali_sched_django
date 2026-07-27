@@ -25,6 +25,36 @@
     </div>
   </div>
 
+  {% if show_prepared_demo_reset %}
+    <section class="card border-warning mb-4" aria-labelledby="prepared-demo-reset-heading">
+      <div class="card-body">
+        <h2 id="prepared-demo-reset-heading" class="h4">Reset prepared demo</h2>
+        <p>
+          This removes changes made in this temporary demo and restores the
+          original prepared example. Your temporary login and expiration stay
+          the same.
+        </p>
+        <form method="post" action="{% url 'demo-reset-prepared' %}">
+          {% csrf_token %}
+          <div class="form-check mb-3">
+            <input
+              class="form-check-input"
+              id="confirm-prepared-demo-reset"
+              name="confirm_reset"
+              type="checkbox"
+              value="yes"
+              required
+            >
+            <label class="form-check-label" for="confirm-prepared-demo-reset">
+              I understand my demo changes will be removed.
+            </label>
+          </div>
+          <button type="submit" class="btn btn-warning">Restore prepared example</button>
+        </form>
+      </div>
+    </section>
+  {% endif %}
+
   {% if not has_generated_schedule %}
     <section class="mb-4" aria-labelledby="empty-schedule-heading">
       <div class="alert alert-info" role="status">

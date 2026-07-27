@@ -17,7 +17,11 @@ from django.contrib import admin
 from django.contrib.auth import views as auth_views
 from django.urls import path, include
 
+from .health import health_live, health_ready
+
 urlpatterns = [
+    path('health/live/', health_live, name='health-live'),
+    path('health/ready/', health_ready, name='health-ready'),
     path('admin/', admin.site.urls),
     path(
         'login/',
