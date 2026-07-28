@@ -5,6 +5,51 @@ from django.db import migrations, models
 import django.db.models.deletion
 
 
+WEEKDAY_CHOICES = [
+    ('Mon', 'Monday'),
+    ('Tues', 'Tuesday'),
+    ('Wed', 'Wednesday'),
+    ('Thurs', 'Thurday'),
+    ('Fri', 'Friday'),
+]
+
+
+def convert_trip_date_to_boolean(apps, schema_editor, field_name):
+    """
+    Preserve the only conversion available from the mistaken timestamp fields.
+
+    PostgreSQL has no timestamp-to-boolean cast. Both columns were non-null in
+    0001, so their historical presence maps to True (and a defensive null maps
+    to False). SQLite continues to use Django's schema editor for compatibility
+    with existing development workflows.
+    """
+    Schools = apps.get_model('scheduler_app', 'Schools')
+
+    if schema_editor.connection.vendor == 'postgresql':
+        table_name = schema_editor.quote_name(Schools._meta.db_table)
+        column_name = schema_editor.quote_name(field_name)
+        schema_editor.execute(
+            f'ALTER TABLE {table_name} '
+            f'ALTER COLUMN {column_name} TYPE boolean '
+            f'USING ({column_name} IS NOT NULL)'
+        )
+        return
+
+    old_field = Schools._meta.get_field(field_name)
+    new_field = models.BooleanField(choices=WEEKDAY_CHOICES)
+    new_field.set_attributes_from_name(field_name)
+    new_field.model = Schools
+    schema_editor.alter_field(Schools, old_field, new_field)
+
+
+def convert_arrive_to_boolean(apps, schema_editor):
+    convert_trip_date_to_boolean(apps, schema_editor, 'arrive')
+
+
+def convert_depart_to_boolean(apps, schema_editor):
+    convert_trip_date_to_boolean(apps, schema_editor, 'depart')
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -59,15 +104,35 @@ class Migration(migrations.Migration):
             name='loc_name',
             field=models.CharField(max_length=100, unique=True),
         ),
-        migrations.AlterField(
-            model_name='schools',
-            name='arrive',
-            field=models.BooleanField(choices=[('Mon', 'Monday'), ('Tues', 'Tuesday'), ('Wed', 'Wednesday'), ('Thurs', 'Thurday'), ('Fri', 'Friday')]),
+        migrations.SeparateDatabaseAndState(
+            database_operations=[
+                migrations.RunPython(
+                    convert_arrive_to_boolean,
+                    reverse_code=migrations.RunPython.noop,
+                ),
+            ],
+            state_operations=[
+                migrations.AlterField(
+                    model_name='schools',
+                    name='arrive',
+                    field=models.BooleanField(choices=WEEKDAY_CHOICES),
+                ),
+            ],
         ),
-        migrations.AlterField(
-            model_name='schools',
-            name='depart',
-            field=models.BooleanField(choices=[('Mon', 'Monday'), ('Tues', 'Tuesday'), ('Wed', 'Wednesday'), ('Thurs', 'Thurday'), ('Fri', 'Friday')]),
+        migrations.SeparateDatabaseAndState(
+            database_operations=[
+                migrations.RunPython(
+                    convert_depart_to_boolean,
+                    reverse_code=migrations.RunPython.noop,
+                ),
+            ],
+            state_operations=[
+                migrations.AlterField(
+                    model_name='schools',
+                    name='depart',
+                    field=models.BooleanField(choices=WEEKDAY_CHOICES),
+                ),
+            ],
         ),
         migrations.AlterField(
             model_name='schools',
