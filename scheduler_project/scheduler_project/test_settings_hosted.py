@@ -125,14 +125,73 @@ print(json.dumps({
     )
 
 
+def local_import(environment_updates=None, *, remove=()):
+    environment = os.environ.copy()
+    environment.update(environment_updates or {})
+    for name in remove:
+        environment.pop(name, None)
+    script = """
+import json
+from scheduler_project import settings
+print(json.dumps({
+    'debug': settings.DEBUG,
+    'hosts': settings.ALLOWED_HOSTS,
+    'secret': settings.SECRET_KEY,
+    'fallback': settings.UNSAFE_DEVELOPMENT_SECRET_KEY,
+}))
+"""
+    return subprocess.run(
+        [sys.executable, '-c', script],
+        cwd=Path(__file__).resolve().parents[1],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 class LocalSettingsTests(SimpleTestCase):
     def test_local_settings_preserve_development_defaults(self):
         self.assertTrue(local_settings.DEBUG)
+        self.assertEqual(local_settings.ALLOWED_HOSTS, [])
         self.assertEqual(
             local_settings.DATABASES['default']['ENGINE'],
             'django.db.backends.sqlite3',
         )
         self.assertTrue(local_settings.DEMO_ENTRY_ENABLED)
+
+    def test_local_secret_uses_optional_environment_or_unsafe_fallback(self):
+        without_environment = local_import(remove=('DJANGO_SECRET_KEY',))
+        self.assertEqual(
+            without_environment.returncode,
+            0,
+            without_environment.stderr,
+        )
+        fallback_values = json.loads(without_environment.stdout)
+        self.assertTrue(fallback_values['debug'])
+        self.assertEqual(fallback_values['hosts'], [])
+        self.assertEqual(
+            fallback_values['secret'],
+            fallback_values['fallback'],
+        )
+        self.assertIn('unsafe-development', fallback_values['fallback'])
+        self.assertIn('not-for-hosting', fallback_values['fallback'])
+
+        local_override = 'local-environment-secret-value'
+        with_environment = local_import({
+            'DJANGO_SECRET_KEY': local_override,
+        })
+        self.assertEqual(
+            with_environment.returncode,
+            0,
+            with_environment.stderr,
+        )
+        override_values = json.loads(with_environment.stdout)
+        self.assertEqual(override_values['secret'], local_override)
+        self.assertNotEqual(
+            override_values['secret'],
+            override_values['fallback'],
+        )
 
 
 class HostedSettingsImportTests(SimpleTestCase):
@@ -142,6 +201,14 @@ class HostedSettingsImportTests(SimpleTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         values = json.loads(result.stdout)
         self.assertFalse(values['debug'])
+        self.assertEqual(
+            values['secret'],
+            VALID_HOSTED_ENVIRONMENT['DJANGO_SECRET_KEY'],
+        )
+        self.assertNotEqual(
+            values['secret'],
+            local_settings.UNSAFE_DEVELOPMENT_SECRET_KEY,
+        )
         self.assertEqual(values['engine'], 'django.db.backends.postgresql')
         self.assertEqual(values['database'], 'flowline')
         self.assertEqual(values['database_host'], 'db.example.com')

@@ -6,7 +6,9 @@ import os
 from django.core.exceptions import ImproperlyConfigured
 
 from .settings import *  # noqa: F403
-from .settings import SECRET_KEY as DEVELOPMENT_SECRET_KEY
+from .settings import (
+    UNSAFE_DEVELOPMENT_SECRET_KEY as DEVELOPMENT_SECRET_KEY,
+)
 from .settings_validation import (
     comma_list,
     environment_boolean,
