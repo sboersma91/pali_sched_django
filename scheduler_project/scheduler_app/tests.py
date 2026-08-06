@@ -2941,6 +2941,23 @@ class PublicShellPresentationTests(TestCase):
         self.assertNotContains(response, "Not signed in")
         self.assertNotContains(response, "Create Account")
 
+    def test_public_navbar_renders_external_links_before_account_menu(self):
+        response = self.client.get(reverse("home"))
+
+        tutorial_link = (
+            '<a class="nav-link" href="https://youtu.be/U0CUY034UYQ" '
+            'target="_blank" rel="noopener noreferrer">Tutorial</a>'
+        )
+        feedback_link = (
+            '<a class="nav-link" '
+            'href="https://docs.google.com/forms/d/e/1FAIpQLSf5jnV6fdFu4x_TDE_bGU-fAKUFmxrmCZ_MhqHTileayyM4OA/'
+            'viewform?usp=publish-editor" target="_blank" rel="noopener noreferrer">Give Feedback</a>'
+        )
+        self.assertContains(response, tutorial_link, html=True)
+        self.assertContains(response, feedback_link, html=True)
+        self.assertLess(response.content.index(b">Tutorial</a>"), response.content.index(b">Give Feedback</a>"))
+        self.assertLess(response.content.index(b">Give Feedback</a>"), response.content.index(b'id="accountMenu"'))
+
     def test_public_base_renders_default_and_page_specific_titles(self):
         home_response = self.client.get(reverse("home"))
         login_response = self.client.get(reverse("login"))
@@ -3405,6 +3422,23 @@ class OperationalNavigationTests(TestCase):
         for label, url in expected_links.items():
             with self.subTest(label=label):
                 self.assertContains(response, f'href="{url}">{label}</a>', html=False)
+
+    def test_operational_navbar_renders_external_links_before_account_menu(self):
+        response = self.client.get(reverse("home-paid"))
+
+        tutorial_link = (
+            '<a class="nav-link" href="https://youtu.be/U0CUY034UYQ" '
+            'target="_blank" rel="noopener noreferrer">Tutorial</a>'
+        )
+        feedback_link = (
+            '<a class="nav-link" '
+            'href="https://docs.google.com/forms/d/e/1FAIpQLSf5jnV6fdFu4x_TDE_bGU-fAKUFmxrmCZ_MhqHTileayyM4OA/'
+            'viewform?usp=publish-editor" target="_blank" rel="noopener noreferrer">Give Feedback</a>'
+        )
+        self.assertContains(response, tutorial_link, html=True)
+        self.assertContains(response, feedback_link, html=True)
+        self.assertLess(response.content.index(b">Tutorial</a>"), response.content.index(b">Give Feedback</a>"))
+        self.assertLess(response.content.index(b">Give Feedback</a>"), response.content.index(b'id="accountMenu"'))
 
     def test_operational_navbar_omits_placeholders_and_legacy_add_links(self):
         response = self.client.get(reverse("home-paid"))

@@ -11,6 +11,7 @@
             <a class="nav-link" href="{% url 'home-paid' %}">Open Dashboard</a>
           </li>
         {% endif %}
+        {% include 'sched_app_template/_external_nav_links.html' %}
         {% include 'sched_app_template/_account_indicator.html' %}
       </ul>
     </div>
